@@ -3,6 +3,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod dto;
 pub mod envelope;
 mod error;
 
