@@ -46,3 +46,24 @@ cargo run -p uniffi-bindgen -- generate --library target/debug/libgim_core.so --
 ```
 
 Kotlin package `im.g.gimcore`; Swift module `GIMCore` (FFI module `GIMCoreFFI`).
+
+## iOS packaging
+
+```sh
+bash scripts/generate-swift.sh      # Linux or macOS: out/swift (Swift sources, header, module.modulemap)
+bash scripts/build-xcframework.sh   # macOS + Xcode: out/ios/GIMCore.xcframework{,.zip,.zip.sha256}
+```
+
+See `bindings/apple/README.md` for the output layout. `out/` is never committed.
+
+## CI
+
+`.github/workflows/ci.yml`:
+
+- `rust` (every push, pull request, manual run): `cargo fmt --check`, `cargo clippy
+  --all-targets -- -D warnings`, `cargo test`, a `scripts/generate-swift.sh` smoke
+  run, and a check that `scripts/generate-bindings.sh` leaves the committed
+  bindings unchanged.
+- `xcframework` (pushes to `main` and manual runs, macOS): runs
+  `scripts/build-xcframework.sh` and uploads `gim-core-ios-<sha>` with the zip,
+  its checksum, the Swift sources and `GIM_CORE_VERSION`.
