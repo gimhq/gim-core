@@ -1,0 +1,8 @@
+[bindings.kotlin]
+package_name = "im.g.gimcore"
+cdylib_name = "gim_core"
+
+[bindings.swift]
+module_name = "GIMCore"
+ffi_module_name = "GIMCoreFFI"
+ffi_module_filename = "GIMCoreFFI"
