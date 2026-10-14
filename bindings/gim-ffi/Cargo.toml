@@ -12,4 +12,10 @@ crate-type = ["lib", "cdylib", "staticlib"]
 [dependencies]
 gim-common.workspace = true
 gim-crypto.workspace = true
-uniffi.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "time"] }
+uniffi = { workspace = true, features = ["tokio"] }
+url.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
