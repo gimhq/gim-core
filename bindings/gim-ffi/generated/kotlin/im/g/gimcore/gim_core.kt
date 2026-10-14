@@ -832,6 +832,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_chat_list(
     ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_chat_members(
+    ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_connection_state(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_create_direct_chat(
@@ -958,6 +960,8 @@ internal object UniffiLib {
     external fun uniffi_gim_core_fn_method_gimclient_cancel_send(`ptr`: Long,`chatId`: RustBuffer.ByValue,`messageId`: RustBuffer.ByValue,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_chat_list(`ptr`: Long,`listener`: Long,
+    ): Long
+    external fun uniffi_gim_core_fn_method_gimclient_chat_members(`ptr`: Long,`chatId`: RustBuffer.ByValue,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_connection_state(`ptr`: Long,`listener`: Long,
     ): Long
@@ -1208,6 +1212,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_chat_list() and 0xFFFF) != 14172) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_chat_members() and 0xFFFF) != 23360) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_connection_state() and 0xFFFF) != 25642) {
@@ -2476,6 +2483,12 @@ public interface GimClientInterface {
     suspend fun `chatList`(`listener`: ChatListListener): TaskHandle
     
     /**
+     * Current members of the chat, one entry per user (not per device),
+     * including the signed-in user.
+     */
+    suspend fun `chatMembers`(`chatId`: kotlin.String): List<UserProfile>
+    
+    /**
      * Subscribes to connection state changes.
      */
     suspend fun `connectionState`(`listener`: ConnectionStateListener): TaskHandle
@@ -2767,6 +2780,32 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
         { future -> UniffiLib.ffi_gim_core_rust_future_free_u64(future) },
         // lift function
         { FfiConverterTypeTaskHandle.lift(it) },
+        // Error FFI converter
+        GimException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Current members of the chat, one entry per user (not per device),
+     * including the signed-in user.
+     */
+    @Throws(GimException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `chatMembers`(`chatId`: kotlin.String) : List<UserProfile> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_gim_core_fn_method_gimclient_chat_members(
+                uniffiHandle,
+                
+        FfiConverterString.lower(`chatId`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_gim_core_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_gim_core_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeUserProfile.lift(it) },
         // Error FFI converter
         GimException.ErrorHandler,
     )
@@ -7412,6 +7451,34 @@ public object FfiConverterSequenceTypeReactionGroup: FfiConverterRustBuffer<List
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeReactionGroup.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeUserProfile: FfiConverterRustBuffer<List<UserProfile>> {
+    override fun read(buf: ByteBuffer): List<UserProfile> {
+        val len = buf.getInt()
+        return List<UserProfile>(len) {
+            FfiConverterTypeUserProfile.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<UserProfile>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeUserProfile.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<UserProfile>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeUserProfile.write(it, buf)
         }
     }
 }

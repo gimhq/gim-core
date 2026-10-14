@@ -159,6 +159,13 @@ impl GimClient {
         Err(GimError::NotImplemented)
     }
 
+    /// Current members of the chat, one entry per user (not per device),
+    /// including the signed-in user.
+    pub async fn chat_members(&self, chat_id: String) -> Result<Vec<UserProfile>, GimError> {
+        let _ = chat_id;
+        Err(GimError::NotImplemented)
+    }
+
     pub async fn leave_chat(&self, chat_id: String) -> Result<(), GimError> {
         let _ = chat_id;
         Err(GimError::NotImplemented)
