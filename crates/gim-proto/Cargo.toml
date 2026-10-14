@@ -6,4 +6,11 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+ciborium.workspace = true
 gim-common.workspace = true
+serde.workspace = true
+serde_bytes.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+ciborium.workspace = true
