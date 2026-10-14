@@ -131,6 +131,10 @@ mod tests {
             client.fetch_media(id(), id(), id()).await,
             Err(GimError::NotImplemented)
         );
+        assert_eq!(
+            client.chat_members(id()).await,
+            Err(GimError::NotImplemented)
+        );
         let timeline = client.timeline(id()).await.unwrap();
         assert_eq!(
             timeline.paginate_backwards(20).await,

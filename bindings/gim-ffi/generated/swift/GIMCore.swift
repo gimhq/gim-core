@@ -1037,6 +1037,12 @@ public protocol GimClientProtocol: AnyObject, Sendable {
     func chatList(listener: ChatListListener) async throws  -> TaskHandle
     
     /**
+     * Current members of the chat, one entry per user (not per device),
+     * including the signed-in user.
+     */
+    func chatMembers(chatId: String) async throws  -> [UserProfile]
+    
+    /**
      * Subscribes to connection state changes.
      */
     func connectionState(listener: ConnectionStateListener) async throws  -> TaskHandle
@@ -1257,6 +1263,26 @@ open func chatList(listener: ChatListListener)async throws  -> TaskHandle  {
             completeFunc: ffi_gim_core_rust_future_complete_u64,
             freeFunc: ffi_gim_core_rust_future_free_u64,
             liftFunc: FfiConverterTypeTaskHandle_lift,
+            errorHandler: FfiConverterTypeGimError_lift
+        )
+}
+    
+    /**
+     * Current members of the chat, one entry per user (not per device),
+     * including the signed-in user.
+     */
+open func chatMembers(chatId: String)async throws  -> [UserProfile]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_gim_core_fn_method_gimclient_chat_members(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(chatId)
+                )
+            },
+            pollFunc: ffi_gim_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_gim_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_gim_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeUserProfile.lift,
             errorHandler: FfiConverterTypeGimError_lift
         )
 }
@@ -4856,6 +4882,31 @@ fileprivate struct FfiConverterSequenceTypeReactionGroup: FfiConverterRustBuffer
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeUserProfile: FfiConverterRustBuffer {
+    typealias SwiftType = [UserProfile]
+
+    public static func write(_ value: [UserProfile], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeUserProfile.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UserProfile] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UserProfile]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeUserProfile.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeChatListDiff: FfiConverterRustBuffer {
     typealias SwiftType = [ChatListDiff]
 
@@ -5051,6 +5102,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_gimclient_chat_list() != 14172) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_gim_core_checksum_method_gimclient_chat_members() != 23360) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_gimclient_connection_state() != 25642) {
