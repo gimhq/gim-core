@@ -46,3 +46,52 @@ cargo run -p uniffi-bindgen -- generate --library target/debug/libgim_core.so --
 ```
 
 Kotlin package `im.g.gimcore`; Swift module `GIMCore` (FFI module `GIMCoreFFI`).
+
+## Envelope and media formats
+
+**Envelope** (`gim_proto::envelope`, carried inside MLS application messages):
+one CBOR map with short keys — `v` version (`1`), `id` message id, `ts` sent
+time in Unix ms, optional `re` reply-to id (text and media only), `c` content
+tagged by `t`: `text`, `media`, `edit`, `delete`, `reaction`, `receipt`
+(`delivered` | `read`), `typing`, `group_info`. Unknown keys are ignored;
+version 0, newer versions and unknown content tags are rejected. The full key
+table is in the module docs. `gim_crypto::{encrypt_envelope,
+decrypt_to_envelope}` wrap encoding plus MLS application encryption.
+
+**Media** (`gim_crypto::media`): chunked AES-256-GCM with a fresh random key
+per blob.
+
+```text
+header  = "GIM1" || chunk_size (u32 BE, default 65536) || nonce_prefix (8 random bytes)
+blob    = header || chunk_0 || ... || chunk_n
+chunk_i = AES-256-GCM(key, nonce = nonce_prefix || i (u32 BE),
+                      aad = header || last_flag (1 byte), plaintext_i) with 16-byte tag
+```
+
+All chunks but the last carry exactly `chunk_size` plaintext bytes; empty
+media is one empty final chunk. The key and the SHA-256 of the whole blob
+travel in the envelope's media map, never to gim-server. `encrypt_media` /
+`decrypt_media` work on buffers (digest checked in constant time before
+decrypting); `MediaEncryptor` / `MediaDecryptor` stream over
+`std::io::Read`/`Write`.
+
+## iOS packaging
+
+```sh
+bash scripts/generate-swift.sh      # Linux or macOS: out/swift (Swift sources, header, module.modulemap)
+bash scripts/build-xcframework.sh   # macOS + Xcode: out/ios/GIMCore.xcframework{,.zip,.zip.sha256}
+```
+
+See `bindings/apple/README.md` for the output layout. `out/` is never committed.
+
+## CI
+
+`.github/workflows/ci.yml`:
+
+- `rust` (every push, pull request, manual run): `cargo fmt --check`, `cargo clippy
+  --all-targets -- -D warnings`, `cargo test`, a `scripts/generate-swift.sh` smoke
+  run, and a check that `scripts/generate-bindings.sh` leaves the committed
+  bindings unchanged.
+- `xcframework` (pushes to `main` and manual runs, macOS): runs
+  `scripts/build-xcframework.sh` and uploads `gim-core-ios-<sha>` with the zip,
+  its checksum, the Swift sources and `GIM_CORE_VERSION`.
