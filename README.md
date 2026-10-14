@@ -95,3 +95,13 @@ See `bindings/apple/README.md` for the output layout. `out/` is never committed.
 - `xcframework` (pushes to `main` and manual runs, macOS): runs
   `scripts/build-xcframework.sh` and uploads `gim-core-ios-<sha>` with the zip,
   its checksum, the Swift sources and `GIM_CORE_VERSION`.
+
+## Android packaging
+
+```sh
+scripts/build-android.sh
+```
+
+Builds `libgim_core.so` for `arm64-v8a` and `x86_64` plus the Kotlin bindings
+into `out/android/` inside a Docker container; see
+[bindings/android/README.md](bindings/android/README.md).
