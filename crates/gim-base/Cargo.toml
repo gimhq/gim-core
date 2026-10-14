@@ -1,0 +1,11 @@
+[package]
+name = "gim-base"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gim-common.workspace = true
+gim-proto.workspace = true
+gim-crypto.workspace = true
