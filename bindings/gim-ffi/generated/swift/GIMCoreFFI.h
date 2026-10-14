@@ -420,6 +420,11 @@ uint64_t uniffi_gim_core_fn_method_gimclient_cancel_send(uint64_t ptr, RustBuffe
 uint64_t uniffi_gim_core_fn_method_gimclient_chat_list(uint64_t ptr, uint64_t listener
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_CHAT_MEMBERS
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_CHAT_MEMBERS
+uint64_t uniffi_gim_core_fn_method_gimclient_chat_members(uint64_t ptr, RustBuffer chat_id
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_CONNECTION_STATE
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_CONNECTION_STATE
 uint64_t uniffi_gim_core_fn_method_gimclient_connection_state(uint64_t ptr, uint64_t listener
@@ -997,6 +1002,12 @@ uint16_t uniffi_gim_core_checksum_method_gimclient_cancel_send(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_CHAT_LIST
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_CHAT_LIST
 uint16_t uniffi_gim_core_checksum_method_gimclient_chat_list(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_CHAT_MEMBERS
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_CHAT_MEMBERS
+uint16_t uniffi_gim_core_checksum_method_gimclient_chat_members(void
     
 );
 #endif

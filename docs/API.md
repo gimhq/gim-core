@@ -66,6 +66,7 @@ implementations fast and thread-safe.
 | `findUser(handle)` | `UserProfile?` | `null`/`nil` if no such user. |
 | `createDirectChat(userId)` | chat id | Returns the existing direct chat if there is one. |
 | `createGroupChat(name, memberUserIds)` | chat id | |
+| `chatMembers(chatId)` | `[UserProfile]` | Current members, one entry per user (not per device), including the signed-in user. No members listener in M1: re-query when a `ChatListDiff` touches that chat or a `TimelineItem.MembershipChange` arrives. |
 | `addMembers(chatId, userIds)`, `removeMember(chatId, userId)`, `leaveChat(chatId)` | | |
 | `setGroupInfo(chatId, name?, avatarFilePath?)` | | `null`/`nil` leaves a field unchanged. |
 | `sendText(chatId, body, replyTo?)` | message id | The message appears in the timeline immediately with `SendState.Pending`. |
