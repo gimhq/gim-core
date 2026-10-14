@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test
+      - name: Swift bindings smoke
+        run: bash scripts/generate-swift.sh
+      - name: Committed bindings in sync
+        run: |
+          bash scripts/generate-bindings.sh
+          git diff --exit-code -- bindings/gim-ffi/generated
+          untracked=$(git status --porcelain -- bindings/gim-ffi/generated)
+          if [ -n "$untracked" ]; then
+            echo "Generated bindings out of date:"
+            echo "$untracked"
+            exit 1
+          fi
+
+  xcframework:
+    needs: rust
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim, x86_64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+      - name: Build GIMCore.xcframework
+        run: bash scripts/build-xcframework.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gim-core-ios-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            out/ios/GIMCore.xcframework.zip
+            out/ios/GIMCore.xcframework.zip.sha256
+            out/ios/Sources/**
+            out/ios/GIM_CORE_VERSION
