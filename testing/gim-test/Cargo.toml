@@ -1,0 +1,10 @@
+[package]
+name = "gim-test"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gim-common.workspace = true
+thiserror.workspace = true
