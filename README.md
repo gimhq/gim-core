@@ -46,3 +46,13 @@ cargo run -p uniffi-bindgen -- generate --library target/debug/libgim_core.so --
 ```
 
 Kotlin package `im.g.gimcore`; Swift module `GIMCore` (FFI module `GIMCoreFFI`).
+
+## Android packaging
+
+```sh
+scripts/build-android.sh
+```
+
+Builds `libgim_core.so` for `arm64-v8a` and `x86_64` plus the Kotlin bindings
+into `out/android/` inside a Docker container; see
+[bindings/android/README.md](bindings/android/README.md).
