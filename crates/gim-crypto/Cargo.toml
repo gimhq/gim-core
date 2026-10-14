@@ -1,0 +1,18 @@
+[package]
+name = "gim-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gim-common.workspace = true
+openmls.workspace = true
+openmls_basic_credential.workspace = true
+openmls_memory_storage.workspace = true
+openmls_rust_crypto.workspace = true
+openmls_traits.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+gim-test.workspace = true
