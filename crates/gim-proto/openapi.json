@@ -1,0 +1,2186 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "gim-server",
+    "version": "0.1.0",
+    "description": "Mock delivery and authentication service for MLS (RFC 9420) end-to-end encrypted IM clients. The server stores and fans out opaque MLS messages and encrypted blobs and never sees plaintext or keys. JSON fields are snake_case, timestamps are integer milliseconds since the Unix epoch, binary values are standard base64. Every non-2xx JSON response has the shape `{\"error\":{\"code\",\"message\"}}`."
+  },
+  "tags": [
+    {
+      "name": "health"
+    },
+    {
+      "name": "devices"
+    },
+    {
+      "name": "directory"
+    },
+    {
+      "name": "keypackages"
+    },
+    {
+      "name": "groups"
+    },
+    {
+      "name": "messages"
+    },
+    {
+      "name": "events"
+    },
+    {
+      "name": "blobs"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Device token from POST /v1/devices"
+      }
+    },
+    "schemas": {
+      "Health": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "RegisterDeviceResponse": {
+        "type": "object",
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "description": "Opaque user ID",
+            "example": "u_3q2-7wZpQkSx5n1bX0yJ4A"
+          },
+          "device_id": {
+            "type": "string",
+            "description": "Opaque device ID",
+            "example": "d_V1c9sG0kq4m2T8xYbR7wLg"
+          },
+          "token": {
+            "type": "string",
+            "description": "Bearer token for this device. Returned once; store it securely."
+          },
+          "cursor": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Current head cursor; start the event stream from here"
+          }
+        },
+        "required": [
+          "user_id",
+          "device_id",
+          "token",
+          "cursor"
+        ]
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "description": "Machine-readable snake_case error code",
+                "example": "not_found"
+              },
+              "message": {
+                "type": "string",
+                "description": "Human-readable description"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ]
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "RegisterDeviceRequest": {
+        "type": "object",
+        "properties": {
+          "handle": {
+            "type": "string",
+            "pattern": "^[a-z0-9_]{3,32}$",
+            "description": "Unique user handle: 3-32 chars of a-z, 0-9, _",
+            "example": "alice"
+          },
+          "display_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "Display name (1-64 chars)",
+            "example": "Alice"
+          }
+        },
+        "required": [
+          "handle",
+          "display_name"
+        ]
+      },
+      "Me": {
+        "type": "object",
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "description": "Opaque user ID",
+            "example": "u_3q2-7wZpQkSx5n1bX0yJ4A"
+          },
+          "device_id": {
+            "type": "string",
+            "description": "Opaque device ID",
+            "example": "d_V1c9sG0kq4m2T8xYbR7wLg"
+          },
+          "handle": {
+            "type": "string",
+            "pattern": "^[a-z0-9_]{3,32}$",
+            "description": "Unique user handle: 3-32 chars of a-z, 0-9, _",
+            "example": "alice"
+          },
+          "display_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "Display name (1-64 chars)",
+            "example": "Alice"
+          }
+        },
+        "required": [
+          "user_id",
+          "device_id",
+          "handle",
+          "display_name"
+        ]
+      },
+      "User": {
+        "type": "object",
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "description": "Opaque user ID",
+            "example": "u_3q2-7wZpQkSx5n1bX0yJ4A"
+          },
+          "handle": {
+            "type": "string",
+            "pattern": "^[a-z0-9_]{3,32}$",
+            "description": "Unique user handle: 3-32 chars of a-z, 0-9, _",
+            "example": "alice"
+          },
+          "display_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "Display name (1-64 chars)",
+            "example": "Alice"
+          }
+        },
+        "required": [
+          "user_id",
+          "handle",
+          "display_name"
+        ]
+      },
+      "UserDevices": {
+        "type": "object",
+        "properties": {
+          "devices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Device"
+            }
+          }
+        },
+        "required": [
+          "devices"
+        ]
+      },
+      "Device": {
+        "type": "object",
+        "properties": {
+          "device_id": {
+            "type": "string",
+            "description": "Opaque device ID",
+            "example": "d_V1c9sG0kq4m2T8xYbR7wLg"
+          },
+          "created_at": {
+            "type": "integer",
+            "description": "Milliseconds since the Unix epoch",
+            "example": 1760479200000
+          }
+        },
+        "required": [
+          "device_id",
+          "created_at"
+        ]
+      },
+      "KeyPackageCount": {
+        "type": "object",
+        "properties": {
+          "available": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Unclaimed one-time key packages of the calling device"
+          },
+          "has_last_resort": {
+            "type": "boolean",
+            "description": "Whether the calling device has a last-resort key package"
+          }
+        },
+        "required": [
+          "available",
+          "has_last_resort"
+        ]
+      },
+      "UploadKeyPackagesRequest": {
+        "type": "object",
+        "properties": {
+          "key_packages": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "contentEncoding": "base64",
+              "description": "Serialized MLS KeyPackage (TLS encoding), base64"
+            },
+            "maxItems": 100,
+            "description": "One-time key packages to add (0-100)"
+          },
+          "last_resort": {
+            "type": "string",
+            "minLength": 1,
+            "contentEncoding": "base64",
+            "description": "Last-resort key package; replaces the device's previous one. Handed out only when no one-time package remains, and never consumed."
+          }
+        },
+        "required": [
+          "key_packages"
+        ]
+      },
+      "ClaimKeyPackagesResponse": {
+        "type": "object",
+        "properties": {
+          "key_packages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ClaimedKeyPackage"
+            }
+          },
+          "missing": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "description": "Opaque device ID",
+              "example": "d_V1c9sG0kq4m2T8xYbR7wLg"
+            },
+            "description": "Requested devices that are unknown or have no key package at all"
+          }
+        },
+        "required": [
+          "key_packages",
+          "missing"
+        ]
+      },
+      "ClaimedKeyPackage": {
+        "type": "object",
+        "properties": {
+          "device_id": {
+            "type": "string",
+            "description": "Opaque device ID",
+            "example": "d_V1c9sG0kq4m2T8xYbR7wLg"
+          },
+          "key_package": {
+            "type": "string",
+            "minLength": 1,
+            "contentEncoding": "base64",
+            "description": "Serialized MLS KeyPackage (TLS encoding), base64"
+          },
+          "last_resort": {
+            "type": "boolean",
+            "description": "True if this is the device's (reusable) last-resort package"
+          }
+        },
+        "required": [
+          "device_id",
+          "key_package",
+          "last_resort"
+        ]
+      },
+      "ClaimKeyPackagesRequest": {
+        "type": "object",
+        "properties": {
+          "device_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "description": "Opaque device ID",
+              "example": "d_V1c9sG0kq4m2T8xYbR7wLg"
+            },
+            "minItems": 1,
+            "maxItems": 100,
+            "uniqueItems": true,
+            "description": "Devices to claim one key package each for (1-100, unique)"
+          }
+        },
+        "required": [
+          "device_ids"
+        ]
+      },
+      "Group": {
+        "type": "object",
+        "properties": {
+          "group_id": {
+            "type": "string",
+            "description": "Opaque group ID",
+            "example": "g_Zp8nA2vQe5rK1yW6tH3uJw"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/GroupKind"
+          },
+          "epoch": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Current MLS epoch as tracked by the delivery service (advanced by accepted commits)"
+          },
+          "created_by_device_id": {
+            "type": "string",
+            "description": "Opaque device ID",
+            "example": "d_V1c9sG0kq4m2T8xYbR7wLg"
+          },
+          "created_at": {
+            "type": "integer",
+            "description": "Milliseconds since the Unix epoch",
+            "example": 1760479200000
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GroupMember"
+            },
+            "description": "Member devices (delivery-service view of the roster)"
+          }
+        },
+        "required": [
+          "group_id",
+          "kind",
+          "epoch",
+          "created_by_device_id",
+          "created_at",
+          "members"
+        ]
+      },
+      "GroupKind": {
+        "type": "string",
+        "enum": [
+          "direct",
+          "group"
+        ]
+      },
+      "GroupMember": {
+        "type": "object",
+        "properties": {
+          "device_id": {
+            "type": "string",
+            "description": "Opaque device ID",
+            "example": "d_V1c9sG0kq4m2T8xYbR7wLg"
+          },
+          "user_id": {
+            "type": "string",
+            "description": "Opaque user ID",
+            "example": "u_3q2-7wZpQkSx5n1bX0yJ4A"
+          }
+        },
+        "required": [
+          "device_id",
+          "user_id"
+        ]
+      },
+      "CreateGroupRequest": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/GroupKind"
+          },
+          "member_device_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "description": "Opaque device ID",
+              "example": "d_V1c9sG0kq4m2T8xYbR7wLg"
+            },
+            "maxItems": 500,
+            "description": "Other devices to add (0-500). The calling device is always a member. Unknown devices fail with 400."
+          }
+        },
+        "required": [
+          "kind",
+          "member_device_ids"
+        ]
+      },
+      "GroupList": {
+        "type": "object",
+        "properties": {
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Group"
+            }
+          }
+        },
+        "required": [
+          "groups"
+        ]
+      },
+      "AddMembersRequest": {
+        "type": "object",
+        "properties": {
+          "device_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "description": "Opaque device ID",
+              "example": "d_V1c9sG0kq4m2T8xYbR7wLg"
+            },
+            "minItems": 1,
+            "maxItems": 500,
+            "description": "Devices to add (1-500). Unknown devices fail with 400."
+          }
+        },
+        "required": [
+          "device_ids"
+        ]
+      },
+      "Message": {
+        "type": "object",
+        "properties": {
+          "group_id": {
+            "type": "string",
+            "description": "Opaque group ID",
+            "example": "g_Zp8nA2vQe5rK1yW6tH3uJw"
+          },
+          "seq": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Per-group sequence number assigned by the server, starting at 1"
+          },
+          "sender_device_id": {
+            "type": "string",
+            "description": "Opaque device ID",
+            "example": "d_V1c9sG0kq4m2T8xYbR7wLg"
+          },
+          "sender_user_id": {
+            "type": "string",
+            "description": "Opaque user ID",
+            "example": "u_3q2-7wZpQkSx5n1bX0yJ4A"
+          },
+          "client_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "Sender-chosen idempotency key, unique per sending device and group (1-64 chars)",
+            "example": "9f1c2a7e-0b44-4d0e-9a51-3c8f1e2d6b70"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/MessageKind"
+          },
+          "epoch": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "MLS epoch the message belongs to"
+          },
+          "payload": {
+            "type": "string",
+            "contentEncoding": "base64",
+            "description": "Opaque MLS message bytes (MLSMessage / Welcome), base64. Never inspected by the server."
+          },
+          "recipients": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "description": "Opaque device ID",
+              "example": "d_V1c9sG0kq4m2T8xYbR7wLg"
+            },
+            "minItems": 1,
+            "maxItems": 500,
+            "description": "Welcome only: the devices the welcome is addressed to (1-500)"
+          },
+          "created_at": {
+            "type": "integer",
+            "description": "Milliseconds since the Unix epoch",
+            "example": 1760479200000
+          }
+        },
+        "required": [
+          "group_id",
+          "seq",
+          "sender_device_id",
+          "sender_user_id",
+          "client_id",
+          "kind",
+          "epoch",
+          "payload",
+          "created_at"
+        ]
+      },
+      "MessageKind": {
+        "type": "string",
+        "enum": [
+          "commit",
+          "welcome",
+          "application"
+        ]
+      },
+      "StaleEpochError": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Error"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "current_epoch": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "The group's current epoch"
+              }
+            },
+            "required": [
+              "current_epoch"
+            ]
+          }
+        ]
+      },
+      "SendMessageRequest": {
+        "type": "object",
+        "properties": {
+          "client_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "Sender-chosen idempotency key, unique per sending device and group (1-64 chars)",
+            "example": "9f1c2a7e-0b44-4d0e-9a51-3c8f1e2d6b70"
+          },
+          "epoch": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "MLS epoch the message belongs to"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/MessageKind"
+          },
+          "payload": {
+            "type": "string",
+            "contentEncoding": "base64",
+            "description": "Opaque MLS message bytes (MLSMessage / Welcome), base64. Never inspected by the server."
+          },
+          "recipients": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "description": "Opaque device ID",
+              "example": "d_V1c9sG0kq4m2T8xYbR7wLg"
+            },
+            "minItems": 1,
+            "maxItems": 500,
+            "description": "Required for `welcome`, rejected (400) for other kinds"
+          }
+        },
+        "required": [
+          "client_id",
+          "epoch",
+          "kind",
+          "payload"
+        ]
+      },
+      "MessageList": {
+        "type": "object",
+        "properties": {
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            }
+          },
+          "has_more": {
+            "type": "boolean",
+            "description": "True if more messages exist after the last returned one"
+          }
+        },
+        "required": [
+          "messages",
+          "has_more"
+        ]
+      },
+      "EventList": {
+        "type": "object",
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            }
+          },
+          "next_cursor": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Pass as `cursor` in the next request (unchanged if no events were returned)"
+          }
+        },
+        "required": [
+          "events",
+          "next_cursor"
+        ]
+      },
+      "Event": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/MessageEvent"
+          },
+          {
+            "$ref": "#/components/schemas/MemberAddedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/MemberRemovedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/KeyPackagesLowEvent"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "type",
+          "mapping": {
+            "message": "#/components/schemas/MessageEvent",
+            "group.member_added": "#/components/schemas/MemberAddedEvent",
+            "group.member_removed": "#/components/schemas/MemberRemovedEvent",
+            "keypackages.low": "#/components/schemas/KeyPackagesLowEvent"
+          }
+        },
+        "description": "An entry of the calling device's event stream, ordered by `cursor`"
+      },
+      "MessageEvent": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Global event cursor (event ID)"
+          },
+          "created_at": {
+            "type": "integer",
+            "description": "Milliseconds since the Unix epoch",
+            "example": 1760479200000
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "message"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/Message"
+          }
+        },
+        "required": [
+          "cursor",
+          "created_at",
+          "type",
+          "data"
+        ]
+      },
+      "MemberAddedEvent": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Global event cursor (event ID)"
+          },
+          "created_at": {
+            "type": "integer",
+            "description": "Milliseconds since the Unix epoch",
+            "example": 1760479200000
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "group.member_added"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/MembershipChange"
+          }
+        },
+        "required": [
+          "cursor",
+          "created_at",
+          "type",
+          "data"
+        ]
+      },
+      "MembershipChange": {
+        "type": "object",
+        "properties": {
+          "group_id": {
+            "type": "string",
+            "description": "Opaque group ID",
+            "example": "g_Zp8nA2vQe5rK1yW6tH3uJw"
+          },
+          "device_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "description": "Opaque device ID",
+              "example": "d_V1c9sG0kq4m2T8xYbR7wLg"
+            }
+          },
+          "by_device_id": {
+            "type": "string",
+            "description": "Opaque device ID",
+            "example": "d_V1c9sG0kq4m2T8xYbR7wLg"
+          }
+        },
+        "required": [
+          "group_id",
+          "device_ids",
+          "by_device_id"
+        ]
+      },
+      "MemberRemovedEvent": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Global event cursor (event ID)"
+          },
+          "created_at": {
+            "type": "integer",
+            "description": "Milliseconds since the Unix epoch",
+            "example": 1760479200000
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "group.member_removed"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/MembershipChange"
+          }
+        },
+        "required": [
+          "cursor",
+          "created_at",
+          "type",
+          "data"
+        ]
+      },
+      "KeyPackagesLowEvent": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Global event cursor (event ID)"
+          },
+          "created_at": {
+            "type": "integer",
+            "description": "Milliseconds since the Unix epoch",
+            "example": 1760479200000
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "keypackages.low"
+            ]
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "available": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Remaining one-time key packages of the receiving device"
+              }
+            },
+            "required": [
+              "available"
+            ]
+          }
+        },
+        "required": [
+          "cursor",
+          "created_at",
+          "type",
+          "data"
+        ]
+      },
+      "CursorExpiredError": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Error"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "cursor": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Current head cursor; resync state, then continue from here"
+              }
+            },
+            "required": [
+              "cursor"
+            ]
+          }
+        ]
+      },
+      "BlobCreated": {
+        "type": "object",
+        "properties": {
+          "blob_id": {
+            "type": "string",
+            "description": "Opaque blob ID",
+            "example": "b_Hk4dN7sL2pX9cV0mB5qT1g"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Stored size in bytes"
+          }
+        },
+        "required": [
+          "blob_id",
+          "size"
+        ]
+      }
+    },
+    "parameters": {}
+  },
+  "paths": {
+    "/healthz": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Liveness probe",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Service is up",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/devices": {
+      "post": {
+        "tags": [
+          "devices"
+        ],
+        "summary": "Register a device (mock sign-in)",
+        "description": "Creates a device and its bearer token. If the handle does not exist a new user is created; otherwise the device is added to the existing user and `display_name` is ignored. No credentials are checked (mock authentication).",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterDeviceRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Device registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegisterDeviceResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/me": {
+      "get": {
+        "tags": [
+          "devices"
+        ],
+        "summary": "Get the calling user and device",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Caller identity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Me"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/users": {
+      "get": {
+        "tags": [
+          "directory"
+        ],
+        "summary": "Look up a user by handle",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9_]{3,32}$",
+              "description": "Unique user handle: 3-32 chars of a-z, 0-9, _",
+              "example": "alice"
+            },
+            "required": true,
+            "description": "Unique user handle: 3-32 chars of a-z, 0-9, _",
+            "name": "handle",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/users/{user_id}": {
+      "get": {
+        "tags": [
+          "directory"
+        ],
+        "summary": "Get a user",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Opaque user ID",
+              "example": "u_3q2-7wZpQkSx5n1bX0yJ4A"
+            },
+            "required": true,
+            "description": "Opaque user ID",
+            "name": "user_id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/users/{user_id}/devices": {
+      "get": {
+        "tags": [
+          "directory"
+        ],
+        "summary": "List a user's devices",
+        "description": "Every device of the user, ordered by `created_at`. Each device is an MLS group member in its own right.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Opaque user ID",
+              "example": "u_3q2-7wZpQkSx5n1bX0yJ4A"
+            },
+            "required": true,
+            "description": "Opaque user ID",
+            "name": "user_id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The user's devices",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserDevices"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/keypackages": {
+      "post": {
+        "tags": [
+          "keypackages"
+        ],
+        "summary": "Upload key packages for the calling device",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UploadKeyPackagesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Key package counts after the upload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeyPackageCount"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/keypackages/count": {
+      "get": {
+        "tags": [
+          "keypackages"
+        ],
+        "summary": "Count the calling device's key packages",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Key package counts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeyPackageCount"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/keypackages/claim": {
+      "post": {
+        "tags": [
+          "keypackages"
+        ],
+        "summary": "Claim one key package per device",
+        "description": "Atomically removes and returns one one-time key package per requested device, falling back to the device's last-resort package (not removed). Emits `keypackages.low` to a device whose one-time count drops below the threshold.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClaimKeyPackagesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Claimed key packages",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClaimKeyPackagesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/groups": {
+      "post": {
+        "tags": [
+          "groups"
+        ],
+        "summary": "Create a group",
+        "description": "Creates a group at epoch 0 with the calling device as creator and member.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateGroupRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Group created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Group"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "groups"
+        ],
+        "summary": "List groups the calling device is a member of",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Groups",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/groups/{group_id}": {
+      "get": {
+        "tags": [
+          "groups"
+        ],
+        "summary": "Get a group",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Opaque group ID",
+              "example": "g_Zp8nA2vQe5rK1yW6tH3uJw"
+            },
+            "required": true,
+            "description": "Opaque group ID",
+            "name": "group_id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Group"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not a member of the group (`not_member`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/groups/{group_id}/members": {
+      "post": {
+        "tags": [
+          "groups"
+        ],
+        "summary": "Add member devices",
+        "description": "Adds devices to the roster (already-present devices are ignored) and emits `group.member_added` to all members.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Opaque group ID",
+              "example": "g_Zp8nA2vQe5rK1yW6tH3uJw"
+            },
+            "required": true,
+            "description": "Opaque group ID",
+            "name": "group_id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddMembersRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Group"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not a member of the group (`not_member`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/groups/{group_id}/members/{device_id}": {
+      "delete": {
+        "tags": [
+          "groups"
+        ],
+        "summary": "Remove a member device",
+        "description": "Removes a device from the roster (a device may remove itself to leave) and emits `group.member_removed` to the previous members.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Opaque group ID",
+              "example": "g_Zp8nA2vQe5rK1yW6tH3uJw"
+            },
+            "required": true,
+            "description": "Opaque group ID",
+            "name": "group_id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Opaque device ID",
+              "example": "d_V1c9sG0kq4m2T8xYbR7wLg"
+            },
+            "required": true,
+            "description": "Opaque device ID",
+            "name": "device_id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Updated group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Group"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not a member of the group (`not_member`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/groups/{group_id}/messages": {
+      "post": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "Send a message to a group",
+        "description": "Stores the opaque MLS message, assigns the next `seq`, and emits a `message` event: `welcome` messages to their `recipients`, other kinds to every member device except the sender.\n\nA `commit` must carry the group's current epoch, otherwise 409 `stale_epoch` (with `current_epoch`); an accepted commit advances the group epoch to `epoch + 1`.\n\nResending the same `client_id` from the same device returns the stored message with 200 and emits nothing. A decoded payload larger than the server limit (default 262144 bytes) fails with 413.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Opaque group ID",
+              "example": "g_Zp8nA2vQe5rK1yW6tH3uJw"
+            },
+            "required": true,
+            "description": "Opaque group ID",
+            "name": "group_id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendMessageRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Idempotent replay: the message stored earlier for this client_id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Message"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Message stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Message"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not a member of the group (`not_member`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Commit epoch does not match the group epoch (`stale_epoch`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StaleEpochError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload too large (`payload_too_large`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "List group messages",
+        "description": "Messages with `seq > after_seq`, ascending. Welcome messages are only visible to their sender and recipients.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Opaque group ID",
+              "example": "g_Zp8nA2vQe5rK1yW6tH3uJw"
+            },
+            "required": true,
+            "description": "Opaque group ID",
+            "name": "group_id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "description": "Return messages after this seq"
+            },
+            "required": false,
+            "description": "Return messages after this seq",
+            "name": "after_seq",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100,
+              "description": "Maximum number of messages (1-500)"
+            },
+            "required": false,
+            "description": "Maximum number of messages (1-500)",
+            "name": "limit",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Messages",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not a member of the group (`not_member`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Fetch events (optionally long-polling)",
+        "description": "Returns events addressed to the calling device with `cursor` greater than the given one, ascending. With `wait > 0` and no pending events the request is held open up to `wait` seconds until an event arrives.\n\nIf events after `cursor` have been pruned the server responds 410 `cursor_expired` with the current head `cursor`; the client must resync its groups (GET /v1/groups, message history) and continue from that cursor.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "description": "Last cursor the client has processed"
+            },
+            "required": false,
+            "description": "Last cursor the client has processed",
+            "name": "cursor",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 30,
+              "default": 0,
+              "description": "Long-poll timeout in seconds (0-30)"
+            },
+            "required": false,
+            "description": "Long-poll timeout in seconds (0-30)",
+            "name": "wait",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100,
+              "description": "Maximum number of events (1-500)"
+            },
+            "required": false,
+            "description": "Maximum number of events (1-500)",
+            "name": "limit",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Events",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Cursor is older than the retention window (`cursor_expired`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CursorExpiredError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/stream": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Event stream (WebSocket)",
+        "description": "WebSocket upgrade delivering the same events as GET /v1/events in real time. Authenticate with `Authorization: Bearer <token>` or, where headers cannot be set, `?token=`.\n\nAfter the upgrade the server first replays every event after `cursor`, then pushes new ones. Server-to-client frames are JSON text frames:\n\n- `{\"type\":\"event\",\"event\":Event}` — one per event, ascending `cursor`.\n- `{\"type\":\"error\",\"error\":{\"code\":\"cursor_expired\",\"message\":\"...\"},\"cursor\":<head cursor>}` — sent when `cursor` is older than the retention window, followed by close code 4410. Resync, then reconnect with the given cursor.\n\nAn invalid or missing token closes the connection with code 4401. Client-to-server frames are ignored.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "description": "Last cursor the client has processed"
+            },
+            "required": false,
+            "description": "Last cursor the client has processed",
+            "name": "cursor",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Bearer token (alternative to the Authorization header)"
+            },
+            "required": false,
+            "description": "Bearer token (alternative to the Authorization header)",
+            "name": "token",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "Switching Protocols; frames as described above"
+          },
+          "400": {
+            "description": "Validation failed (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/blobs": {
+      "post": {
+        "tags": [
+          "blobs"
+        ],
+        "summary": "Upload an encrypted blob",
+        "description": "Stores the request body verbatim. The client encrypts before upload and shares the blob ID and key inside MLS messages. Bodies larger than the server limit (default 104857600 bytes) fail with 413.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "description": "Raw encrypted bytes"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Blob stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlobCreated"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload too large (`payload_too_large`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/blobs/{blob_id}": {
+      "get": {
+        "tags": [
+          "blobs"
+        ],
+        "summary": "Download an encrypted blob",
+        "description": "Supports a single byte range (`Range: bytes=a-b`, `bytes=a-`, or `bytes=-n`).",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Opaque blob ID",
+              "example": "b_Hk4dN7sL2pX9cV0mB5qT1g"
+            },
+            "required": true,
+            "description": "Opaque blob ID",
+            "name": "blob_id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Single byte range",
+              "example": "bytes=0-1023"
+            },
+            "required": false,
+            "description": "Single byte range",
+            "name": "range",
+            "in": "header"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Whole blob",
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string",
+                  "example": "bytes"
+                }
+              },
+              "Content-Length": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary",
+                  "description": "Raw encrypted bytes"
+                }
+              }
+            }
+          },
+          "206": {
+            "description": "Requested byte range",
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string",
+                  "example": "bytes"
+                }
+              },
+              "Content-Range": {
+                "schema": {
+                  "type": "string",
+                  "example": "bytes 0-1023/4096"
+                }
+              },
+              "Content-Length": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary",
+                  "description": "Raw encrypted bytes"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "416": {
+            "description": "Range not satisfiable (`range_not_satisfiable`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "webhooks": {}
+}
