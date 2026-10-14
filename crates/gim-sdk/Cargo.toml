@@ -1,0 +1,11 @@
+[package]
+name = "gim-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gim-base.workspace = true
+gim-crypto.workspace = true
+gim-proto.workspace = true

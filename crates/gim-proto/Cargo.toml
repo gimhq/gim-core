@@ -1,0 +1,9 @@
+[package]
+name = "gim-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gim-common.workspace = true
