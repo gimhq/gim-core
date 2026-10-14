@@ -74,3 +74,34 @@ travel in the envelope's media map, never to gim-server. `encrypt_media` /
 `decrypt_media` work on buffers (digest checked in constant time before
 decrypting); `MediaEncryptor` / `MediaDecryptor` stream over
 `std::io::Read`/`Write`.
+
+## iOS packaging
+
+```sh
+bash scripts/generate-swift.sh      # Linux or macOS: out/swift (Swift sources, header, module.modulemap)
+bash scripts/build-xcframework.sh   # macOS + Xcode: out/ios/GIMCore.xcframework{,.zip,.zip.sha256}
+```
+
+See `bindings/apple/README.md` for the output layout. `out/` is never committed.
+
+## CI
+
+`.github/workflows/ci.yml`:
+
+- `rust` (every push, pull request, manual run): `cargo fmt --check`, `cargo clippy
+  --all-targets -- -D warnings`, `cargo test`, a `scripts/generate-swift.sh` smoke
+  run, and a check that `scripts/generate-bindings.sh` leaves the committed
+  bindings unchanged.
+- `xcframework` (pushes to `main` and manual runs, macOS): runs
+  `scripts/build-xcframework.sh` and uploads `gim-core-ios-<sha>` with the zip,
+  its checksum, the Swift sources and `GIM_CORE_VERSION`.
+
+## Android packaging
+
+```sh
+scripts/build-android.sh
+```
+
+Builds `libgim_core.so` for `arm64-v8a` and `x86_64` plus the Kotlin bindings
+into `out/android/` inside a Docker container; see
+[bindings/android/README.md](bindings/android/README.md).
