@@ -29,9 +29,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn unhex(value: &Value) -> Vec<u8> {
-    HEXLOWER
-        .decode(value.as_str().unwrap().as_bytes())
-        .unwrap()
+    HEXLOWER.decode(value.as_str().unwrap().as_bytes()).unwrap()
 }
 
 fn cbor(value: &Cbor) -> Vec<u8> {
@@ -176,7 +174,10 @@ fn vectors_match() {
         serde_json::from_str(&std::fs::read_to_string(IDENTITY_PATH).unwrap()).unwrap();
     assert_eq!(file["root_pubkey"], identity["root_pubkey"]);
     assert_eq!(file["user_id"], identity["user_id"]);
-    assert_eq!(file["valid"][0]["device_list"], identity["device_list"]["signed"]);
+    assert_eq!(
+        file["valid"][0]["device_list"],
+        identity["device_list"]["signed"]
+    );
 
     // The committed bytes validate on their own.
     for case in file["valid"].as_array().unwrap() {

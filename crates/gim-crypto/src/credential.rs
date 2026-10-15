@@ -115,8 +115,7 @@ impl GimCredential {
     /// one. Does not verify the certificate (see [`GimCredential::verify`]).
     pub fn decode(bytes: &[u8]) -> Result<Self, CredentialError> {
         let malformed = |reason: &str| CredentialError::MalformedContent(reason.into());
-        let value: Value =
-            ciborium::from_reader(bytes).map_err(|e| malformed(&e.to_string()))?;
+        let value: Value = ciborium::from_reader(bytes).map_err(|e| malformed(&e.to_string()))?;
         if encode_cbor(&value) != bytes {
             return Err(CredentialError::NonCanonicalCbor);
         }
