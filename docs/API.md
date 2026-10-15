@@ -76,6 +76,27 @@ user's signed DeviceList. Handles are optional directory entries pointing at a u
   on a bundle that does not verify; a `LinkSession` accepts one bundle, so start a new one. If
   the old device approved but the link was abandoned, revoke the new device with
   `revokeDevice(approval.deviceId())`. See `docs/identity.md`, "Device link flow".
+- **Retrying onboarding**: a failed `createIdentity`, `restoreFromRecovery` or `waitLink` never
+  blocks a retry; no `signOut()` or new client is needed. Each of them first records in the
+  keystore that an enrollment is in progress (`gim.enrollment.v1`), and only removes that record
+  once every step succeeded (`createIdentity`: DeviceList upload, sign-in, recovery backup,
+  KeyPackages, self group; `restoreFromRecovery`: the same without the backup; `waitLink`: the
+  same without backup and self group). On failure, the call deletes what the attempt stored (root
+  and device key, session, local database contents) before returning the error; if the process
+  dies first, the next `createClient` (its session restore) or onboarding call does it. A
+  completed identity is never discarded this way: onboarding calls fail with `InvalidInput`
+  (already logged in) once one exists, until `signOut()`.
+  - `createIdentity`: call it again; it creates a new user (new user id and recovery code, show
+    only the code of the call that succeeded). What the failed attempt uploaded belongs to a user
+    nobody holds the root key of.
+  - `restoreFromRecovery`: call it again with the same arguments. It uses a new device key; if
+    the failed attempt's device made it into the hub's DeviceList, the new list revokes it.
+  - `waitLink`: if no bundle arrived (network error, timeout), call it again with the same
+    `LinkSession`. If it failed after the bundle arrived, the session is used up: start a new link
+    (new QR code) and approve it on the old device again; the old device should reject the first
+    approval with `confirmApproval(firstApproval, false)`, which revokes the device of the failed
+    attempt (it stays listed otherwise; `revokeDevice` works too). The new device shows the QR
+    code again; the old device shows a second SAS for the new offer.
 - **Restore** after losing every device: `restoreFromRecovery(userId, recoveryCode,
   revokeOthers)` on a fresh client. It reads the user's current DeviceList from the hub (a public
   read, no session needed), verifies it against the recovered root key and publishes the next one

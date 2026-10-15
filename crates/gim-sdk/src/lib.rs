@@ -32,8 +32,9 @@ pub mod testing;
 pub mod transport;
 
 pub use client::{
-    Client, ClientBuilder, Session, COMMIT_POST_ATTEMPTS, DEVICE_KEY_SECRET_KEY, KEY_PACKAGE_BATCH,
-    MAX_COMMIT_RETRIES, ROOT_KEY_SECRET_KEY, SESSION_SECRET_KEY,
+    Client, ClientBuilder, Session, COMMIT_POST_ATTEMPTS, DEVICE_KEY_SECRET_KEY,
+    ENROLLMENT_SECRET_KEY, KEY_PACKAGE_BATCH, MAX_COMMIT_RETRIES, ROOT_KEY_SECRET_KEY,
+    SESSION_SECRET_KEY,
 };
 pub use error::{ClientError, Result};
 pub use gim_identity::recovery::RecoveryCode;

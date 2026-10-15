@@ -1090,6 +1090,10 @@ public protocol GimClientProtocol: AnyObject, Sendable {
      * its signed DeviceList, recovery backup and KeyPackages to the hub,
      * signs in and persists the session. Returns the recovery code, which
      * is not stored and must be shown to the user once.
+     *
+     * On failure nothing of the attempt is kept: call it again (it creates
+     * a new user), also after the app restarted. `InvalidInput` once an
+     * identity exists.
      */
     func createIdentity(displayName: String) async throws  -> String
     
@@ -1155,6 +1159,10 @@ public protocol GimClientProtocol: AnyObject, Sendable {
      * it they all stay active. Fails with `NotFound` if the hub has no
      * DeviceList of the user, and with `RetryLater` while the hub keeps
      * throttling the read.
+     *
+     * On failure nothing of the attempt is kept: call it again, also after
+     * the app restarted. If the failed attempt's device was published, the
+     * retry revokes it.
      */
     func restoreFromRecovery(userId: String, recoveryCode: String, revokeOthers: Bool) async throws 
     
@@ -1269,6 +1277,12 @@ public protocol GimClientProtocol: AnyObject, Sendable {
      * the link, then signs in as a new device of that user. Returns the
      * SAS to compare with the one the old device shows; finish with
      * `confirm_link`.
+     *
+     * If no bundle arrived (network error, timeout), call it again with
+     * the same `link`. A failure after the bundle arrived keeps nothing of
+     * the attempt and uses `link` up: start a new link and approve it on
+     * the old device again (rejecting the first approval there revokes the
+     * failed attempt's device).
      */
     func waitLink(link: LinkSession) async throws  -> String
     
@@ -1549,6 +1563,10 @@ open func createGroupChat(name: String, memberUserIds: [String])async throws  ->
      * its signed DeviceList, recovery backup and KeyPackages to the hub,
      * signs in and persists the session. Returns the recovery code, which
      * is not stored and must be shown to the user once.
+     *
+     * On failure nothing of the attempt is kept: call it again (it creates
+     * a new user), also after the app restarted. `InvalidInput` once an
+     * identity exists.
      */
 open func createIdentity(displayName: String)async throws  -> String  {
     return
@@ -1789,6 +1807,10 @@ open func removeMember(chatId: String, userId: String)async throws   {
      * it they all stay active. Fails with `NotFound` if the hub has no
      * DeviceList of the user, and with `RetryLater` while the hub keeps
      * throttling the read.
+     *
+     * On failure nothing of the attempt is kept: call it again, also after
+     * the app restarted. If the failed attempt's device was published, the
+     * retry revokes it.
      */
 open func restoreFromRecovery(userId: String, recoveryCode: String, revokeOthers: Bool)async throws   {
     return
@@ -2163,6 +2185,12 @@ open func userId() -> String?  {
      * the link, then signs in as a new device of that user. Returns the
      * SAS to compare with the one the old device shows; finish with
      * `confirm_link`.
+     *
+     * If no bundle arrived (network error, timeout), call it again with
+     * the same `link`. A failure after the bundle arrived keeps nothing of
+     * the attempt and uses `link` up: start a new link and approve it on
+     * the old device again (rejecting the first approval there revokes the
+     * failed attempt's device).
      */
 open func waitLink(link: LinkSession)async throws  -> String  {
     return
@@ -5967,7 +5995,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_gim_core_checksum_method_gimclient_create_group_chat() != 10041) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_gim_core_checksum_method_gimclient_create_identity() != 62810) {
+    if (uniffi_gim_core_checksum_method_gimclient_create_identity() != 56233) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_gimclient_delete_message() != 40750) {
@@ -6006,7 +6034,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_gim_core_checksum_method_gimclient_remove_member() != 31958) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_gim_core_checksum_method_gimclient_restore_from_recovery() != 56825) {
+    if (uniffi_gim_core_checksum_method_gimclient_restore_from_recovery() != 59727) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_gimclient_retry_send() != 31098) {
@@ -6066,7 +6094,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_gim_core_checksum_method_gimclient_user_id() != 19625) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_gim_core_checksum_method_gimclient_wait_link() != 24066) {
+    if (uniffi_gim_core_checksum_method_gimclient_wait_link() != 17553) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_typinglistener_on_update() != 51337) {

@@ -364,6 +364,10 @@ impl GimClient {
     /// its signed DeviceList, recovery backup and KeyPackages to the hub,
     /// signs in and persists the session. Returns the recovery code, which
     /// is not stored and must be shown to the user once.
+    ///
+    /// On failure nothing of the attempt is kept: call it again (it creates
+    /// a new user), also after the app restarted. `InvalidInput` once an
+    /// identity exists.
     pub async fn create_identity(&self, display_name: String) -> Result<String, GimError> {
         let code = self.sdk()?.create_identity(&display_name).await?;
         Ok(code.to_string())
@@ -379,6 +383,10 @@ impl GimClient {
     /// it they all stay active. Fails with `NotFound` if the hub has no
     /// DeviceList of the user, and with `RetryLater` while the hub keeps
     /// throttling the read.
+    ///
+    /// On failure nothing of the attempt is kept: call it again, also after
+    /// the app restarted. If the failed attempt's device was published, the
+    /// retry revokes it.
     pub async fn restore_from_recovery(
         &self,
         user_id: String,
@@ -407,6 +415,12 @@ impl GimClient {
     /// the link, then signs in as a new device of that user. Returns the
     /// SAS to compare with the one the old device shows; finish with
     /// `confirm_link`.
+    ///
+    /// If no bundle arrived (network error, timeout), call it again with
+    /// the same `link`. A failure after the bundle arrived keeps nothing of
+    /// the attempt and uses `link` up: start a new link and approve it on
+    /// the old device again (rejecting the first approval there revokes the
+    /// failed attempt's device).
     pub async fn wait_link(&self, link: Arc<LinkSession>) -> Result<String, GimError> {
         let linked = self.sdk()?.wait_link(&link.0).await?;
         Ok(linked.sas.to_string())

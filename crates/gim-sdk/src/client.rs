@@ -50,6 +50,15 @@ pub const ROOT_KEY_SECRET_KEY: &str = "gim.root_key.v1";
 /// [`SecretStorage`] key of this device's signing key (32-byte Ed25519
 /// seed).
 pub const DEVICE_KEY_SECRET_KEY: &str = "gim.device_key.v1";
+/// [`SecretStorage`] key of the device an unfinished enrollment (identity
+/// creation, recovery restore or device link) is enrolling, as JSON
+/// [`DeviceRef`]. Written before anything of the enrollment is stored or
+/// uploaded, deleted once it completed. While it is present, the stored
+/// keys, session and local state belong to the unfinished enrollment: a
+/// failed onboarding call, [`Client::restore_session`] and the next
+/// onboarding call discard them. It stays after a discard, naming the
+/// discarded device, until the next enrollment replaces it.
+pub const ENROLLMENT_SECRET_KEY: &str = "gim.enrollment.v1";
 
 /// See [`ClientBuilder::DB_KEY_LEN`].
 const DATABASE_KEY_LEN: usize = 32;
@@ -379,7 +388,9 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Restores the session persisted by [`Client::create_identity`];
-    /// `false` if there is none, or if the store lost the device identity
+    /// `false` if there is none, if an enrollment did not complete (its
+    /// keys, session and local state are discarded, see
+    /// [`ENROLLMENT_SECRET_KEY`]), or if the store lost the device identity
     /// (database reset or deleted) or the device key is gone, in which case
     /// the stale session secret is deleted. Signs in again from the stored
     /// device key if the token expired (failures are retried on the next
@@ -388,6 +399,9 @@ impl<S: StateStore + 'static> Client<S> {
     /// upload needs, and re-submits commits whose outcome was unknown when
     /// the previous run stopped.
     pub async fn restore_session(&self) -> Result<bool> {
+        if self.discard_enrollment().await? {
+            return Ok(false);
+        }
         let Some(encoded) = self.inner.secrets.get(SESSION_SECRET_KEY)? else {
             return Ok(false);
         };

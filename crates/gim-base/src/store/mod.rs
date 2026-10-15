@@ -151,6 +151,10 @@ pub trait StoreTxn: StateReader + CryptoStore {
     /// Records a self group as the current one, unless it is recorded
     /// already.
     fn add_self_group(&mut self, group_id: &GroupId) -> StoreResult<()>;
+
+    /// Deletes every row and all MLS state, the device identity included
+    /// (an unfinished enrollment is discarded this way).
+    fn clear(&mut self) -> StoreResult<()>;
 }
 
 /// State and MLS storage of one device.

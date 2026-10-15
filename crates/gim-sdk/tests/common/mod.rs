@@ -24,6 +24,7 @@ use gim_sdk::transport::{
 };
 use gim_sdk::{Client, ClientBuilder, SecretStorage, SyncSettings};
 use tempfile::TempDir;
+use tokio::sync::Notify;
 
 /// A post fault, applied to the next commit submission (`Commit`) or
 /// application message post (`Application`).
@@ -46,8 +47,27 @@ pub enum EntryTamper {
     WrongKey,
 }
 
+/// A transport call made by onboarding that [`Faults::fail_step`] can fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Step {
+    PutDeviceList,
+    PutRecoveryBackup,
+    UploadKeyPackages,
+    UploadLastResort,
+    CreateGroup,
+    ClaimHandle,
+    FetchLinkBundle,
+}
+
 #[derive(Debug, Default)]
 pub struct Faults {
+    /// Calls of each step that fail with a network error before reaching
+    /// the hub.
+    pub steps: Mutex<HashMap<Step, usize>>,
+    /// Calls of this step never return (the process is killed there);
+    /// `hung` is notified when one starts.
+    pub hang: Mutex<Option<Step>>,
+    pub hung: Notify,
     /// Hosting entries are tampered with this way.
     pub tamper_entries: Mutex<Option<EntryTamper>>,
     /// Hosting records that land on the hub right before the next
@@ -88,6 +108,28 @@ pub struct Faults {
 }
 
 impl Faults {
+    /// Fails the next call of `step`.
+    pub fn fail_step(&self, step: Step) {
+        *self.steps.lock().unwrap().entry(step).or_default() += 1;
+    }
+
+    async fn step(&self, step: Step) -> TransportResult<()> {
+        let hang = *self.hang.lock().unwrap() == Some(step);
+        if hang {
+            self.hung.notify_one();
+            std::future::pending::<()>().await;
+        }
+        match self.steps.lock().unwrap().get_mut(&step) {
+            Some(left @ 1..) => {
+                *left -= 1;
+                Err(TransportError::Network(format!(
+                    "injected {step:?} failure"
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
+
     pub fn fail_posts(&self, kind: MessageKind, lose_reply: bool, count: usize) {
         let mut posts = self.posts.lock().unwrap();
         for _ in 0..count {
@@ -136,6 +178,7 @@ impl FlakyTransport {
 #[async_trait]
 impl Transport for FlakyTransport {
     async fn put_device_list(&self, u: &UserId, list: Vec<u8>) -> TransportResult<()> {
+        self.faults.step(Step::PutDeviceList).await?;
         let concurrent = self.faults.concurrent_lists.lock().unwrap().pop_front();
         if let Some((user_id, concurrent)) = concurrent {
             self.inner.put_device_list(&user_id, concurrent).await?;
@@ -161,6 +204,7 @@ impl Transport for FlakyTransport {
         u: &UserId,
         backup: Vec<u8>,
     ) -> TransportResult<()> {
+        self.faults.step(Step::PutRecoveryBackup).await?;
         self.inner.put_recovery_backup(t, u, backup).await
     }
 
@@ -185,6 +229,7 @@ impl Transport for FlakyTransport {
         link_id: &str,
         wait: Duration,
     ) -> TransportResult<Option<Vec<u8>>> {
+        self.faults.step(Step::FetchLinkBundle).await?;
         self.inner.fetch_link_bundle(link_id, wait).await
     }
 
@@ -214,6 +259,7 @@ impl Transport for FlakyTransport {
     }
 
     async fn claim_handle(&self, t: &AccessToken, handle: &str) -> TransportResult<()> {
+        self.faults.step(Step::ClaimHandle).await?;
         self.inner.claim_handle(t, handle).await
     }
 
@@ -231,6 +277,13 @@ impl Transport for FlakyTransport {
         key_packages: Vec<Vec<u8>>,
         last_resort: bool,
     ) -> TransportResult<()> {
+        self.faults
+            .step(if last_resort {
+                Step::UploadLastResort
+            } else {
+                Step::UploadKeyPackages
+            })
+            .await?;
         self.inner
             .upload_key_packages(t, key_packages, last_resort)
             .await
@@ -263,6 +316,7 @@ impl Transport for FlakyTransport {
     }
 
     async fn create_group(&self, t: &AccessToken, kind: ChatKind) -> TransportResult<GroupId> {
+        self.faults.step(Step::CreateGroup).await?;
         self.inner.create_group(t, kind).await
     }
 

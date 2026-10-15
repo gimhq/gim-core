@@ -747,6 +747,32 @@ impl StoreTxn for SqliteTxn<'_> {
             [group_id.as_str()],
         )
     }
+
+    fn clear(&mut self) -> StoreResult<()> {
+        // Every table but SQLite's own and the OpenMLS migration history,
+        // so the OpenMLS tables are covered without naming them.
+        let tables = self
+            .txn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'table' \
+                 AND name NOT LIKE 'sqlite_%' \
+                 AND name <> 'openmls_sqlite_storage_migrations'",
+            )
+            .and_then(|mut stmt| {
+                stmt.query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .map_err(sql_err)?;
+        self.txn
+            .pragma_update(None, "defer_foreign_keys", true)
+            .map_err(sql_err)?;
+        for table in tables {
+            self.txn
+                .execute(&format!("DELETE FROM \"{table}\""), [])
+                .map_err(sql_err)?;
+        }
+        Ok(())
+    }
 }
 
 impl<'a> CryptoStore for SqliteTxn<'a> {
