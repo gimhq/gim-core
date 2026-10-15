@@ -8,6 +8,7 @@
 
 use std::fmt;
 use std::ops::Range;
+use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -85,9 +86,10 @@ pub enum TransportError {
     NotFound(String),
     #[error("conflict: {0}")]
     Conflict(String),
-    /// The event cursor is older than the server's retention.
-    #[error("cursor expired")]
-    Gone,
+    /// The event cursor is older than the server's retention; resync, then
+    /// continue from the head `cursor`.
+    #[error("cursor expired; head is {cursor}")]
+    Gone { cursor: u64 },
     #[error("server error: {0}")]
     Server(String),
 }
@@ -197,8 +199,8 @@ pub trait Transport: Send + Sync {
         limit: u32,
     ) -> TransportResult<Vec<GroupMessage>>;
 
-    /// Uploads an already-encrypted blob; returns its id.
-    async fn upload_blob(&self, token: &AccessToken, data: Vec<u8>) -> TransportResult<String>;
+    /// Uploads the already-encrypted blob in `file`; returns its id.
+    async fn upload_blob(&self, token: &AccessToken, file: &Path) -> TransportResult<String>;
 
     /// Downloads a blob, or the given byte range of it.
     async fn download_blob(

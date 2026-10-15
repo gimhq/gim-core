@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -276,8 +277,9 @@ impl Transport for FakeTransport {
             .collect())
     }
 
-    async fn upload_blob(&self, token: &AccessToken, data: Vec<u8>) -> TransportResult<String> {
+    async fn upload_blob(&self, token: &AccessToken, file: &Path) -> TransportResult<String> {
         self.device(token)?;
+        let data = std::fs::read(file).map_err(|e| TransportError::Network(e.to_string()))?;
         Ok(self.service.upload_blob(data))
     }
 
