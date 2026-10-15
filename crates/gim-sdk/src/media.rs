@@ -5,7 +5,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
-use gim_base::model::{MediaCacheEntry, MessageContent, PendingMedia};
+use gim_base::model::{MediaCacheEntry, MessageContent, OutboxKind, PendingMedia};
 use gim_base::{BaseError, StateStore, StoreTxn};
 use gim_common::{now_ms, GroupId, MessageId};
 use gim_crypto::{
@@ -23,6 +23,11 @@ pub const DOWNLOAD_PIECE: u64 = 256 * 1024;
 
 /// AES-GCM tag per chunk.
 const TAG_LEN: u64 = 16;
+
+/// Subdirectory of the data directory for private copies of files to send,
+/// one directory per file: `outgoing/<dir>/<file name>`. The client deletes
+/// such a copy with its directory once uploaded or cancelled.
+pub const OUTGOING_DIR: &str = "outgoing";
 
 impl<S: StateStore + 'static> Client<S> {
     /// Encrypts the file to a temporary file under the data directory and
@@ -239,6 +244,61 @@ impl<S: StateStore + 'static> Client<S> {
 
     fn tmp_dir(&self) -> PathBuf {
         self.inner.data_dir.join("tmp")
+    }
+
+    /// `<data_dir>/outgoing`; see [`OUTGOING_DIR`].
+    pub fn outgoing_dir(&self) -> PathBuf {
+        self.inner.data_dir.join(OUTGOING_DIR)
+    }
+
+    /// Deletes the copy of a sent or cancelled file with its directory, if
+    /// it lives under [`Client::outgoing_dir`]; other files are the app's.
+    pub(crate) async fn remove_outgoing(&self, local_path: &str) {
+        let outgoing = self.outgoing_dir();
+        let path = PathBuf::from(local_path);
+        // Best effort: leftovers are removed on the next start.
+        let _ = blocking(move || {
+            if let Some(dir) = path.parent().filter(|d| d.parent() == Some(&outgoing)) {
+                fs::remove_dir_all(dir)?;
+            }
+            Ok(())
+        })
+        .await;
+    }
+
+    /// Deletes the entries of [`Client::outgoing_dir`] that no queued media
+    /// upload refers to (left by a crash or by a removed chat).
+    pub(crate) async fn clean_outgoing(&self) -> Result<()> {
+        let entries = self.run(|store, _| Ok(store.outbox_entries()?)).await?;
+        let outgoing = self.outgoing_dir();
+        let keep: Vec<PathBuf> = entries
+            .into_iter()
+            .filter_map(|entry| match entry.kind {
+                OutboxKind::MediaUpload(pending) => Path::new(&pending.local_path)
+                    .parent()
+                    .map(Path::to_path_buf),
+                OutboxKind::Envelope(_) => None,
+            })
+            .collect();
+        blocking(move || {
+            let dir = match fs::read_dir(&outgoing) {
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                dir => dir?,
+            };
+            for entry in dir {
+                let path = entry?.path();
+                if keep.contains(&path) {
+                    continue;
+                }
+                if path.is_dir() {
+                    fs::remove_dir_all(&path)?;
+                } else {
+                    fs::remove_file(&path)?;
+                }
+            }
+            Ok(())
+        })
+        .await
     }
 }
 

@@ -8,7 +8,9 @@ use gim_base::model::{ChatKind as BaseChatKind, Membership, MessageContent as Ba
 use gim_base::StateReader;
 use gim_common::{GroupId, MessageId, UserId};
 use gim_sdk::transport::Transport;
-use gim_sdk::{Client, ClientBuilder, HttpTransport, OutboxSender, SESSION_SECRET_KEY};
+use gim_sdk::{
+    Client, ClientBuilder, HttpTransport, OutboxSender, OUTGOING_DIR, SESSION_SECRET_KEY,
+};
 use gim_sqlite::{SqliteStore, DATABASE_FILE_NAME};
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
@@ -20,9 +22,6 @@ use crate::{
     ChatListDiff, ChatListListener, ConnectionState, GimError, PlatformHooks, Session, TaskHandle,
     Timeline, UserProfile,
 };
-
-/// Copies of files passed to `send_media`, under the data directory.
-const OUTGOING_DIR: &str = "outgoing";
 
 type Sdk = Client<SqliteStore>;
 
@@ -283,7 +282,8 @@ fn find_direct_chat(
 }
 
 /// Copies `source` to a fresh directory under `outgoing`, keeping its file
-/// name (sent as the attachment name).
+/// name (sent as the attachment name). gim-sdk deletes the copy once
+/// uploaded or cancelled, and orphaned copies on start.
 fn copy_outgoing(data_dir: &Path, source: &Path) -> Result<PathBuf, GimError> {
     let file_name = source.file_name().ok_or_else(|| GimError::InvalidInput {
         reason: format!("not a file path: {}", source.display()),

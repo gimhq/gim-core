@@ -1190,6 +1190,7 @@ dependencies = [
  "gim-crypto",
  "gim-proto",
  "gim-sdk",
+ "gim-sqlite",
  "gim-test",
  "reqwest",
  "rustls",
