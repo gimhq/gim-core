@@ -3,7 +3,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -11,23 +11,25 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use gim_base::model::{ChatKind, GroupMessage, Message, MessageKind, StateChange, UserInfo};
+use gim_base::model::{ChatKind, GroupMessage, Message, MessageKind, StateChange};
 use gim_base::{MemoryStore, StateReader};
-use gim_common::{DeviceRef, GroupId, MessageId, UserId};
-use gim_sdk::testing::{FakeTransport, MemorySecretStorage};
+use gim_common::{ClientId, DeviceRef, GroupId, MessageId, UserId};
+use gim_sdk::testing::{FakeTransport, MemorySecretStorage, TestLinking};
 use gim_sdk::transport::{
-    AccessToken, EventBatch, GroupInfo, KeyPackageCount, OutgoingMessage, PostError, Registration,
-    Transport, TransportError, TransportResult,
+    AccessToken, Challenge, ClaimedKeyPackage, CommitAccepted, EventBatch, GroupInfo,
+    KeyPackageCount, OutgoingCommit, PostError, SessionError, SessionToken, Transport,
+    TransportError, TransportResult, UserRecord,
 };
 use gim_sdk::{Client, ClientBuilder, SecretStorage};
 use tempfile::TempDir;
 
-/// A post fault, applied to the next post of `kind`.
+/// A post fault, applied to the next commit submission (`Commit`) or
+/// application message post (`Application`).
 #[derive(Debug, Clone, Copy)]
 pub struct PostFault {
     pub kind: MessageKind,
-    /// The server accepts the post but the reply is lost; otherwise the
-    /// post never reaches the server.
+    /// The hub accepts the post but the reply is lost; otherwise the post
+    /// never reaches the hub.
     pub lose_reply: bool,
 }
 
@@ -39,6 +41,12 @@ pub struct Faults {
     /// Flips a byte of every downloaded range past the blob header.
     pub tamper: AtomicBool,
     pub downloaded_bytes: AtomicU64,
+    /// Errors returned by the next `create_session` calls, in order.
+    pub sessions: Mutex<VecDeque<SessionError>>,
+    /// `device_list` calls for the user still answered "unknown".
+    pub hidden_lists: Mutex<HashMap<UserId, usize>>,
+    /// Users whose DeviceList was requested, in order.
+    pub list_requests: Mutex<Vec<UserId>>,
 }
 
 impl Faults {
@@ -67,31 +75,78 @@ impl FlakyTransport {
     fn network() -> TransportError {
         TransportError::Network("injected".into())
     }
+
+    /// Takes the next post fault if it is for `kind`.
+    fn fault(&self, kind: MessageKind) -> Option<PostFault> {
+        let mut posts = self.faults.posts.lock().unwrap();
+        match posts.front() {
+            Some(f) if f.kind == kind => posts.pop_front(),
+            _ => None,
+        }
+    }
 }
 
 #[async_trait]
 impl Transport for FlakyTransport {
-    async fn register_device(&self, handle: &str, name: &str) -> TransportResult<Registration> {
-        self.inner.register_device(handle, name).await
+    async fn put_device_list(&self, u: &UserId, list: Vec<u8>) -> TransportResult<()> {
+        self.inner.put_device_list(u, list).await
     }
 
-    async fn find_user(&self, t: &AccessToken, handle: &str) -> TransportResult<Option<UserInfo>> {
-        self.inner.find_user(t, handle).await
+    async fn auth_challenge(&self, d: &DeviceRef) -> TransportResult<Challenge> {
+        self.inner.auth_challenge(d).await
     }
 
-    async fn user(&self, t: &AccessToken, u: &UserId) -> TransportResult<Option<UserInfo>> {
+    async fn create_session(&self, response: Vec<u8>) -> Result<SessionToken, SessionError> {
+        let injected = self.faults.sessions.lock().unwrap().pop_front();
+        match injected {
+            Some(err) => Err(err),
+            None => self.inner.create_session(response).await,
+        }
+    }
+
+    async fn put_recovery_backup(
+        &self,
+        t: &AccessToken,
+        u: &UserId,
+        backup: Vec<u8>,
+    ) -> TransportResult<()> {
+        self.inner.put_recovery_backup(t, u, backup).await
+    }
+
+    async fn device_list(&self, t: &AccessToken, u: &UserId) -> TransportResult<Option<Vec<u8>>> {
+        self.faults.list_requests.lock().unwrap().push(u.clone());
+        if let Some(left @ 1..) = self.faults.hidden_lists.lock().unwrap().get_mut(u) {
+            *left -= 1;
+            return Ok(None);
+        }
+        self.inner.device_list(t, u).await
+    }
+
+    async fn user(&self, t: &AccessToken, u: &UserId) -> TransportResult<Option<UserRecord>> {
         self.inner.user(t, u).await
     }
 
-    async fn list_devices(&self, t: &AccessToken, u: &UserId) -> TransportResult<Vec<DeviceRef>> {
-        self.inner.list_devices(t, u).await
+    async fn find_handle(&self, t: &AccessToken, handle: &str) -> TransportResult<Option<UserId>> {
+        self.inner.find_handle(t, handle).await
+    }
+
+    async fn claim_handle(&self, t: &AccessToken, handle: &str) -> TransportResult<()> {
+        self.inner.claim_handle(t, handle).await
+    }
+
+    async fn release_handle(&self, t: &AccessToken, handle: &str) -> TransportResult<()> {
+        self.inner.release_handle(t, handle).await
+    }
+
+    async fn publish_display_name(&self, t: &AccessToken, name: &str) -> TransportResult<()> {
+        self.inner.publish_display_name(t, name).await
     }
 
     async fn upload_key_packages(
         &self,
         t: &AccessToken,
         key_packages: Vec<Vec<u8>>,
-        last_resort: Option<Vec<u8>>,
+        last_resort: bool,
     ) -> TransportResult<()> {
         self.inner
             .upload_key_packages(t, key_packages, last_resort)
@@ -102,17 +157,16 @@ impl Transport for FlakyTransport {
         self.inner.key_package_count(t).await
     }
 
-    async fn claim_key_package(&self, t: &AccessToken, d: &DeviceRef) -> TransportResult<Vec<u8>> {
-        self.inner.claim_key_package(t, d).await
-    }
-
-    async fn create_group(
+    async fn claim_key_packages(
         &self,
         t: &AccessToken,
-        kind: ChatKind,
-        members: &[DeviceRef],
-    ) -> TransportResult<GroupId> {
-        self.inner.create_group(t, kind, members).await
+        users: &[UserId],
+    ) -> TransportResult<Vec<ClaimedKeyPackage>> {
+        self.inner.claim_key_packages(t, users).await
+    }
+
+    async fn create_group(&self, t: &AccessToken, kind: ChatKind) -> TransportResult<GroupId> {
+        self.inner.create_group(t, kind).await
     }
 
     async fn group_info(&self, t: &AccessToken, g: &GroupId) -> TransportResult<GroupInfo> {
@@ -123,43 +177,39 @@ impl Transport for FlakyTransport {
         self.inner.list_groups(t).await
     }
 
-    async fn add_group_members(
+    async fn submit_commit(
         &self,
         t: &AccessToken,
         g: &GroupId,
-        devices: &[DeviceRef],
-    ) -> TransportResult<()> {
-        self.inner.add_group_members(t, g, devices).await
-    }
-
-    async fn remove_group_members(
-        &self,
-        t: &AccessToken,
-        g: &GroupId,
-        devices: &[DeviceRef],
-    ) -> TransportResult<()> {
-        self.inner.remove_group_members(t, g, devices).await
+        commit: OutgoingCommit,
+    ) -> Result<CommitAccepted, PostError> {
+        match self.fault(MessageKind::Commit) {
+            None => self.inner.submit_commit(t, g, commit).await,
+            Some(PostFault {
+                lose_reply: true, ..
+            }) => {
+                self.inner.submit_commit(t, g, commit).await?;
+                Err(Self::network().into())
+            }
+            Some(_) => Err(Self::network().into()),
+        }
     }
 
     async fn post_message(
         &self,
         t: &AccessToken,
         g: &GroupId,
-        message: OutgoingMessage,
+        client_id: ClientId,
+        mls_message: Vec<u8>,
     ) -> Result<u64, PostError> {
-        let fault = {
-            let mut posts = self.faults.posts.lock().unwrap();
-            match posts.front() {
-                Some(f) if f.kind == message.kind => posts.pop_front(),
-                _ => None,
-            }
-        };
-        match fault {
-            None => self.inner.post_message(t, g, message).await,
+        match self.fault(MessageKind::Application) {
+            None => self.inner.post_message(t, g, client_id, mls_message).await,
             Some(PostFault {
                 lose_reply: true, ..
             }) => {
-                self.inner.post_message(t, g, message).await?;
+                self.inner
+                    .post_message(t, g, client_id, mls_message)
+                    .await?;
                 Err(Self::network().into())
             }
             Some(_) => Err(Self::network().into()),
@@ -175,14 +225,26 @@ impl Transport for FlakyTransport {
         self.inner.fetch_events(t, cursor, wait).await
     }
 
+    async fn pending_welcomes(
+        &self,
+        t: &AccessToken,
+        limit: u32,
+    ) -> TransportResult<Vec<GroupMessage>> {
+        self.inner.pending_welcomes(t, limit).await
+    }
+
+    async fn ack_welcome(&self, t: &AccessToken, g: &GroupId) -> TransportResult<()> {
+        self.inner.ack_welcome(t, g).await
+    }
+
     async fn group_messages(
         &self,
         t: &AccessToken,
         g: &GroupId,
-        after_seq: u64,
+        from_seq: u64,
         limit: u32,
     ) -> TransportResult<Vec<GroupMessage>> {
-        self.inner.group_messages(t, g, after_seq, limit).await
+        self.inner.group_messages(t, g, from_seq, limit).await
     }
 
     async fn upload_blob(&self, t: &AccessToken, file: &Path) -> TransportResult<String> {
@@ -212,6 +274,10 @@ impl Transport for FlakyTransport {
             bytes[0] ^= 1;
         }
         Ok(bytes)
+    }
+
+    fn test_linking(&self) -> Option<&TestLinking> {
+        self.inner.test_linking()
     }
 }
 
@@ -262,7 +328,7 @@ impl Device {
     }
 }
 
-/// Application messages `sender` posted to the group, as the server holds
+/// Application messages `sender` posted to the group, as the hub holds
 /// them.
 pub fn server_messages(
     transport: &FlakyTransport,

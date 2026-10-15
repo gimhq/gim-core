@@ -1,3 +1,5 @@
+use gim_test::TestIdentity;
+
 use super::*;
 use crate::MemoryCryptoStore;
 
@@ -8,13 +10,20 @@ struct Dev {
 
 fn dev(user: &str) -> Dev {
     let dev = Dev {
-        engine: MlsEngine::new(),
+        engine: MlsEngine::with_device_list_lookup(std::sync::Arc::new(gim_test::test_device_list)),
         store: MemoryCryptoStore::new(),
     };
-    dev.engine
-        .create_identity(&dev.store, DeviceRef::parse(user, "phone").unwrap())
-        .unwrap();
+    create_identity(&dev, &TestIdentity::new(user)).unwrap();
     dev
+}
+
+fn create_identity(dev: &Dev, id: &TestIdentity) -> Result<()> {
+    dev.engine.create_identity_v2(
+        &dev.store,
+        &id.device_key,
+        id.root.public(),
+        id.cert.clone(),
+    )
 }
 
 fn gid(id: &str) -> GroupId {
@@ -76,13 +85,12 @@ fn pair() -> (Dev, Dev) {
 #[test]
 fn identity() {
     let alice = dev("alice");
-    assert_eq!(alice.me(), DeviceRef::parse("alice", "phone").unwrap());
+    let id = TestIdentity::new("alice");
+    assert_eq!(alice.me(), id.device);
     let pk = alice.engine.signature_public_key(&alice.store).unwrap();
-    assert_eq!(pk.len(), 32);
+    assert_eq!(pk, id.device_key.public().as_bytes().to_vec());
     assert!(matches!(
-        alice
-            .engine
-            .create_identity(&alice.store, DeviceRef::parse("x", "y").unwrap()),
+        create_identity(&alice, &TestIdentity::new("x")),
         Err(CryptoError::InvalidInput { .. })
     ));
     let empty = MemoryCryptoStore::new();
@@ -207,10 +215,10 @@ fn store_export_import_keeps_groups_usable() {
     assert_eq!(bob.decrypt("g", &alice.encrypt("g", b"before")), b"before");
 
     let bob = Dev {
-        engine: MlsEngine::new(),
+        engine: MlsEngine::with_device_list_lookup(std::sync::Arc::new(gim_test::test_device_list)),
         store: MemoryCryptoStore::import(&bob.store.export().unwrap()).unwrap(),
     };
-    assert_eq!(bob.me().user_id.as_str(), "bob");
+    assert_eq!(bob.me(), TestIdentity::new("bob").device);
     assert_eq!(bob.epoch("g"), 1);
     assert_eq!(bob.decrypt("g", &alice.encrypt("g", b"after")), b"after");
     assert_eq!(alice.decrypt("g", &bob.encrypt("g", b"reply")), b"reply");
@@ -229,7 +237,7 @@ fn imported_store_keeps_key_packages() {
     let (alice, bob) = (dev("alice"), dev("bob"));
     let kp = bob.kps(1);
     let bob = Dev {
-        engine: MlsEngine::new(),
+        engine: MlsEngine::with_device_list_lookup(std::sync::Arc::new(gim_test::test_device_list)),
         store: MemoryCryptoStore::import(&bob.store.export().unwrap()).unwrap(),
     };
     alice.create("g");

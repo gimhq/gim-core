@@ -1,5 +1,5 @@
 //! Connection plumbing of the sync loop: the [`ConnectionState`] it
-//! reports, its reconnect [`Backoff`], and the `/v1/stream` WebSocket
+//! reports, its reconnect [`Backoff`], and the `/v2/stream` WebSocket
 //! client ([`ws`]).
 //!
 //! Reconnect structure follows matrix-rust-sdk's sliding sync loop
@@ -12,7 +12,7 @@ use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
 use std::time::Duration;
 
-/// Connection of the sync loop to gim-server.
+/// Connection of the sync loop to gim-hub.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConnectionState {
     /// Not syncing, or waiting to reconnect after a failure.

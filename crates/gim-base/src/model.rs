@@ -152,14 +152,15 @@ pub enum OutboxState {
 /// An encrypted MLS application message ready to post.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedPayload {
-    /// Epoch the payload was encrypted at; sent to gim-server as `epoch`.
+    /// Epoch the payload was encrypted at (the hub reads it from the
+    /// framing).
     pub epoch: u64,
     pub payload: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboxEntry {
-    /// Also the `client_id` posted to gim-server.
+    /// Also the `client_id` posted to the hub.
     pub message_id: MessageId,
     pub group_id: GroupId,
     pub kind: OutboxKind,
@@ -188,9 +189,8 @@ pub(crate) fn to_message_id(client_id: &ClientId) -> MessageId {
 
 /// Seqs applied for one group: everything up to `contiguous_seq`, plus the
 /// out-of-order seqs in `ahead`. A non-empty `ahead` means there is a hole
-/// `(contiguous_seq, first ahead)`. Welcomes addressed to other devices take
-/// seqs too, so gim-sdk must confirm a hole against the server before
-/// backfilling it.
+/// `(contiguous_seq, first ahead)`, which gim-sdk confirms against the hub
+/// history before backfilling it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GroupCursor {
     pub contiguous_seq: u64,
@@ -240,41 +240,30 @@ pub struct MediaCacheEntry {
     pub last_access_ms: u64,
 }
 
-/// An own commit whose acceptance is not confirmed yet, or whose follow-up
-/// is not done yet. One per group; written in the transaction that creates
-/// the MLS pending commit, so a restarted client re-posts the same commit
-/// (same `client_id`) before any other work in the group.
+/// An own commit whose acceptance is not confirmed yet. One per group;
+/// written in the transaction that creates the MLS pending commit, so a
+/// restarted client re-posts the same commit (same bytes and `client_id`,
+/// with its Welcome) before any other work in the group.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingCommit {
     pub group_id: GroupId,
     pub client_id: ClientId,
     pub epoch: u64,
     pub payload: Vec<u8>,
-    /// Accepted and merged; only `then` is left to do.
-    pub merged: bool,
-    pub then: AfterCommit,
-}
-
-/// What follows an accepted [`PendingCommit`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AfterCommit {
-    Nothing,
-    /// Post the Welcome of the added devices.
-    Welcome(PendingWelcome),
-    /// Drop the removed devices from the group's fan-out list.
-    RemoveFromFanOut(Vec<DeviceRef>),
+    /// Welcome of the devices the commit adds.
+    pub welcome: Option<PendingWelcome>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingWelcome {
-    pub client_id: ClientId,
-    pub epoch: u64,
     pub payload: Vec<u8>,
     pub recipients: Vec<DeviceRef>,
 }
 
-/// A device dropped from a group's fan-out list (a `member_removed` event)
-/// that may still be in the MLS tree and has to be removed by a commit.
+/// A device that left a group (a self-remove proposal, or a hub-side
+/// `member_removed` without a commit) or was revoked in its user's
+/// DeviceList, and may still be in the MLS tree: a member has to remove it
+/// by a commit.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DepartedMember {
     pub group_id: GroupId,
@@ -286,7 +275,7 @@ pub enum MembershipChangeKind {
     Added,
     /// Removed by another member.
     Removed,
-    /// Removed by themselves.
+    /// Removed after leaving by themselves.
     Left,
 }
 
@@ -315,12 +304,15 @@ pub struct UserInfo {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MessageKind {
+    /// A Commit or Proposal (PublicMessage).
     Commit,
+    /// A Welcome addressed to this device (a `welcome` event); its `seq` is
+    /// the seq of the Commit that produced it.
     Welcome,
     Application,
 }
 
-/// A `message` event of the device stream.
+/// A group message of the device stream or the group history.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupMessage {
     pub group_id: GroupId,
@@ -332,7 +324,7 @@ pub struct GroupMessage {
     pub client_id: Option<ClientId>,
 }
 
-/// An event of the device stream, independent of the gim-server DTOs.
+/// An event of the device stream, independent of the hub DTOs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IncomingEvent {
     Message(GroupMessage),
@@ -365,7 +357,7 @@ pub enum StateChange {
         user_id: UserId,
         active: bool,
     },
-    /// The server asks for more KeyPackages.
+    /// The hub asks for more KeyPackages.
     KeyPackagesLow,
 }
 

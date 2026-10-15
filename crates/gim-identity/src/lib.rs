@@ -18,7 +18,9 @@ mod list;
 pub mod link;
 pub mod recovery;
 
-pub use auth::{AuthChallenge, AuthResponse, AUTH_RESPONSE_CONTEXT};
+pub use auth::{
+    AuthChallenge, AuthResponse, AUTH_CHALLENGE_MAX_LIFETIME_MS, AUTH_RESPONSE_CONTEXT,
+};
 pub use cert::{DeviceCert, SignedDeviceCert, DEVICE_CERT_CONTEXT};
 pub use error::IdentityError;
 pub use hosting::{

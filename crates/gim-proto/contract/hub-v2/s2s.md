@@ -28,8 +28,11 @@ PeerID before any operation is processed.
 ## Identifiers
 
 - `user_id`, `device_id`: opaque strings; format owned by gim-core.
-- `gid`: `<owner_peer_id>/<random_128 base32>`. The owning hub is the hub whose PeerID prefixes
-  the gid; it runs the group's sequencer.
+- `gid`: `<owner hub_id>/<random_128 base32lower>` (gim-core `HubId` of the owning hub's root key;
+  128 random bits, lowercase unpadded base32). The owning hub is the hub whose `hub_id` prefixes
+  the gid; it runs the group's sequencer. The gid is stable across runtime-key rotation (arch
+  §4.1); the owning hub's current PeerID is resolved from its runtime certificate / hosting
+  records. The MLS `group_id` is the UTF-8 bytes of the gid.
 - `client_id`: client-chosen idempotency key, unique per sender device.
 - `message_id`: globally unique id assigned by the owning hub to every sequenced message and
   Welcome.
@@ -57,7 +60,7 @@ Error       { ErrorCode code; string message }
 |---|---|---|---|
 | `SubmitCommit` | member hub -> owning hub | `gid, sender_user_id, sender_device_id, client_id, mls_message, welcome?, welcome_recipient_device_ids, ratchet_tree?` -> `seq, epoch, duplicate` | Caller listed for `sender_user_id`; responder must be the owning hub of `gid`; group policy (who may add/remove) enforced by the owning hub. |
 | `SubmitMessage` | member hub -> owning hub | `gid, sender_user_id, sender_device_id, client_id, mls_message` -> `seq, epoch, duplicate` | Caller listed for `sender_user_id`; sender is a group member. |
-| `Deliver` | owning hub -> member hub | `messages: [SequencedMessage]` -> `acks: [GroupAck{gid, highest_contiguous_seq}]` | Caller is the owning hub of every `gid` in the batch (PeerID prefix of the gid). |
+| `Deliver` | owning hub -> member hub | `messages: [SequencedMessage]` -> `acks: [GroupAck{gid, highest_contiguous_seq}]` | Caller is the owning hub of every `gid` in the batch (`hub_id` prefix of the gid). |
 | `DeliverWelcome` | owning hub -> invitee's hub | `gid, sender_user_id, recipient_user_id, recipient_device_ids, welcome, ratchet_tree?, message_id` -> `{}` | Caller is the owning hub of `gid`; responder hosts `recipient_user_id`. |
 | `ClaimKeyPackage` | requester's hub -> target's hub | `requester_user_id, target_user_id, device_id?` -> `key_packages: [ClaimedKeyPackage{device_id, key_package, last_resort}]` | Caller listed for `requester_user_id`; responder hosts `target_user_id`. |
 | `FetchLog` | member hub -> owning hub | `gid, from_seq, limit` -> `messages, next_seq, complete` | Caller listed for at least one current member of `gid`. |

@@ -440,6 +440,11 @@ uint64_t uniffi_gim_core_fn_method_gimclient_create_direct_chat(uint64_t ptr, Ru
 uint64_t uniffi_gim_core_fn_method_gimclient_create_group_chat(uint64_t ptr, RustBuffer name, RustBuffer member_user_ids
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_CREATE_IDENTITY
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_CREATE_IDENTITY
+uint64_t uniffi_gim_core_fn_method_gimclient_create_identity(uint64_t ptr, RustBuffer display_name
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_DELETE_MESSAGE
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_DELETE_MESSAGE
 uint64_t uniffi_gim_core_fn_method_gimclient_delete_message(uint64_t ptr, RustBuffer chat_id, RustBuffer message_id
@@ -478,11 +483,6 @@ uint64_t uniffi_gim_core_fn_method_gimclient_mark_read(uint64_t ptr, RustBuffer 
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_REACT
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_REACT
 uint64_t uniffi_gim_core_fn_method_gimclient_react(uint64_t ptr, RustBuffer chat_id, RustBuffer message_id, RustBuffer emoji
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_REGISTER
-#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_REGISTER
-uint64_t uniffi_gim_core_fn_method_gimclient_register(uint64_t ptr, RustBuffer handle, RustBuffer display_name
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_REMOVE_MEMBER
@@ -1029,6 +1029,12 @@ uint16_t uniffi_gim_core_checksum_method_gimclient_create_group_chat(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_CREATE_IDENTITY
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_CREATE_IDENTITY
+uint16_t uniffi_gim_core_checksum_method_gimclient_create_identity(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_DELETE_MESSAGE
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_DELETE_MESSAGE
 uint16_t uniffi_gim_core_checksum_method_gimclient_delete_message(void
@@ -1074,12 +1080,6 @@ uint16_t uniffi_gim_core_checksum_method_gimclient_mark_read(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_REACT
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_REACT
 uint16_t uniffi_gim_core_checksum_method_gimclient_react(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_REGISTER
-#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_REGISTER
-uint16_t uniffi_gim_core_checksum_method_gimclient_register(void
     
 );
 #endif

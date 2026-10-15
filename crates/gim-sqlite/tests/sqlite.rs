@@ -7,9 +7,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use common::{group, key, setup, text, Device, NOW};
 use gim_base::model::{
-    AfterCommit, Chat, ChatKind, ChatMember, DepartedMember, GroupCursor, GroupMessage,
-    MediaCacheEntry, Membership, MembershipChangeKind, MembershipEvent, Message, MessageContent,
-    MessageKind, OutboxEntry, OutboxKind, OutboxState, PendingCommit, PendingMedia, PendingWelcome,
+    Chat, ChatKind, ChatMember, DepartedMember, GroupCursor, GroupMessage, MediaCacheEntry,
+    Membership, MembershipChangeKind, MembershipEvent, Message, MessageContent, MessageKind,
+    OutboxEntry, OutboxKind, OutboxState, PendingCommit, PendingMedia, PendingWelcome,
     PreparedPayload, SendState, UserInfo,
 };
 use gim_base::{
@@ -173,6 +173,7 @@ fn reads_match_memory_store() {
     assert_same_reads(&memory, &sqlite);
     assert_eq!(sqlite.pending_commits().unwrap().len(), 3);
     assert_eq!(sqlite.departed_members().unwrap().len(), 3);
+    assert_eq!(sqlite.device_lists().unwrap().len(), 2);
     let crew = sqlite.membership_events(&group("crew")).unwrap();
     let order: Vec<(u64, &str)> = crew.iter().map(|e| (e.seq, e.user_id.as_str())).collect();
     assert_eq!(order, [(3, "bob"), (3, "carol"), (9, "bob")]);
@@ -193,9 +194,9 @@ fn reads_match_memory_store() {
 }
 
 fn reopen(device: Device, dir: &std::path::Path) -> Device {
-    let user = device.me.user_id.as_str().to_owned();
+    let name = device.name.clone();
     drop(device);
-    Device::with_store(&user, SqliteStore::open(dir, &key()).unwrap())
+    Device::with_store(&name, SqliteStore::open(dir, &key()).unwrap())
 }
 
 fn text_content(body: &str) -> MessageContent {
@@ -375,28 +376,25 @@ fn write_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
         display_name: "Alice".into(),
     })?;
 
-    let commit = |g: &str, then| PendingCommit {
+    let commit = |g: &str, welcome| PendingCommit {
         group_id: group(g),
         client_id: ClientId::new(format!("commit-{g}")).unwrap(),
         epoch: 4,
         payload: vec![4, 2],
-        merged: false,
-        then,
+        welcome,
     };
     txn.upsert_pending_commit(&commit(
         "crew",
-        AfterCommit::Welcome(PendingWelcome {
-            client_id: ClientId::new("welcome-crew").unwrap(),
-            epoch: 5,
+        Some(PendingWelcome {
             payload: vec![5],
             recipients: vec![device("carol", "laptop"), device("dave", "phone")],
         }),
     ))?;
-    txn.upsert_pending_commit(&commit(
-        "dm",
-        AfterCommit::RemoveFromFanOut(vec![device("bob", "tablet")]),
-    ))?;
-    txn.upsert_pending_commit(&commit("anchor", AfterCommit::Nothing))?;
+    txn.upsert_pending_commit(&commit("dm", None))?;
+    txn.upsert_pending_commit(&commit("anchor", None))?;
+    for (user, data) in [("bob", vec![1, 2]), ("alice", vec![3])] {
+        txn.upsert_device_list(&UserId::new(user).unwrap(), &data)?;
+    }
     for (g, user, dev) in [
         ("crew", "dave", "phone"),
         ("crew", "carol", "laptop"),
@@ -460,9 +458,10 @@ fn update_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
         handle: "alice".into(),
         display_name: "Alice M.".into(),
     })?;
-    let mut merged = txn.pending_commit(&group("crew"))?.unwrap();
-    merged.merged = true;
-    txn.upsert_pending_commit(&merged)?;
+    let mut retried = txn.pending_commit(&group("crew"))?.unwrap();
+    retried.epoch = 5;
+    txn.upsert_pending_commit(&retried)?;
+    txn.upsert_device_list(&UserId::new("bob").unwrap(), &[4])?;
     txn.remove_pending_commit(&group("anchor"))?;
     txn.remove_departed_member(&DepartedMember {
         group_id: group("crew"),
@@ -525,6 +524,10 @@ fn assert_same_reads(expected: &impl StateReader, actual: &impl StateReader) {
     assert_eq!(
         actual.departed_members().unwrap(),
         expected.departed_members().unwrap()
+    );
+    assert_eq!(
+        actual.device_lists().unwrap(),
+        expected.device_lists().unwrap()
     );
     for message_id in ["m1", "m2", "m4", "u1", "u3", "d1", "none"].map(id) {
         assert_eq!(

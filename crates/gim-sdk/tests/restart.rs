@@ -8,8 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use gim_base::model::{
-    AfterCommit, DepartedMember, MessageContent, MessageKind, PendingCommit, PendingMedia,
-    SendState,
+    DepartedMember, MessageContent, MessageKind, PendingCommit, PendingMedia, SendState,
 };
 use gim_base::{BaseClient, BaseError, StateReader, StateStore, StoreTxn};
 use gim_common::{now_ms, ClientId, GroupId};
@@ -104,20 +103,23 @@ async fn commit_of_unknown_outcome_is_reposted_after_restart(lose_reply: bool) {
     );
     assert!(alice.add_members(&g, &[carol.user_id()]).await.is_err());
     let pending = alice.store().pending_commit(&g).unwrap().unwrap();
-    assert!(!pending.merged);
+    assert_eq!(
+        pending.welcome.as_ref().unwrap().recipients,
+        vec![carol.device()]
+    );
     let reached = if lose_reply { 2 } else { 1 };
     assert_eq!(service.epoch(&g), Ok(reached));
 
     let alice = node.restart(alice).await;
-    // Re-posted once with the same client_id, merged, Welcome sent.
+    // Re-posted once with the same client_id (with its Welcome), merged.
     assert_eq!(alice.store().pending_commit(&g).unwrap(), None);
     assert_eq!(service.epoch(&g), Ok(2));
     let commits = server_messages(&transport, &g, &alice, gim_test::MessageKind::Commit);
     assert_eq!(commits.len(), 2);
     assert_eq!(commits[1].client_id, pending.client_id);
-    let welcomes = server_messages(&transport, &g, &alice, gim_test::MessageKind::Welcome);
-    assert_eq!(welcomes.len(), 2);
-    assert_eq!(welcomes[1].recipients, vec![carol.device()]);
+    let welcomes = service.pending_welcomes(&carol.device(), 10);
+    assert_eq!(welcomes.len(), 1);
+    assert_eq!(welcomes[0].seq, commits[1].seq);
     assert_eq!(alice.store().chat(&g).unwrap().unwrap().members.len(), 3);
 
     alice.send_text(&g, "after restart", None).await.unwrap();
@@ -226,8 +228,7 @@ async fn dangling_pending_commits_are_reconciled_after_restart() {
                 client_id: ClientId::new("dangling-commit").unwrap(),
                 epoch: 1,
                 payload: vec![1],
-                merged: false,
-                then: AfterCommit::Nothing,
+                welcome: None,
             })?;
             Ok(())
         })

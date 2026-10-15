@@ -10,6 +10,7 @@ use gim_integration_testing::{
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "gim-server v1 removed; replaced by gim-hub tests (C2-T6)"]
 async fn direct_chat_lifecycle() {
     let Some(url) = server_url("direct_chat_lifecycle") else {
         return;
@@ -303,6 +304,7 @@ async fn direct_chat_lifecycle() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "gim-server v1 removed; replaced by gim-hub tests (C2-T6)"]
 async fn media_send_and_fetch() {
     let Some(url) = server_url("media_send_and_fetch") else {
         return;
@@ -360,6 +362,7 @@ async fn media_send_and_fetch() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "gim-server v1 removed; replaced by gim-hub tests (C2-T6)"]
 async fn group_add_then_remove_member() {
     let Some(url) = server_url("group_add_then_remove_member") else {
         return;

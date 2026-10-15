@@ -3,8 +3,10 @@
 use std::cell::Cell;
 
 use gim_common::{ClientId, DeviceRef, GroupId};
-use gim_crypto::{CommitOutput, CryptoError, MemoryCryptoStore, MlsEngine, ProcessedMessage};
-use gim_test::{Delivered, DeliveryError, FakeDeliveryService, MessageKind, OutgoingMessage};
+use gim_crypto::{
+    inspect_handshake, CommitOutput, CryptoError, MemoryCryptoStore, MlsEngine, ProcessedMessage,
+};
+use gim_test::{Delivered, DeliveryError, Event, FakeDeliveryService, SubmitCommit};
 
 struct Device {
     me: DeviceRef,
@@ -15,10 +17,14 @@ struct Device {
 
 impl Device {
     fn new(user: &str) -> Self {
-        let me = DeviceRef::parse(user, "phone").unwrap();
-        let engine = MlsEngine::new();
+        let id = gim_test::TestIdentity::new(user);
+        let me = id.device.clone();
+        let engine =
+            MlsEngine::with_device_list_lookup(std::sync::Arc::new(gim_test::test_device_list));
         let store = MemoryCryptoStore::new();
-        engine.create_identity(&store, me.clone()).unwrap();
+        engine
+            .create_identity_v2(&store, &id.device_key, id.root.public(), id.cert.clone())
+            .unwrap();
         Self {
             me,
             engine,
@@ -32,7 +38,9 @@ impl Device {
         let bytes = self.store.export().unwrap();
         Self {
             me: self.me,
-            engine: MlsEngine::new(),
+            engine: MlsEngine::with_device_list_lookup(std::sync::Arc::new(
+                gim_test::test_device_list,
+            )),
             store: MemoryCryptoStore::import(&bytes).unwrap(),
             posts: self.posts,
         }
@@ -45,32 +53,12 @@ impl Device {
             .remove(0)
     }
 
-    fn post(
-        &self,
-        ds: &FakeDeliveryService,
-        g: &GroupId,
-        kind: MessageKind,
-        epoch: u64,
-        payload: Vec<u8>,
-        recipients: Vec<DeviceRef>,
-    ) -> Result<u64, DeliveryError> {
+    fn client_id(&self) -> ClientId {
         self.posts.set(self.posts.get() + 1);
-        let client_id = ClientId::new(format!("{}-{}", self.me.user_id, self.posts.get())).unwrap();
-        ds.post(
-            g,
-            &self.me,
-            OutgoingMessage {
-                client_id,
-                epoch,
-                kind,
-                payload,
-                recipients,
-            },
-        )
+        ClientId::new(format!("{}-{}", self.me.user_id, self.posts.get())).unwrap()
     }
 
-    /// Posts a commit; on acceptance merges it, registers the new members
-    /// for fan-out and posts the Welcome to them.
+    /// Posts a commit with its Welcome; on acceptance merges it.
     fn send_commit(
         &self,
         ds: &FakeDeliveryService,
@@ -78,17 +66,23 @@ impl Device {
         out: CommitOutput,
         new_members: &[&Device],
     ) -> Result<u64, DeliveryError> {
-        self.post(ds, g, MessageKind::Commit, out.epoch, out.commit, vec![])?;
-        let epoch = self.engine.merge_pending_commit(&self.store, g).unwrap();
-        if let Some(welcome) = out.welcome {
-            let recipients: Vec<_> = new_members.iter().map(|d| d.me.clone()).collect();
-            for device in &recipients {
-                ds.add_member(g, device).unwrap();
-            }
-            self.post(ds, g, MessageKind::Welcome, epoch, welcome, recipients)
-                .unwrap();
-        }
-        Ok(epoch)
+        let info = inspect_handshake(&out.commit).unwrap();
+        assert_eq!(info.added, out.added);
+        ds.submit_commit(
+            g,
+            &self.me,
+            SubmitCommit {
+                client_id: self.client_id(),
+                mls_message: out.commit,
+                epoch: info.epoch,
+                proposal: false,
+                added: info.added,
+                removed_leaves: info.removed_leaves,
+                welcome: out.welcome,
+                welcome_recipients: new_members.iter().map(|d| d.me.clone()).collect(),
+            },
+        )?;
+        Ok(self.engine.merge_pending_commit(&self.store, g).unwrap())
     }
 
     fn send_text(&self, ds: &FakeDeliveryService, g: &GroupId, text: &str) {
@@ -97,45 +91,52 @@ impl Device {
             .encrypt(&self.store, g, text.as_bytes())
             .unwrap();
         let epoch = self.engine.group_epoch(&self.store, g).unwrap();
-        self.post(ds, g, MessageKind::Application, epoch, ct, vec![])
+        ds.post_message(g, &self.me, self.client_id(), epoch, ct)
             .unwrap();
     }
 
-    fn handle(&self, message: &Delivered) -> ProcessedMessage {
-        match message.kind {
-            MessageKind::Welcome => {
+    fn handle(&self, event: &Event) -> Option<ProcessedMessage> {
+        match event {
+            Event::Welcome(welcome) => {
                 let joined = self
                     .engine
-                    .join_from_welcome(&self.store, &message.payload)
+                    .join_from_welcome(&self.store, &welcome.welcome)
                     .unwrap();
-                assert_eq!(joined.group_id, message.group_id);
+                assert_eq!(joined.group_id, welcome.group_id);
                 // Report joins as a commit adding this device, for uniform checks.
-                ProcessedMessage::Commit {
-                    sender: message.sender.clone(),
+                Some(ProcessedMessage::Commit {
+                    sender: welcome.sender.clone(),
                     epoch: joined.epoch,
                     added: vec![self.me.clone()],
                     removed: vec![],
                     self_removed: false,
-                }
+                })
             }
-            MessageKind::Commit | MessageKind::Application => {
-                let processed = self
-                    .engine
-                    .process_message(&self.store, &message.group_id, &message.payload)
-                    .unwrap();
-                match &processed {
-                    ProcessedMessage::Application { sender, .. }
-                    | ProcessedMessage::Commit { sender, .. }
-                    | ProcessedMessage::Proposal { sender } => assert_eq!(sender, &message.sender),
-                }
-                processed
-            }
+            Event::Message(message) => Some(self.process(message)),
+            _ => None,
         }
     }
 
-    /// Pulls and processes the inbox in order.
+    fn process(&self, message: &Delivered) -> ProcessedMessage {
+        let processed = self
+            .engine
+            .process_message(&self.store, &message.group_id, &message.payload)
+            .unwrap();
+        match &processed {
+            ProcessedMessage::Application { sender, .. }
+            | ProcessedMessage::Commit { sender, .. }
+            | ProcessedMessage::Proposal { sender, .. } => assert_eq!(sender, &message.sender),
+        }
+        processed
+    }
+
+    /// Pulls and processes the inbox in order; membership events are
+    /// skipped.
     fn sync(&self, ds: &FakeDeliveryService) -> Vec<ProcessedMessage> {
-        ds.pull(&self.me).iter().map(|m| self.handle(m)).collect()
+        ds.pull(&self.me)
+            .iter()
+            .filter_map(|e| self.handle(e))
+            .collect()
     }
 
     /// Syncs and returns the decrypted texts.
@@ -145,10 +146,7 @@ impl Device {
             .map(|p| match p {
                 ProcessedMessage::Application {
                     sender, plaintext, ..
-                } => (
-                    sender.user_id.to_string(),
-                    String::from_utf8(plaintext).unwrap(),
-                ),
+                } => (name(&sender), String::from_utf8(plaintext).unwrap()),
                 other => panic!("expected application message, got {other:?}"),
             })
             .collect()
@@ -162,10 +160,19 @@ impl Device {
         self.engine
             .group_members(&self.store, g)
             .unwrap()
-            .into_iter()
-            .map(|d| d.user_id.to_string())
+            .iter()
+            .map(name)
             .collect()
     }
+}
+
+/// The test name of a device's user.
+fn name(device: &DeviceRef) -> String {
+    ["alice", "bob", "carol", "dave", "erin"]
+        .into_iter()
+        .find(|n| gim_test::TestIdentity::new(n).device.user_id == device.user_id)
+        .unwrap_or("?")
+        .to_string()
 }
 
 fn pair(sender: &str, text: &str) -> (String, String) {
@@ -182,6 +189,7 @@ fn three_devices_full_lifecycle() {
 
     // A creates the group and adds B.
     a.engine.create_group(&a.store, &g).unwrap();
+    ds.put_device_list_of(&[&a, &b, &c]);
     ds.create_group(&g, &a.me).unwrap();
     let out = a
         .engine
@@ -242,10 +250,17 @@ fn three_devices_full_lifecycle() {
     for i in 0..5 {
         b.send_text(&ds, &g, &format!("batch {i}"));
     }
-    let inbox = ds.pull(&a.me);
+    let inbox: Vec<Delivered> = ds
+        .pull(&a.me)
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::Message(m) => Some(m),
+            _ => None,
+        })
+        .collect();
     assert_eq!(inbox.len(), 5);
     for i in [3, 0, 4, 1, 2] {
-        match a.handle(&inbox[i]) {
+        match a.process(&inbox[i]) {
             ProcessedMessage::Application { plaintext, .. } => {
                 assert_eq!(plaintext, format!("batch {i}").as_bytes());
             }
@@ -257,6 +272,7 @@ fn three_devices_full_lifecycle() {
     // Competing commits in epoch 2: B adds D, C adds E. B's lands first.
     let d = Device::new("dave");
     let e = Device::new("erin");
+    ds.put_device_list_of(&[&d, &e]);
     let e_key_package = e.key_package();
     let b_out = b
         .engine
@@ -270,7 +286,7 @@ fn three_devices_full_lifecycle() {
     assert_eq!(b.send_commit(&ds, &g, b_out, &[&d]), Ok(3));
     assert_eq!(
         c.send_commit(&ds, &g, c_out, &[&e]),
-        Err(DeliveryError::Conflict409 {
+        Err(DeliveryError::StaleEpoch {
             commit_epoch: 2,
             current_epoch: 3
         })
@@ -312,7 +328,6 @@ fn three_devices_full_lifecycle() {
         .unwrap();
     assert!(out.welcome.is_none());
     assert_eq!(a.send_commit(&ds, &g, out, &[]), Ok(5));
-    ds.remove_member(&g, &c.me).unwrap();
     match &c.sync(&ds)[..] {
         [ProcessedMessage::Commit {
             removed,
@@ -346,4 +361,23 @@ fn three_devices_full_lifecycle() {
     assert!(ds.pull(&c.me).is_empty());
     assert_eq!(a.texts(&ds), [pair("bob", "indeed")]);
     assert_eq!(b.texts(&ds), [pair("alice", "carol is gone")]);
+}
+
+trait Directory {
+    /// Uploads each device's DeviceList, so the hub knows them as active.
+    fn put_device_list_of(&self, devices: &[&Device]);
+}
+
+impl Directory for FakeDeliveryService {
+    fn put_device_list_of(&self, devices: &[&Device]) {
+        for device in devices {
+            self.put_device_list(
+                &device.me.user_id,
+                1,
+                device.me.to_string().into_bytes(),
+                [device.me.device_id.clone()].into(),
+            )
+            .unwrap();
+        }
+    }
 }

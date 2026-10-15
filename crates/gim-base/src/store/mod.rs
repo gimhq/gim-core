@@ -79,6 +79,10 @@ pub trait StateReader {
 
     /// Membership events of the group, ascending by seq, then user id.
     fn membership_events(&self, group_id: &GroupId) -> StoreResult<Vec<MembershipEvent>>;
+
+    /// Latest known signed DeviceList bytes (gim-identity CBOR) of every
+    /// user, by user id.
+    fn device_lists(&self) -> StoreResult<Vec<(UserId, Vec<u8>)>>;
 }
 
 /// A write transaction over state rows and MLS state. Dropping it without
@@ -119,6 +123,9 @@ pub trait StoreTxn: StateReader + CryptoStore {
 
     /// Replaces any event with the same (group, seq, user).
     fn add_membership_event(&mut self, event: &MembershipEvent) -> StoreResult<()>;
+
+    /// Replaces the user's stored DeviceList bytes.
+    fn upsert_device_list(&mut self, user_id: &UserId, device_list: &[u8]) -> StoreResult<()>;
 }
 
 /// State and MLS storage of one device.

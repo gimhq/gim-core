@@ -8,9 +8,9 @@ use gim_crypto::{decrypt_to_envelope, CryptoError, DecryptedMessage, MlsEngine, 
 use gim_proto::envelope::{Content, Envelope, ReceiptKind};
 
 use crate::model::{
-    to_message_id, AfterCommit, Chat, ChatKind, ChatMember, DepartedMember, GroupMessage,
-    IncomingEvent, Membership, MembershipChangeKind, MembershipEvent, Message, MessageContent,
-    MessageKind, PendingCommit, SendState, StateChange,
+    to_message_id, Chat, ChatKind, ChatMember, DepartedMember, GroupMessage, IncomingEvent,
+    Membership, MembershipChangeKind, MembershipEvent, Message, MessageContent, MessageKind,
+    PendingCommit, SendState, StateChange,
 };
 use crate::{Result, StateReader, StateStore, StoreTxn};
 
@@ -20,6 +20,8 @@ use crate::{Result, StateReader, StateStore, StoreTxn};
 #[derive(Debug, Clone)]
 pub struct BaseClient {
     pub(crate) own: DeviceRef,
+    /// See [`BaseClient::failing_on_unknown_device_lists`].
+    fail_on_unknown_lists: bool,
 }
 
 enum Outcome {
@@ -30,7 +32,29 @@ enum Outcome {
 
 impl BaseClient {
     pub fn new(own: DeviceRef) -> Self {
-        Self { own }
+        Self {
+            own,
+            fail_on_unknown_lists: false,
+        }
+    }
+
+    /// Makes [`BaseClient::apply`] fail with
+    /// [`CryptoError::DeviceListUnknown`], rolling the event back, where it
+    /// would otherwise skip a message whose credential names a user without
+    /// a known DeviceList: the caller fetches the list and applies the event
+    /// again.
+    pub fn failing_on_unknown_device_lists(mut self) -> Self {
+        self.fail_on_unknown_lists = true;
+        self
+    }
+
+    fn rejects(&self, err: CryptoError) -> Result<Outcome> {
+        match err {
+            err @ CryptoError::DeviceListUnknown { .. } if self.fail_on_unknown_lists => {
+                Err(err.into())
+            }
+            _ => Ok(Outcome::Applied),
+        }
     }
 
     pub fn own_device(&self) -> &DeviceRef {
@@ -58,10 +82,9 @@ impl BaseClient {
         })
     }
 
-    /// Merges this device's pending commit after gim-server accepted it at
-    /// `seq`, and updates the chat members. The persisted
-    /// [`crate::model::PendingCommit`] is deleted, or marked merged if a
-    /// follow-up is still to be done.
+    /// Merges this device's pending commit after the hub accepted it at
+    /// `seq`, deletes the persisted [`crate::model::PendingCommit`] and
+    /// updates the chat members.
     pub fn merge_own_commit<S: StateStore>(
         &self,
         store: &S,
@@ -71,14 +94,7 @@ impl BaseClient {
     ) -> Result<Vec<StateChange>> {
         store.transaction(|txn| {
             engine.merge_pending_commit(&*txn, group_id)?;
-            if let Some(mut pending) = txn.pending_commit(group_id)? {
-                if pending.then == AfterCommit::Nothing {
-                    txn.remove_pending_commit(group_id)?;
-                } else {
-                    pending.merged = true;
-                    txn.upsert_pending_commit(&pending)?;
-                }
-            }
+            txn.remove_pending_commit(group_id)?;
             let mut changes = Vec::new();
             let own_user = self.own.user_id.clone();
             self.update_membership(txn, engine, group_id, seq, &own_user, None, &mut changes)?;
@@ -155,11 +171,10 @@ impl BaseClient {
 
     /// Reconciles MLS pending commits with the persisted
     /// [`crate::model::PendingCommit`] records; run at startup before any
-    /// group work. An MLS pending commit without an unmerged record can
-    /// never be posted and is cleared; an unmerged record whose MLS group
-    /// has no pending commit can never be merged and is dropped. Merged
-    /// records (only the follow-up left) are kept. Idempotent; returns the
-    /// groups that were repaired.
+    /// group work. An MLS pending commit without a record can never be
+    /// posted and is cleared; a record whose MLS group has no pending commit
+    /// can never be merged and is dropped. Idempotent; returns the groups
+    /// that were repaired.
     pub fn reconcile_pending_commits<S: StateStore>(
         &self,
         store: &S,
@@ -174,14 +189,14 @@ impl BaseClient {
         let mut repaired = Vec::new();
         for group_id in &groups {
             let dangling = match records.get(group_id) {
-                Some(record) if !record.merged => {
+                Some(_) => {
                     let dangling = !has_mls_pending_commit(store, engine, group_id)?;
                     if dangling {
                         store.transaction(|txn| Ok(txn.remove_pending_commit(group_id)?))?;
                     }
                     dangling
                 }
-                _ => {
+                None => {
                     store.transaction(|txn| match engine.clear_pending_commit(&*txn, group_id) {
                         Ok(()) => Ok(true),
                         Err(CryptoError::NoPendingCommit) => Ok(false),
@@ -193,8 +208,8 @@ impl BaseClient {
                 repaired.push(group_id.clone());
             }
         }
-        for (group_id, record) in records {
-            if !record.merged && !groups.contains(&group_id) {
+        for group_id in records.into_keys() {
+            if !groups.contains(&group_id) {
                 store.transaction(|txn| Ok(txn.remove_pending_commit(&group_id)?))?;
                 repaired.push(group_id);
             }
@@ -226,8 +241,13 @@ impl BaseClient {
                 IncomingEvent::MemberAdded { .. } => {}
                 IncomingEvent::MemberRemoved { group_id, device } => {
                     if device != self.own {
-                        // Left the fan-out list but maybe not the MLS tree.
-                        txn.add_departed_member(&DepartedMember { group_id, device })?;
+                        // Normally removed by the commit already applied;
+                        // a hub-side removal leaves it in the MLS tree.
+                        if engine.has_group(&*txn, &group_id)?
+                            && engine.group_members(&*txn, &group_id)?.contains(&device)
+                        {
+                            txn.add_departed_member(&DepartedMember { group_id, device })?;
+                        }
                     } else if let Some(mut chat) = txn.chat(&group_id)? {
                         if chat.membership == Membership::Joined {
                             chat.membership = Membership::Left;
@@ -239,6 +259,34 @@ impl BaseClient {
                 IncomingEvent::KeyPackagesLow => changes.push(StateChange::KeyPackagesLow),
             }
             Ok(changes)
+        })
+    }
+
+    /// Records the joined groups' members among `devices` (revoked in their
+    /// user's DeviceList) as departed, so that a remaining member removes
+    /// them by a commit.
+    pub fn record_revoked<S: StateStore>(
+        &self,
+        store: &S,
+        engine: &MlsEngine,
+        devices: &[DeviceRef],
+    ) -> Result<()> {
+        store.transaction(|txn| {
+            for chat in txn.chats()? {
+                let gid = &chat.group_id;
+                if chat.membership != Membership::Joined || !engine.has_group(&*txn, gid)? {
+                    continue;
+                }
+                for member in engine.group_members(&*txn, gid)? {
+                    if devices.contains(&member) && member != self.own {
+                        txn.add_departed_member(&DepartedMember {
+                            group_id: gid.clone(),
+                            device: member,
+                        })?;
+                    }
+                }
+            }
+            Ok(())
         })
     }
 
@@ -336,7 +384,7 @@ impl BaseClient {
         changes: &mut Vec<StateChange>,
     ) -> Result<Outcome> {
         // OpenMLS cannot process this device's own messages: an own commit
-        // was merged when the server accepted it, an own application message
+        // was merged when the hub accepted it, an own application message
         // only confirms the send.
         if message.sender == self.own {
             if message.kind == MessageKind::Application {
@@ -348,6 +396,11 @@ impl BaseClient {
         }
         if message.kind == MessageKind::Welcome {
             return self.process_welcome(txn, engine, message, changes);
+        }
+        // Not even decrypted: the hub names a sender revoked in its user's
+        // latest DeviceList (gim-crypto checks the decrypted sender too).
+        if message.kind == MessageKind::Application && engine.is_revoked(&message.sender) {
+            return Ok(Outcome::Applied);
         }
         let group_id = &message.group_id;
         let decrypted = match decrypt_to_envelope(engine, &*txn, group_id, &message.payload) {
@@ -366,10 +419,11 @@ impl BaseClient {
             }
             // Undecryptable or malformed: skip it so it cannot block the group.
             Err(
-                CryptoError::InvalidInput { .. }
+                err @ (CryptoError::InvalidInput { .. }
                 | CryptoError::Mls { .. }
-                | CryptoError::InvalidCredential { .. },
-            ) => return Ok(Outcome::Applied),
+                | CryptoError::InvalidCredential { .. }
+                | CryptoError::DeviceListUnknown { .. }),
+            ) => return self.rejects(err),
         };
         match decrypted {
             DecryptedMessage::Envelope {
@@ -400,6 +454,17 @@ impl BaseClient {
                     changes,
                 )?
             }
+            DecryptedMessage::Handshake(ProcessedMessage::Proposal {
+                removed: Some(device),
+                ..
+            }) if device != self.own => {
+                // A member leaving (or proposed for removal): one of the
+                // others commits it.
+                txn.add_departed_member(&DepartedMember {
+                    group_id: group_id.clone(),
+                    device,
+                })?;
+            }
             DecryptedMessage::Handshake(_) => {}
         }
         Ok(Outcome::Applied)
@@ -416,7 +481,7 @@ impl BaseClient {
             Ok(joined) => joined,
             Err(err @ CryptoError::Store { .. }) => return Err(err.into()),
             // Duplicate (group already joined) or invalid Welcome.
-            Err(_) => return Ok(Outcome::Applied),
+            Err(err) => return self.rejects(err),
         };
         let group_id = &message.group_id;
         if &joined.group_id != group_id {
@@ -848,7 +913,7 @@ impl BaseClient {
         Ok(())
     }
 
-    /// Records that gim-server accepted an own message at `seq`.
+    /// Records that the hub accepted an own message at `seq`.
     pub(crate) fn mark_sent_in<T: StoreTxn>(
         &self,
         txn: &mut T,

@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use gim_common::{DeviceRef, GroupId};
 use gim_crypto::{
-    CryptoError, CryptoStore, DeviceListCache, MemoryCryptoStore, MlsEngine, ProcessedMessage,
+    inspect_handshake, message_epoch, private_message_epoch, CryptoError, CryptoStore,
+    DeviceListCache, HandshakeKind, MemoryCryptoStore, MlsEngine, ProcessedMessage,
 };
 use gim_identity::{DeviceList, DeviceSigningKey, RootKey, SignedDeviceCert};
 use openmls::prelude::tls_codec::Deserialize as _;
@@ -245,7 +246,19 @@ fn revoked_device_from_cache_is_removed_and_rejected() {
             .unwrap());
     }
 
-    // Bob no longer accepts commits from the revoked device.
+    // Bob no longer accepts application messages or commits from the
+    // revoked device.
+    let message = carol
+        .engine
+        .encrypt(&carol.store, &group(), b"still here")
+        .unwrap();
+    assert!(matches!(
+        bob.process(&message),
+        Err(CryptoError::InvalidCredential { .. })
+    ));
+    assert!(alice.engine.is_revoked(&carol.me));
+    assert!(!alice.engine.is_revoked(&bob.me));
+
     let from_carol = carol
         .engine
         .remove_members(&carol.store, &group(), std::slice::from_ref(&alice.me))
@@ -268,4 +281,97 @@ fn revoked_device_from_cache_is_removed_and_rejected() {
         ProcessedMessage::Commit { removed, .. } => assert_eq!(removed, vec![carol.me.clone()]),
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn hub_reads_epoch_and_membership_from_handshakes() {
+    let (alice, bob, carol) = trio();
+    let app = bob.engine.encrypt(&bob.store, &group(), b"hi").unwrap();
+    assert_eq!(message_epoch(&app).unwrap(), 1);
+    assert_eq!(private_message_epoch(&app).unwrap(), 1);
+    assert!(inspect_handshake(&app).is_err());
+
+    let dave = Device::new(4);
+    alice.learn(&[&dave]);
+    let out = alice
+        .engine
+        .add_members(&alice.store, &group(), &[dave.key_package()])
+        .unwrap();
+    // Handshakes are not accepted as application messages.
+    assert!(private_message_epoch(&out.commit).is_err());
+    let info = inspect_handshake(&out.commit).unwrap();
+    assert_eq!(info.group_id, group().as_str().as_bytes());
+    assert_eq!(
+        (info.kind, info.epoch, info.sender_leaf),
+        (HandshakeKind::Commit, 1, Some(0))
+    );
+    assert_eq!(info.added, vec![dave.me.clone()]);
+    assert!(info.removed_leaves.is_empty());
+    assert_eq!(info.referenced, 0);
+    alice
+        .engine
+        .clear_pending_commit(&alice.store, &group())
+        .unwrap();
+
+    let out = alice
+        .engine
+        .remove_members(&alice.store, &group(), std::slice::from_ref(&carol.me))
+        .unwrap();
+    let info = inspect_handshake(&out.commit).unwrap();
+    assert_eq!(info.removed_leaves, vec![2]);
+    assert!(info.added.is_empty());
+}
+
+#[test]
+fn leaving_sends_a_self_remove_proposal_that_another_member_commits() {
+    let (alice, bob, carol) = trio();
+    let proposal = carol.engine.leave_group(&carol.store, &group()).unwrap();
+    assert_eq!(wire_format(&proposal), WireFormat::PublicMessage);
+    let info = inspect_handshake(&proposal).unwrap();
+    assert_eq!(info.kind, HandshakeKind::Proposal);
+    assert_eq!((info.epoch, info.removed_leaves), (1, vec![2]));
+    for device in [&alice, &bob] {
+        match device.process(&proposal).unwrap() {
+            ProcessedMessage::Proposal { sender, removed } => {
+                assert_eq!(sender, carol.me);
+                assert_eq!(removed, Some(carol.me.clone()));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    // The committer drops the stored proposal and removes Carol inline.
+    let out = alice
+        .engine
+        .remove_members(&alice.store, &group(), std::slice::from_ref(&carol.me))
+        .unwrap();
+    assert_eq!(inspect_handshake(&out.commit).unwrap().referenced, 0);
+    alice
+        .engine
+        .merge_pending_commit(&alice.store, &group())
+        .unwrap();
+    match bob.process(&out.commit).unwrap() {
+        ProcessedMessage::Commit { removed, .. } => assert_eq!(removed, vec![carol.me.clone()]),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        sorted(alice.engine.group_members(&alice.store, &group()).unwrap()),
+        sorted(vec![alice.me.clone(), bob.me.clone()])
+    );
+}
+
+#[test]
+fn hub_validates_uploaded_key_packages() {
+    let (alice, bob) = (Device::new(1), Device::new(2));
+    let key_package = bob.key_package();
+    // Fail closed without the uploader's DeviceList.
+    assert!(matches!(
+        alice.engine.key_package_device(&key_package),
+        Err(CryptoError::DeviceListUnknown { user_id }) if user_id == bob.me.user_id
+    ));
+    alice.learn(&[&bob]);
+    assert_eq!(
+        alice.engine.key_package_device(&key_package).unwrap(),
+        bob.me
+    );
+    assert!(alice.engine.key_package_device(b"junk").is_err());
 }

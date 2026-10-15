@@ -169,11 +169,14 @@ impl User {
         let hooks = MemoryHooks::new();
         let client = open(transport, &hooks).await;
         assert_eq!(client.session().await.unwrap(), None);
-        let session = client
-            .register(handle.to_string(), name.to_string())
-            .await
-            .unwrap();
-        assert_eq!(session.handle, handle);
+        let code = client.create_identity(name.to_string()).await.unwrap();
+        assert!(!code.is_empty());
+        let session = client.session().await.unwrap().unwrap();
+        assert_eq!(session.display_name, name);
+        // Handles are claimed through the directory; the FFI does not
+        // expose it yet.
+        let user_id = gim_common::UserId::new(session.user_id.clone()).unwrap();
+        transport.service().claim_handle(&user_id, handle).unwrap();
         Self {
             client,
             hooks,
@@ -536,16 +539,24 @@ async fn group_info_and_member_names_reach_joiners() {
         items.iter().any(|c| c.chat_id == chat && c.name == "Crew")
     })
     .await;
-    let mut names: Vec<String> = bob
-        .client
-        .chat_members(chat.clone())
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|p| p.display_name)
-        .collect();
-    names.sort();
-    assert_eq!(names, ["Alice", "Bob"]);
+    // Profiles are resolved in the background after the chat shows up.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let mut names: Vec<String> = bob
+            .client
+            .chat_members(chat.clone())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| p.display_name)
+            .collect();
+        names.sort();
+        if names == ["Alice", "Bob"] {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "names: {names:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     let avatar = alice.hooks.path("boat.png");
     std::fs::write(&avatar, b"png bytes").unwrap();

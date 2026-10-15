@@ -431,6 +431,11 @@ macro_rules! delegate_reader {
                 let $this = self;
                 Reader($conn).membership_events(group_id)
             }
+
+            fn device_lists(&self) -> StoreResult<Vec<(UserId, Vec<u8>)>> {
+                let $this = self;
+                Reader($conn).device_lists()
+            }
         }
     };
 }
@@ -667,6 +672,13 @@ impl StoreTxn for SqliteTxn<'_> {
             ],
         )
     }
+
+    fn upsert_device_list(&mut self, user_id: &UserId, device_list: &[u8]) -> StoreResult<()> {
+        self.execute(
+            "INSERT OR REPLACE INTO device_lists (user_id, data) VALUES (?1, ?2)",
+            params![user_id.as_str(), device_list],
+        )
+    }
 }
 
 impl<'a> CryptoStore for SqliteTxn<'a> {
@@ -751,7 +763,7 @@ mod tests {
     #[test]
     fn identity_credential_round_trip() {
         let store = SqliteStore::open_in_memory().unwrap();
-        for credential in [Some(vec![7u8; 48]), None] {
+        for credential in [vec![7u8; 48], vec![8u8; 40]] {
             let identity = StoredIdentity {
                 device: DeviceRef::parse("alice", "phone").unwrap(),
                 signature_private_key: vec![1; 32],

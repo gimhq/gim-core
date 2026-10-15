@@ -1,10 +1,11 @@
-//! The network boundary of [`crate::Client`], in domain terms. The gim-server
-//! HTTP/WebSocket implementation maps it onto the gim-proto DTOs; tests use
-//! [`crate::testing::FakeTransport`].
+//! The network boundary of [`crate::Client`], in domain terms. The gim-hub
+//! API v2 HTTP/WebSocket implementation maps it onto the gim-proto v2 DTOs;
+//! tests use [`crate::testing::FakeTransport`].
 //!
 //! The transport is stateless with respect to authentication: every call
-//! after registration carries the device's [`AccessToken`], so one transport
-//! can serve several clients.
+//! after sign-in carries the device's [`AccessToken`], so one transport can
+//! serve several clients. Identity objects (DeviceList, AuthResponse,
+//! recovery backup) are opaque gim-identity CBOR bytes here.
 
 use std::fmt;
 use std::ops::Range;
@@ -12,11 +13,11 @@ use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use gim_base::model::{ChatKind, GroupMessage, IncomingEvent, MessageKind, UserInfo};
+use gim_base::model::{ChatKind, GroupMessage, IncomingEvent};
 use gim_common::{ClientId, DeviceRef, GroupId, UserId};
 use serde::{Deserialize, Serialize};
 
-/// Bearer token of a registered device.
+/// Bearer token of a signed-in device.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct AccessToken(String);
@@ -37,13 +38,32 @@ impl fmt::Debug for AccessToken {
     }
 }
 
-/// Result of [`Transport::register_device`].
+/// Result of [`Transport::auth_challenge`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Registration {
-    pub device: DeviceRef,
+pub struct Challenge {
+    /// gim-identity AuthChallenge bytes, signed as is into an AuthResponse.
+    pub challenge: Vec<u8>,
+    /// `hub_id` of the hub: the challenge's audience.
+    pub hub_id: String,
+}
+
+/// Result of [`Transport::create_session`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionToken {
     pub token: AccessToken,
-    /// Head of the device's event stream; sync starts after it.
-    pub cursor: u64,
+    /// Unix milliseconds; sign in again after this.
+    pub expires_at_ms: u64,
+}
+
+/// A user of the hub directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserRecord {
+    pub user_id: UserId,
+    /// Signed gim-identity DeviceList.
+    pub device_list: Vec<u8>,
+    pub handle: Option<String>,
+    /// The hub has no profiles; only test transports know one.
+    pub display_name: Option<String>,
 }
 
 /// Delivery-service view of a group.
@@ -52,11 +72,12 @@ pub struct GroupInfo {
     pub group_id: GroupId,
     pub kind: ChatKind,
     pub epoch: u64,
-    /// Fan-out list.
+    pub last_seq: u64,
+    /// Member devices, as the hub read them from the commits.
     pub members: Vec<DeviceRef>,
 }
 
-/// The calling device's KeyPackages on the server.
+/// The calling device's KeyPackages on the hub.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyPackageCount {
     /// Unclaimed one-time KeyPackages.
@@ -64,22 +85,52 @@ pub struct KeyPackageCount {
     pub has_last_resort: bool,
 }
 
-/// A message to post to a group.
+/// A KeyPackage claimed for one device.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OutgoingMessage {
-    /// Idempotency key: a repeated post returns the first `seq`.
+pub struct ClaimedKeyPackage {
+    pub device: DeviceRef,
+    pub key_package: Vec<u8>,
+}
+
+/// A Commit (or a Proposal) to submit to a group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutgoingCommit {
+    /// Idempotency key of the sending device.
     pub client_id: ClientId,
+    /// The PublicMessage carrying the Commit or Proposal.
+    pub mls_message: Vec<u8>,
+    /// Welcome of the devices the Commit adds.
+    pub welcome: Option<Vec<u8>>,
+    pub welcome_recipients: Vec<DeviceRef>,
+}
+
+/// Result of [`Transport::submit_commit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommitAccepted {
+    pub seq: u64,
+    /// Group epoch after the Commit.
     pub epoch: u64,
-    pub kind: MessageKind,
-    pub payload: Vec<u8>,
-    /// Welcome recipients; empty for other kinds.
-    pub recipients: Vec<DeviceRef>,
+    /// The hub already had this Commit (a resend); still a success.
+    pub duplicate: bool,
+}
+
+/// One event of the device's event stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HubEvent {
+    /// A group event for gim-base. Welcomes are messages of kind
+    /// `Welcome` at the seq of their Commit.
+    Group(IncomingEvent),
+    /// A user's signed DeviceList changed.
+    DeviceListUpdated {
+        user_id: UserId,
+        device_list: Vec<u8>,
+    },
 }
 
 /// Result of [`Transport::fetch_events`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventBatch {
-    pub events: Vec<IncomingEvent>,
+    pub events: Vec<HubEvent>,
     /// Pass as `cursor` next time.
     pub next_cursor: u64,
 }
@@ -94,20 +145,44 @@ pub enum TransportError {
     NotFound(String),
     #[error("conflict: {0}")]
     Conflict(String),
-    /// The event cursor is older than the server's retention; resync, then
+    /// The event cursor is older than the hub's retention; resync, then
     /// continue from the head `cursor`.
     #[error("cursor expired; head is {cursor}")]
     Gone { cursor: u64 },
     #[error("server error: {0}")]
     Server(String),
+    /// 413: the payload exceeds the hub's size limit; resending cannot
+    /// succeed.
+    #[error("too large: {0}")]
+    TooLarge(String),
+    /// The hub refused this device's sign-in for good (401
+    /// `invalid_signature` or `device_not_active`): the device was revoked
+    /// or its keys are broken.
+    #[error("device not active: {0}")]
+    DeviceNotActive(String),
 }
 
-/// Error of [`Transport::post_message`].
+/// Error of [`Transport::create_session`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SessionError {
+    /// 401 `invalid_challenge`: unknown, used, expired or foreign
+    /// challenge; a new challenge may succeed.
+    #[error("invalid challenge")]
+    InvalidChallenge,
+    /// 401 `invalid_signature` or `device_not_active`.
+    #[error("sign-in rejected: {0}")]
+    Rejected(String),
+    #[error(transparent)]
+    Transport(#[from] TransportError),
+}
+
+/// Error of [`Transport::submit_commit`] and [`Transport::post_message`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PostError {
-    /// A commit was posted for an epoch that is no longer current.
-    #[error("commit epoch {commit_epoch} is not the current epoch")]
-    EpochConflict { commit_epoch: u64 },
+    /// The message is not for the group's current epoch (409
+    /// `stale_epoch`).
+    #[error("stale epoch; the group is at epoch {current_epoch}")]
+    StaleEpoch { current_epoch: u64 },
     #[error(transparent)]
     Transport(#[from] TransportError),
 }
@@ -126,59 +201,79 @@ pub trait EventStream: Send {
 
 #[async_trait]
 pub trait Transport: Send + Sync {
-    /// Registers a new device; a known handle gets another device of the
-    /// same user.
-    async fn register_device(
-        &self,
-        handle: &str,
-        display_name: &str,
-    ) -> TransportResult<Registration>;
+    /// Stores the user's signed DeviceList (no token: it bootstraps the
+    /// user). `Conflict` if it does not supersede the stored one.
+    async fn put_device_list(&self, user_id: &UserId, device_list: Vec<u8>) -> TransportResult<()>;
 
-    async fn find_user(
+    /// A sign-in challenge for `device`, which must be active in its user's
+    /// stored DeviceList ([`TransportError::NotFound`] otherwise).
+    async fn auth_challenge(&self, device: &DeviceRef) -> TransportResult<Challenge>;
+
+    /// Redeems a gim-identity AuthResponse for a session token.
+    async fn create_session(&self, response: Vec<u8>) -> Result<SessionToken, SessionError>;
+
+    async fn put_recovery_backup(
         &self,
         token: &AccessToken,
-        handle: &str,
-    ) -> TransportResult<Option<UserInfo>>;
+        user_id: &UserId,
+        backup: Vec<u8>,
+    ) -> TransportResult<()>;
+
+    /// The user's signed DeviceList; `None` if the user is unknown.
+    async fn device_list(
+        &self,
+        token: &AccessToken,
+        user_id: &UserId,
+    ) -> TransportResult<Option<Vec<u8>>>;
 
     /// Looks a user up by id; `None` if there is no such user.
     async fn user(
         &self,
         token: &AccessToken,
         user_id: &UserId,
-    ) -> TransportResult<Option<UserInfo>>;
+    ) -> TransportResult<Option<UserRecord>>;
 
-    async fn list_devices(
+    /// The owner of `handle` in the hub directory, if claimed.
+    async fn find_handle(
         &self,
         token: &AccessToken,
-        user_id: &UserId,
-    ) -> TransportResult<Vec<DeviceRef>>;
+        handle: &str,
+    ) -> TransportResult<Option<UserId>>;
 
-    /// Uploads one-time KeyPackages and optionally replaces the last-resort
-    /// one (all TLS-serialized `MlsMessage`s).
+    /// Claims `handle` for the calling user; `Conflict` if another user
+    /// holds it.
+    async fn claim_handle(&self, token: &AccessToken, handle: &str) -> TransportResult<()>;
+
+    async fn release_handle(&self, token: &AccessToken, handle: &str) -> TransportResult<()>;
+
+    /// Publishes the calling user's display name where the transport keeps
+    /// profiles. The hub has none: a no-op by default.
+    async fn publish_display_name(&self, _token: &AccessToken, _name: &str) -> TransportResult<()> {
+        Ok(())
+    }
+
+    /// Uploads one-time KeyPackages, or with `last_resort` exactly one that
+    /// replaces the last-resort KeyPackage (TLS-serialized `MlsMessage`s).
     async fn upload_key_packages(
         &self,
         token: &AccessToken,
         key_packages: Vec<Vec<u8>>,
-        last_resort: Option<Vec<u8>>,
+        last_resort: bool,
     ) -> TransportResult<()>;
 
     async fn key_package_count(&self, token: &AccessToken) -> TransportResult<KeyPackageCount>;
 
-    /// Claims one KeyPackage of `device`; `NotFound` if it has none.
-    async fn claim_key_package(
+    /// Claims one KeyPackage of every active device of `users`; devices
+    /// without any are left out.
+    async fn claim_key_packages(
         &self,
         token: &AccessToken,
-        device: &DeviceRef,
-    ) -> TransportResult<Vec<u8>>;
+        users: &[UserId],
+    ) -> TransportResult<Vec<ClaimedKeyPackage>>;
 
-    /// Creates a server group; the caller and `members` form its fan-out
-    /// list.
-    async fn create_group(
-        &self,
-        token: &AccessToken,
-        kind: ChatKind,
-        members: &[DeviceRef],
-    ) -> TransportResult<GroupId>;
+    /// Creates a group (epoch 0, the caller as its only member); the hub
+    /// assigns its id.
+    async fn create_group(&self, token: &AccessToken, kind: ChatKind) -> TransportResult<GroupId>;
 
     async fn group_info(
         &self,
@@ -186,29 +281,25 @@ pub trait Transport: Send + Sync {
         group_id: &GroupId,
     ) -> TransportResult<GroupInfo>;
 
-    /// The groups whose fan-out list has the calling device.
+    /// The groups the calling device is a member of.
     async fn list_groups(&self, token: &AccessToken) -> TransportResult<Vec<GroupInfo>>;
 
-    async fn add_group_members(
+    /// Submits a Commit (with its Welcome) or a Proposal.
+    async fn submit_commit(
         &self,
         token: &AccessToken,
         group_id: &GroupId,
-        devices: &[DeviceRef],
-    ) -> TransportResult<()>;
+        commit: OutgoingCommit,
+    ) -> Result<CommitAccepted, PostError>;
 
-    async fn remove_group_members(
-        &self,
-        token: &AccessToken,
-        group_id: &GroupId,
-        devices: &[DeviceRef],
-    ) -> TransportResult<()>;
-
-    /// Posts a message and returns its per-group `seq`.
+    /// Posts an application message and returns its per-group `seq`;
+    /// idempotent on `client_id`.
     async fn post_message(
         &self,
         token: &AccessToken,
         group_id: &GroupId,
-        message: OutgoingMessage,
+        client_id: ClientId,
+        mls_message: Vec<u8>,
     ) -> Result<u64, PostError>;
 
     /// Events after `cursor` (`None`: from the start), waiting up to `wait`
@@ -221,9 +312,9 @@ pub trait Transport: Send + Sync {
     ) -> TransportResult<EventBatch>;
 
     /// Opens the live event stream after `cursor`: it replays the pending
-    /// events, then pushes new ones. `Ok(None)` if the transport or server
-    /// has no live stream; the caller long-polls
-    /// [`Transport::fetch_events`] instead.
+    /// events, then pushes new ones. `Ok(None)` if the transport or hub has
+    /// no live stream; the caller long-polls [`Transport::fetch_events`]
+    /// instead.
     async fn open_stream(
         &self,
         _token: &AccessToken,
@@ -232,16 +323,24 @@ pub trait Transport: Send + Sync {
         Ok(None)
     }
 
-    /// Makes `devices` known for resolving the device ids of membership
-    /// events, e.g. the members of stored chats after a restart.
-    fn seed_device_directory(&self, _devices: &[DeviceRef]) {}
+    /// Up to `limit` unacknowledged Welcomes of the calling device, oldest
+    /// first, as messages of kind `Welcome`.
+    async fn pending_welcomes(
+        &self,
+        token: &AccessToken,
+        limit: u32,
+    ) -> TransportResult<Vec<GroupMessage>>;
 
-    /// Up to `limit` messages of the group with `seq > after_seq`, ascending.
+    /// Acknowledges the device's Welcome to the group.
+    async fn ack_welcome(&self, token: &AccessToken, group_id: &GroupId) -> TransportResult<()>;
+
+    /// Up to `limit` messages of the group with `seq >= from_seq`,
+    /// ascending.
     async fn group_messages(
         &self,
         token: &AccessToken,
         group_id: &GroupId,
-        after_seq: u64,
+        from_seq: u64,
         limit: u32,
     ) -> TransportResult<Vec<GroupMessage>>;
 
@@ -255,4 +354,12 @@ pub trait Transport: Send + Sync {
         blob_id: &str,
         range: Option<Range<u64>>,
     ) -> TransportResult<Vec<u8>>;
+
+    /// Test transports only: the stand-in for device linking that lets
+    /// [`crate::Client::register`] add a device to an existing user.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    fn test_linking(&self) -> Option<&crate::testing::TestLinking> {
+        None
+    }
 }

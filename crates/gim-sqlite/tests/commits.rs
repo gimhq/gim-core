@@ -4,7 +4,7 @@
 mod common;
 
 use common::{group, new_client_id, setup, Device};
-use gim_base::model::{AfterCommit, PendingCommit};
+use gim_base::model::PendingCommit;
 use gim_base::{StateReader, StateStore, StoreTxn};
 use gim_test::FakeDeliveryService;
 
@@ -20,14 +20,13 @@ fn take_mls_pending_commit(device: &Device, g: &gim_common::GroupId) -> bool {
         .unwrap()
 }
 
-fn record(g: &gim_common::GroupId, epoch: u64, merged: bool) -> PendingCommit {
+fn record(g: &gim_common::GroupId, epoch: u64) -> PendingCommit {
     PendingCommit {
         group_id: g.clone(),
         client_id: new_client_id(),
         epoch,
         payload: vec![1],
-        merged,
-        then: AfterCommit::Nothing,
+        welcome: None,
     }
 }
 
@@ -69,28 +68,17 @@ fn startup_reconciles_dangling_pending_commits() {
     assert!(!take_mls_pending_commit(&alice, &g));
     assert_eq!(alice.epoch(&g), epoch);
 
-    // An unmerged record without an MLS pending commit is dropped, also
-    // for a group that is gone.
+    // A record without an MLS pending commit is dropped, also for a group
+    // that is gone.
     let gone = group("gone");
-    upsert(record(&g, epoch, false));
-    upsert(record(&gone, 1, false));
+    upsert(record(&g, epoch));
+    upsert(record(&gone, 1));
     assert_eq!(reconcile(), vec![g.clone(), gone]);
     assert!(alice.store.pending_commits().unwrap().is_empty());
 
-    // A merged record only has its follow-up left: kept.
-    let merged = record(&g, epoch, true);
-    upsert(merged.clone());
-    assert!(reconcile().is_empty());
-    assert_eq!(alice.store.pending_commits().unwrap(), vec![merged.clone()]);
-    // An MLS pending commit next to a merged record is dangling.
-    mls_commit();
-    assert_eq!(reconcile(), vec![g.clone()]);
-    assert_eq!(alice.store.pending_commits().unwrap(), vec![merged]);
-    assert!(!take_mls_pending_commit(&alice, &g));
-
     // A matching pair is left alone and can still be merged.
     let out = mls_commit();
-    upsert(record(&g, out.epoch, false));
+    upsert(record(&g, out.epoch));
     assert!(reconcile().is_empty());
     alice
         .client

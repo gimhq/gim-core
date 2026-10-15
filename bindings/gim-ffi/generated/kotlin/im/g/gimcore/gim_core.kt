@@ -840,6 +840,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_create_group_chat(
     ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_create_identity(
+    ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_delete_message(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_edit_message(
@@ -855,8 +857,6 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_gim_core_checksum_method_gimclient_mark_read(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_react(
-    ): Int
-    external fun uniffi_gim_core_checksum_method_gimclient_register(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_remove_member(
     ): Int
@@ -969,6 +969,8 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_create_group_chat(`ptr`: Long,`name`: RustBuffer.ByValue,`memberUserIds`: RustBuffer.ByValue,
     ): Long
+    external fun uniffi_gim_core_fn_method_gimclient_create_identity(`ptr`: Long,`displayName`: RustBuffer.ByValue,
+    ): Long
     external fun uniffi_gim_core_fn_method_gimclient_delete_message(`ptr`: Long,`chatId`: RustBuffer.ByValue,`messageId`: RustBuffer.ByValue,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_edit_message(`ptr`: Long,`chatId`: RustBuffer.ByValue,`messageId`: RustBuffer.ByValue,`newBody`: RustBuffer.ByValue,
@@ -984,8 +986,6 @@ internal object UniffiLib {
     external fun uniffi_gim_core_fn_method_gimclient_mark_read(`ptr`: Long,`chatId`: RustBuffer.ByValue,`upToMessageId`: RustBuffer.ByValue,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_react(`ptr`: Long,`chatId`: RustBuffer.ByValue,`messageId`: RustBuffer.ByValue,`emoji`: RustBuffer.ByValue,
-    ): Long
-    external fun uniffi_gim_core_fn_method_gimclient_register(`ptr`: Long,`handle`: RustBuffer.ByValue,`displayName`: RustBuffer.ByValue,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_remove_member(`ptr`: Long,`chatId`: RustBuffer.ByValue,`userId`: RustBuffer.ByValue,
     ): Long
@@ -1226,6 +1226,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_gim_core_checksum_method_gimclient_create_group_chat() and 0xFFFF) != 10041) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_create_identity() and 0xFFFF) != 62810) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_delete_message() and 0xFFFF) != 40750) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1248,9 +1251,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_react() and 0xFFFF) != 11948) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if ((lib.uniffi_gim_core_checksum_method_gimclient_register() and 0xFFFF) != 52011) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_remove_member() and 0xFFFF) != 31958) {
@@ -2504,6 +2504,14 @@ public interface GimClientInterface {
      */
     suspend fun `createGroupChat`(`name`: kotlin.String, `memberUserIds`: List<kotlin.String>): kotlin.String
     
+    /**
+     * Creates a new identity with this device as its first one: uploads
+     * its signed DeviceList, recovery backup and KeyPackages to the hub,
+     * signs in and persists the session. Returns the recovery code, which
+     * is not stored and must be shown to the user once.
+     */
+    suspend fun `createIdentity`(`displayName`: kotlin.String): kotlin.String
+    
     suspend fun `deleteMessage`(`chatId`: kotlin.String, `messageId`: kotlin.String)
     
     suspend fun `editMessage`(`chatId`: kotlin.String, `messageId`: kotlin.String, `newBody`: kotlin.String)
@@ -2533,12 +2541,6 @@ public interface GimClientInterface {
     suspend fun `markRead`(`chatId`: kotlin.String, `upToMessageId`: kotlin.String)
     
     suspend fun `react`(`chatId`: kotlin.String, `messageId`: kotlin.String, `emoji`: kotlin.String)
-    
-    /**
-     * Creates the account and this device on the server and persists the
-     * session.
-     */
-    suspend fun `register`(`handle`: kotlin.String, `displayName`: kotlin.String): Session
     
     suspend fun `removeMember`(`chatId`: kotlin.String, `userId`: kotlin.String)
     
@@ -2892,6 +2894,34 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
     }
 
     
+    /**
+     * Creates a new identity with this device as its first one: uploads
+     * its signed DeviceList, recovery backup and KeyPackages to the hub,
+     * signs in and persists the session. Returns the recovery code, which
+     * is not stored and must be shown to the user once.
+     */
+    @Throws(GimException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `createIdentity`(`displayName`: kotlin.String) : kotlin.String {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_gim_core_fn_method_gimclient_create_identity(
+                uniffiHandle,
+                
+        FfiConverterString.lower(`displayName`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_gim_core_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_gim_core_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterString.lift(it) },
+        // Error FFI converter
+        GimException.ErrorHandler,
+    )
+    }
+
+    
     @Throws(GimException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
     override suspend fun `deleteMessage`(`chatId`: kotlin.String, `messageId`: kotlin.String) {
@@ -3091,33 +3121,6 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
         // lift function
         { },
         
-        // Error FFI converter
-        GimException.ErrorHandler,
-    )
-    }
-
-    
-    /**
-     * Creates the account and this device on the server and persists the
-     * session.
-     */
-    @Throws(GimException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `register`(`handle`: kotlin.String, `displayName`: kotlin.String) : Session {
-        return uniffiRustCallAsync(
-        callWithHandle { uniffiHandle ->
-            UniffiLib.uniffi_gim_core_fn_method_gimclient_register(
-                uniffiHandle,
-                
-        FfiConverterString.lower(`handle`),
-        FfiConverterString.lower(`displayName`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_gim_core_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.ffi_gim_core_rust_future_free_rust_buffer(future) },
-        // lift function
-        { FfiConverterTypeSession.lift(it) },
         // Error FFI converter
         GimException.ErrorHandler,
     )
@@ -5318,7 +5321,7 @@ public object FfiConverterTypeChatSummary: FfiConverterRustBuffer<ChatSummary> {
 
 data class ClientConfig (
     /**
-     * Base URL of gim-server, `http://` or `https://`.
+     * Base URL of the hub, `http://` or `https://`.
      */
     var `serverUrl`: kotlin.String
     
@@ -6164,7 +6167,7 @@ sealed class GimException: kotlin.Exception() {
     }
     
     /**
-     * gim-server answered with a non-success HTTP status.
+     * The hub answered with a non-success HTTP status.
      */
     class Server(
         

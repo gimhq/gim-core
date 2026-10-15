@@ -378,23 +378,6 @@ fn enums() -> Vec<(&'static str, Vec<Value>)> {
     ]
 }
 
-/// Sign-in schemas whose vendored shape predates the relayed hub contract
-/// update (`hub_id` audience, CBOR AuthResponse). While the vendored copy
-/// still has exactly this old shape (properties, required), the schema check
-/// is skipped for them; once re-vendored they are checked like the rest.
-const PRE_UPDATE_AUTH: &[(&str, &[&str], &[&str])] = &[
-    (
-        "AuthChallenge",
-        &["challenge", "challenge_id", "expires_at", "hub_peer_id"],
-        &["challenge", "challenge_id", "expires_at", "hub_peer_id"],
-    ),
-    (
-        "CreateSessionRequest",
-        &["challenge_id", "signature"],
-        &["challenge_id", "signature"],
-    ),
-];
-
 fn keys(value: &Value) -> BTreeSet<String> {
     value.as_object().unwrap().keys().cloned().collect()
 }
@@ -443,10 +426,6 @@ fn shape(spec: &Value, name: &str) -> (BTreeSet<String>, BTreeSet<String>) {
     (props, req)
 }
 
-fn set(names: &[&str]) -> BTreeSet<String> {
-    names.iter().map(|name| (*name).to_owned()).collect()
-}
-
 #[test]
 fn schemas_match_dtos() {
     let spec = spec();
@@ -457,12 +436,6 @@ fn schemas_match_dtos() {
             !props.is_empty(),
             "{name}: not an object schema in openapi.json"
         );
-
-        if let Some((_, old_props, old_req)) = PRE_UPDATE_AUTH.iter().find(|(n, ..)| *n == name) {
-            if props == set(old_props) && required == set(old_req) {
-                continue;
-            }
-        }
 
         assert_eq!(keys(&case.full), props, "{name}: property names");
         assert_eq!(keys(&case.min), required, "{name}: required properties");
