@@ -192,4 +192,116 @@ Opening a blob with a recovery code for an expected `user_id`:
 6. The user id derived from the root public key of `root_seed` equals the
    expected `user_id`.
 
-### Device link (TBD)
+### Device link
+
+Adds a new device to a user who already has a device. Implemented in
+`gim_identity::link`; test vectors: `crates/gim-identity/tests/vectors/link.json`.
+
+#### Flow
+
+1. The **new** device creates a device signing key, a random 16-byte
+   `link_id` and an X25519 (RFC 7748) key pair (`eph_secret`, `eph_pub`), and
+   shows a `LinkOffer` as a QR code.
+2. The **old** device scans it, issues a `SignedDeviceCert` for
+   `device_sig_pubkey`, signs a `DeviceList` that certifies it, seals a
+   `LinkBundle` to the offer and posts the sealed bytes through one of the
+   offer's hubs.
+3. The new device opens and verifies the bundle.
+4. Both devices display the SAS; the user confirms they match before either
+   device treats the link as complete.
+
+#### LinkOffer
+
+```
+LinkOffer = [
+  1,                            ; version
+  link_id: bstr .size 16,
+  eph_pub: bstr .size 32,       ; X25519 public key
+  device_sig_pubkey: bstr .size 32,
+  hubs: [ * tstr ],
+]
+```
+
+QR string form: `"gimlink:" || base64url(LinkOffer)`, the RFC 4648 §5
+alphabet without padding. Decoders MUST reject a missing or differently cased
+prefix, padding and non-zero trailing bits. `offer_bytes` below is the
+deterministic encoding of the offer.
+
+#### LinkBundle
+
+```
+LinkBundle = [
+  1,                            ; version
+  root_seed: bstr .size 32,     ; the user's root key seed
+  cert: bstr,                   ; SignedDeviceCert of the new device
+  device_list: bstr,            ; SignedDeviceList certifying it
+  self_group_welcome: bstr / null,
+]
+```
+
+#### Sealing
+
+The old device:
+
+1. Generates an ephemeral X25519 key pair (`sender_eph`, `sender_eph_pub`).
+2. `shared = X25519(sender_eph, eph_pub)`. If `shared` is all zero, it MUST
+   abort.
+3. `th = SHA-256(offer_bytes || sender_eph_pub)`.
+4. `key = HKDF-SHA256(salt = link_id, ikm = shared, info = "gim/link/key/v1" || th)`,
+   32 bytes (RFC 5869).
+5. Encrypts the `LinkBundle` bytes with AES-256-GCM under `key`, a random
+   12-byte `nonce` and AAD `th`.
+
+```
+SealedBundle = [
+  1,                            ; version
+  sender_eph_pub: bstr .size 32,
+  nonce: bstr .size 12,
+  ciphertext: bstr,             ; includes the 16-byte GCM tag
+]
+```
+
+#### Opening
+
+The new device recomputes `shared` with `eph_secret` (aborting on an all-zero
+value), `th` from its own `offer_bytes` and the received `sender_eph_pub`,
+and `key`, then decrypts. It MUST then verify, in order:
+
+1. The plaintext is a `LinkBundle` with version `1`.
+2. The root public key derived from `root_seed` verifies `cert`
+   (see DeviceCert).
+3. `cert.device_sig_pubkey` equals the offer's `device_sig_pubkey`.
+4. `device_list` verifies (see DeviceList) for the user id derived from the
+   root public key.
+5. `device_list` does not revoke the cert's `device_id` and certifies it.
+
+A failure at any step rejects the bundle. Decryption failure, cert mismatch
+(step 3), list mismatch (steps 4-5: another user, device missing),
+revocation and an unknown version are reported as distinct errors.
+
+#### Short authentication string
+
+```
+sas_bytes = HKDF-SHA256(salt = link_id, ikm = shared, info = "gim/link/sas/v1" || th)[0..4]
+sas       = uint32_be(sas_bytes) mod 1000000
+```
+
+Displayed as six decimal digits with leading zeros, split `"ddd ddd"`
+(e.g. `"012 345"`).
+
+#### Threat model
+
+- The QR channel is authentic: the old device reads the new device's
+  `eph_pub` and `device_sig_pubkey` unmodified. It need not be confidential.
+- The hub relay is not trusted. Only the holder of `eph_secret` can open a
+  sealed bundle, and the AAD and key bind it to the exact offer: an offer with
+  any changed field (including `device_sig_pubkey`) yields a different `th`
+  and the bundle does not decrypt.
+- Anyone who learns the offer (e.g. a camera or person that sees the QR
+  code) can seal a bundle of their own identity to it. The SAS
+  depends on `shared` and `sender_eph_pub`, so such a bundle shows a
+  different SAS on the new device than the old device displays; the user
+  MUST compare the SAS and reject a mismatch.
+- A 6-digit SAS gives a forger a one-in-a-million chance per attempt; the new
+  device SHOULD accept a single bundle per offer and create a new offer after
+  a mismatch.
