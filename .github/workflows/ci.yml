@@ -67,6 +67,40 @@ jobs:
             echo "error: GIMCore.xcframework.zip is $size bytes (limit $limit)"
             exit 1
           fi
+      - name: Link-test GIMCore.xcframework
+        run: |
+          xcf=out/ios/GIMCore.xcframework
+          fail=0
+          for slice in ios-arm64:iphoneos:arm64-apple-ios18.0 \
+                       ios-arm64-simulator:iphonesimulator:arm64-apple-ios18.0-simulator; do
+            IFS=: read -r dir sdk triple <<< "$slice"
+            lib=$xcf/$dir/libgim_core.a
+            # An app executable, and a relocatable link of every member as
+            # SwiftPM does when it links a package target.
+            for kind in executable relocatable; do
+              if [ "$kind" = executable ]; then
+                args=(bindings/apple/link-test/main.c "$lib"
+                      -framework Security -framework SystemConfiguration
+                      -framework CoreFoundation -lc++ -lresolv
+                      -o "$RUNNER_TEMP/link-test-$dir")
+              else
+                args=(-nostdlib -Xlinker -r -Xlinker -all_load "$lib"
+                      -o "$RUNNER_TEMP/GIMCore-$dir.o")
+              fi
+              log=$RUNNER_TEMP/link-$kind-$dir.log
+              status=0
+              xcrun --sdk "$sdk" clang -target "$triple" -I "$xcf/$dir/Headers" \
+                "${args[@]}" > "$log" 2>&1 || status=$?
+              cat "$log"
+              if [ "$status" -ne 0 ] || grep -q 'Assertion failed' "$log"; then
+                echo "error: $kind link of $dir failed (exit $status)"
+                fail=1
+              else
+                echo "$kind link of $dir: ok"
+              fi
+            done
+          done
+          exit "$fail"
       - uses: actions/upload-artifact@v4
         with:
           name: gim-core-ios-${{ github.sha }}
