@@ -10,6 +10,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod federation;
 pub mod sdk;
 
 use std::collections::{BTreeSet, HashMap};
@@ -109,12 +110,21 @@ pub async fn wait_for<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T 
 }
 
 /// Like [`wait_for`] for an async check.
-pub async fn eventually<T, F, Fut>(what: &str, mut check: F) -> T
+pub async fn eventually<T, F, Fut>(what: &str, check: F) -> T
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Option<T>>,
 {
-    let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+    eventually_within(what, WAIT_TIMEOUT, check).await
+}
+
+/// Like [`eventually`] with another timeout.
+pub async fn eventually_within<T, F, Fut>(what: &str, timeout: Duration, mut check: F) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
     loop {
         if let Some(value) = check().await {
             return value;

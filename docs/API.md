@@ -189,6 +189,7 @@ implementations fast and thread-safe.
 | `fetchThumbnail(chatId, messageId, destPath)` | file path? | `null`/`nil` if the media has no thumbnail. |
 | `chatList(listener)` | `TaskHandle` | |
 | `timeline(chatId)` | `Timeline` | |
+| `setLocalTimeZone(zone?)` | | Synchronous, never throws. Date separators follow `zone`; `null`/`nil` is UTC (the default). See *Local time zone*. |
 | `connectionState(listener)` | `TaskHandle` | `Offline` until `startSync` and after a failure while waiting to retry; `Connecting` → `Syncing` (catching up) → `Connected`. |
 | `typing(chatId, listener)` | `TaskHandle` | Reports user ids other than the signed-in user. |
 
@@ -211,8 +212,8 @@ Encryption keys and blob ids never leave Rust; pass the ids to `fetchMedia` / `f
   diffs) and returns whether more history exists.
 - `chatId()`.
 
-`TimelineItem` is a `Message` (`MessageItem`), a `DateSeparator` (start of a calendar day; in M1
-days are UTC days, not local ones) or a `MembershipChange` (`Added`, `Removed`, `Left`; group chats
+`TimelineItem` is a `Message` (`MessageItem`), a `DateSeparator` (`dayStartMs`: start of a local
+calendar day, see *Local time zone*) or a `MembershipChange` (`Added`, `Removed`, `Left`; group chats
 only, in seq order among the messages, at the time the change was applied on this device).
 `paginateBackwards` pages through locally stored history first, then through the server history:
 messages this device cannot decrypt (sent before it joined, or already read once and removed
@@ -220,6 +221,24 @@ locally) are skipped, and it returns `false` once nothing older is readable. `Me
 messages: `Pending → Sent → Delivered → Read`, or `Failed(reason)`. `Delivered` and `Read` are
 group ticks: they need a receipt from **every** device of **every** other member, so one
 recipient device that has not reported keeps the message at `Sent` (or `Delivered`).
+
+### Local time zone
+
+Date separators split calendar days in the time zone set with
+`setLocalTimeZone(zone)`; `null` / `nil` (the default) is UTC. `LocalTimeZone` is implemented by
+the app and answers `utcOffsetSecs(atMs)`: the offset from UTC in seconds in effect at that
+instant, DST included, so each item is bucketed with the offset valid at its own time:
+
+- Kotlin: `TimeZone.getDefault().getOffset(atMs) / 1000`
+- Swift: `Int32(TimeZone.current.secondsFromGMT(for: Date(timeIntervalSince1970: Double(atMs) / 1000)))`
+
+Set it once after `createClient`, before opening timelines. Call it again when the system time
+zone changes (Android `ACTION_TIMEZONE_CHANGED`, iOS `NSSystemTimeZoneDidChange`): every open
+timeline moves its date separators to the new days through its listener, as ordinary diffs
+(separators removed and inserted; message items stay). Offsets are asked once per UTC hour of the
+item timestamps (at the start of that hour) and cached until the zone is replaced, so it is
+called from a Rust background thread and must not call back into `GimClient`. The chat list does
+not bucket by day; format its timestamps natively.
 
 ## Listeners and threading
 

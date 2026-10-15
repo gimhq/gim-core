@@ -503,6 +503,22 @@ fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterInt32: FfiConverterPrimitive {
+    typealias FfiType = Int32
+    typealias SwiftType = Int32
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Int32 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Int32, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
     typealias FfiType = UInt64
     typealias SwiftType = UInt64
@@ -512,6 +528,22 @@ fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
     }
 
     public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterInt64: FfiConverterPrimitive {
+    typealias FfiType = Int64
+    typealias SwiftType = Int64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Int64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Int64, into buf: inout [UInt8]) {
         writeInt(&buf, lower(value))
     }
 }
@@ -1206,6 +1238,14 @@ public protocol GimClientProtocol: AnyObject, Sendable {
      * encrypted and uploaded before this returns.
      */
     func setGroupInfo(chatId: String, name: String?, avatarFilePath: String?) async throws 
+    
+    /**
+     * Sets the local time zone that timeline date separators split
+     * calendar days in; `None` (the default) is UTC. Call it again when
+     * the system time zone changes: open timelines move their date
+     * separators through their listeners.
+     */
+    func setLocalTimeZone(zone: LocalTimeZone?) 
     
     /**
      * Reports a reachability change from the platform network monitor.
@@ -1968,6 +2008,21 @@ open func setGroupInfo(chatId: String, name: String?, avatarFilePath: String?)as
 }
     
     /**
+     * Sets the local time zone that timeline date separators split
+     * calendar days in; `None` (the default) is UTC. Call it again when
+     * the system time zone changes: open timelines move their date
+     * separators through their listeners.
+     */
+open func setLocalTimeZone(zone: LocalTimeZone?)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_gim_core_fn_method_gimclient_set_local_time_zone(
+            self.uniffiCloneHandle(),
+        FfiConverterOptionTypeLocalTimeZone.lower(zone),uniffiCallStatus
+    )
+}
+}
+    
+    /**
      * Reports a reachability change from the platform network monitor.
      */
 open func setNetworkReachable(reachable: Bool)  {try! rustCall() {
@@ -2384,6 +2439,223 @@ public func FfiConverterTypeLinkSession_lift(_ handle: UInt64) throws -> LinkSes
 #endif
 public func FfiConverterTypeLinkSession_lower(_ value: LinkSession) -> UInt64 {
     return FfiConverterTypeLinkSession.lower(value)
+}
+
+
+
+
+
+
+/**
+ * The local time zone date separators split calendar days in. Implemented
+ * in Kotlin/Swift and set with `GimClient::set_local_time_zone`. May be
+ * called from any Rust thread; do not call back into `GimClient` from it.
+ */
+public protocol LocalTimeZone: AnyObject, Sendable {
+    
+    /**
+     * Offset from UTC in seconds in effect at `at_ms` (Unix milliseconds),
+     * DST included.
+     */
+    func utcOffsetSecs(atMs: Int64)  -> Int32
+    
+}
+/**
+ * The local time zone date separators split calendar days in. Implemented
+ * in Kotlin/Swift and set with `GimClient::set_local_time_zone`. May be
+ * called from any Rust thread; do not call back into `GimClient` from it.
+ */
+open class LocalTimeZoneImpl: LocalTimeZone, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_gim_core_fn_clone_localtimezone(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_gim_core_fn_free_localtimezone(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * Offset from UTC in seconds in effect at `at_ms` (Unix milliseconds),
+     * DST included.
+     */
+open func utcOffsetSecs(atMs: Int64) -> Int32  {
+    return try!  FfiConverterInt32.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_gim_core_fn_method_localtimezone_utc_offset_secs(
+            self.uniffiCloneHandle(),
+        FfiConverterInt64.lower(atMs),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceLocalTimeZone {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceLocalTimeZone = UniffiVTableCallbackInterfaceLocalTimeZone(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeLocalTimeZone.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface LocalTimeZone: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeLocalTimeZone.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface LocalTimeZone: handle missing in uniffiClone")
+            }
+        },
+        utcOffsetSecs: { (
+            uniffiHandle: UInt64,
+            atMs: Int64,
+            uniffiOutReturn: UnsafeMutablePointer<Int32>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Int32 in
+                guard let uniffiObj = try? FfiConverterTypeLocalTimeZone.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.utcOffsetSecs(
+                     atMs: try FfiConverterInt64.lift(atMs)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterInt32.lower($0) }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceLocalTimeZone> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceLocalTimeZone>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitLocalTimeZone() {
+    uniffi_gim_core_fn_init_callback_vtable_localtimezone(UniffiCallbackInterfaceLocalTimeZone.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLocalTimeZone: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<LocalTimeZone>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = LocalTimeZone
+
+    public static func lift(_ handle: UInt64) throws -> LocalTimeZone {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return LocalTimeZoneImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: LocalTimeZone) -> UInt64 {
+         if let rustImpl = value as? LocalTimeZoneImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LocalTimeZone {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: LocalTimeZone, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLocalTimeZone_lift(_ handle: UInt64) throws -> LocalTimeZone {
+    return try FfiConverterTypeLocalTimeZone.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLocalTimeZone_lower(_ value: LocalTimeZone) -> UInt64 {
+    return FfiConverterTypeLocalTimeZone.lower(value)
 }
 
 
@@ -5505,6 +5777,30 @@ fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeLocalTimeZone: FfiConverterRustBuffer {
+    typealias SwiftType = LocalTimeZone?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeLocalTimeZone.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeLocalTimeZone.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeMediaRef: FfiConverterRustBuffer {
     typealias SwiftType = MediaRef?
 
@@ -6058,6 +6354,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_gim_core_checksum_method_gimclient_set_group_info() != 58408) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_gim_core_checksum_method_gimclient_set_local_time_zone() != 51577) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_gim_core_checksum_method_gimclient_set_network_reachable() != 23325) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6130,6 +6429,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_gim_core_checksum_method_taskhandle_is_finished() != 55140) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_gim_core_checksum_method_localtimezone_utc_offset_secs() != 1483) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_gim_core_checksum_method_timeline_add_listener() != 55113) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6145,6 +6447,7 @@ private let initializationResult: InitializationResult = {
 
     uniffiCallbackInitChatListListener()
     uniffiCallbackInitConnectionStateListener()
+    uniffiCallbackInitLocalTimeZone()
     uniffiCallbackInitPlatformHooks()
     uniffiCallbackInitTimelineListener()
     uniffiCallbackInitTypingListener()

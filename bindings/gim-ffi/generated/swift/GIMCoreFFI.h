@@ -299,6 +299,13 @@ typedef void (*UniffiCallbackInterfacePlatformHooksMethod4)(uint64_t, int8_t* _N
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_LOCAL_TIME_ZONE_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_LOCAL_TIME_ZONE_METHOD0
+typedef void (*UniffiCallbackInterfaceLocalTimeZoneMethod0)(uint64_t, int64_t, int32_t* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_TIMELINE_LISTENER_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_TIMELINE_LISTENER_METHOD0
 typedef void (*UniffiCallbackInterfaceTimelineListenerMethod0)(uint64_t, RustBuffer, void* _Nonnull, 
@@ -344,6 +351,15 @@ typedef struct UniffiVTableCallbackInterfacePlatformHooks {
     UniffiCallbackInterfacePlatformHooksMethod3 _Nonnull dataDir;
     UniffiCallbackInterfacePlatformHooksMethod4 _Nonnull isNetworkReachable;
 } UniffiVTableCallbackInterfacePlatformHooks;
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_LOCAL_TIME_ZONE
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_LOCAL_TIME_ZONE
+typedef struct UniffiVTableCallbackInterfaceLocalTimeZone {
+    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
+    UniffiCallbackInterfaceClone _Nonnull uniffiClone;
+    UniffiCallbackInterfaceLocalTimeZoneMethod0 _Nonnull utcOffsetSecs;
+} UniffiVTableCallbackInterfaceLocalTimeZone;
 
 #endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_TIMELINE_LISTENER
@@ -565,6 +581,11 @@ uint64_t uniffi_gim_core_fn_method_gimclient_set_display_name(uint64_t ptr, Rust
 uint64_t uniffi_gim_core_fn_method_gimclient_set_group_info(uint64_t ptr, RustBuffer chat_id, RustBuffer name, RustBuffer avatar_file_path
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_SET_LOCAL_TIME_ZONE
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_SET_LOCAL_TIME_ZONE
+void uniffi_gim_core_fn_method_gimclient_set_local_time_zone(uint64_t ptr, RustBuffer zone, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_SET_NETWORK_REACHABLE
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_SET_NETWORK_REACHABLE
 void uniffi_gim_core_fn_method_gimclient_set_network_reachable(uint64_t ptr, int8_t reachable, RustCallStatus *_Nonnull out_status
@@ -743,6 +764,26 @@ void uniffi_gim_core_fn_method_taskhandle_cancel(uint64_t ptr, RustCallStatus *_
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_TASKHANDLE_IS_FINISHED
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_TASKHANDLE_IS_FINISHED
 int8_t uniffi_gim_core_fn_method_taskhandle_is_finished(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_CLONE_LOCALTIMEZONE
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_CLONE_LOCALTIMEZONE
+uint64_t uniffi_gim_core_fn_clone_localtimezone(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_FREE_LOCALTIMEZONE
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_FREE_LOCALTIMEZONE
+void uniffi_gim_core_fn_free_localtimezone(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_INIT_CALLBACK_VTABLE_LOCALTIMEZONE
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_INIT_CALLBACK_VTABLE_LOCALTIMEZONE
+void uniffi_gim_core_fn_init_callback_vtable_localtimezone(const UniffiVTableCallbackInterfaceLocalTimeZone* _Nonnull vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_LOCALTIMEZONE_UTC_OFFSET_SECS
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_LOCALTIMEZONE_UTC_OFFSET_SECS
+int32_t uniffi_gim_core_fn_method_localtimezone_utc_offset_secs(uint64_t ptr, int64_t at_ms, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_CLONE_TIMELINE
@@ -1289,6 +1330,12 @@ uint16_t uniffi_gim_core_checksum_method_gimclient_set_group_info(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_SET_LOCAL_TIME_ZONE
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_SET_LOCAL_TIME_ZONE
+uint16_t uniffi_gim_core_checksum_method_gimclient_set_local_time_zone(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_SET_NETWORK_REACHABLE
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_SET_NETWORK_REACHABLE
 uint16_t uniffi_gim_core_checksum_method_gimclient_set_network_reachable(void
@@ -1430,6 +1477,12 @@ uint16_t uniffi_gim_core_checksum_method_taskhandle_cancel(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_TASKHANDLE_IS_FINISHED
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_TASKHANDLE_IS_FINISHED
 uint16_t uniffi_gim_core_checksum_method_taskhandle_is_finished(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_LOCALTIMEZONE_UTC_OFFSET_SECS
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_LOCALTIMEZONE_UTC_OFFSET_SECS
+uint16_t uniffi_gim_core_checksum_method_localtimezone_utc_offset_secs(void
     
 );
 #endif
