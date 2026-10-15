@@ -81,6 +81,14 @@ key_pair!(
     DevicePublicKey
 );
 
+impl DeviceSigningKey {
+    /// The 32-byte Ed25519 seed, for persisting the device key in the local
+    /// MLS store; never transmit.
+    pub fn to_seed(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.0.to_bytes())
+    }
+}
+
 /// `context || 0x00 || tbs`, the message every signature covers.
 fn signing_input(context: &[u8], tbs: &[u8]) -> Vec<u8> {
     let mut message = Vec::with_capacity(context.len() + 1 + tbs.len());
@@ -117,6 +125,17 @@ mod tests {
         let debug = format!("{key:?}");
         assert!(debug.contains(&HEXLOWER.encode(key.public().as_bytes())));
         assert!(!debug.contains(&HEXLOWER.encode(&seed)));
+    }
+
+    #[test]
+    fn device_seed_round_trip() {
+        let seed = [0x24; 32];
+        let key = DeviceSigningKey::from_seed(&seed);
+        assert_eq!(*key.to_seed(), seed);
+        assert_eq!(
+            DeviceSigningKey::from_seed(&key.to_seed()).public(),
+            key.public()
+        );
     }
 
     #[test]
