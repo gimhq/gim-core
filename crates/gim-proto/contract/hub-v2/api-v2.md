@@ -108,18 +108,19 @@ the calling device's credential; one failing package rejects the whole upload.
 A leaf credential is accepted only if all of these hold, in order:
 
 1. the credential type is `0xF001` and its content decodes (gim-core validation steps 1-2);
-2. the expected user has a valid stored DeviceList on this hub;
-3. the DeviceCert verifies under the credential's root key, the leaf's MLS signature key equals the
-   certified device key, and the stored DeviceList does not revoke the device (gim-core steps 3-5);
-4. the certified `(user_id, device_id)` is the expected device;
-5. the stored DeviceList certifies that device.
+2. the DeviceCert verifies under the credential's root key and the leaf's MLS signature key equals
+   the certified device key (gim-core steps 3-4);
+3. the expected user has a valid stored DeviceList on this hub (`device_list_unknown`), it is the
+   certified user's list (`identity_mismatch`), it does not revoke the device (`revoked_device`)
+   and it certifies the device with the leaf's key (`device_not_in_list`) (gim-core step 5);
+4. the certified `(user_id, device_id)` is the expected device (`identity_mismatch`).
 
 The `validation_failed` message names the first failing check by its code: the gim-core
 credential codes (`wrong_credential_type`, `non_canonical_cbor`, `malformed_content`,
 `unsupported_version`, `bad_cert_signature`, `user_id_mismatch`, `device_id_mismatch`,
-`invalid_cert`, `leaf_key_mismatch`, `revoked_device`) or the hub
-codes `no_device_list`, `identity_mismatch` and `unknown_device`, e.g.
-`invalid MLS credential (leaf_key_mismatch)`.
+`invalid_cert`, `leaf_key_mismatch`, `device_list_unknown`, `revoked_device`,
+`device_not_in_list`) or the hub code `identity_mismatch` (the leaf is not the expected device),
+e.g. `invalid MLS credential (leaf_key_mismatch)`.
 
 `POST /v2/groups/{gid}/messages` carries only `PrivateMessage` application messages; the hub reads
 the epoch from the framing but cannot see their content.
@@ -150,7 +151,96 @@ learned of it from a `welcome` event or from the pending list. Recovery after 41
    (for a newly joined group, from the Welcome's `seq + 1`), DeviceLists.
 4. Continue `GET /v2/events` / `GET /v2/stream` from the head cursor.
 
-## Changes from v1
+## Hosting records
+
+A user's hosting record (gim-core `SignedHostingRecord`, signed with the user root key) lists the
+hubs that host the user; federation acts only for users whose current record lists the hub
+([`federation.md`](federation.md) §4). The client builds, signs and renews the record; the hub
+never holds the user root key.
+
+1. `POST /v2/users/{user_id}/hosting-entry {priority}` (bearer, own user; `priority` 0..=255,
+   default 0) returns `{hub_id, hub_root_pubkey, priority, entry}`: this hub's `HostingEntry`
+   (CBOR, base64) co-signed with its root key. Signing is deterministic.
+2. The client puts the entries into a record (`seq`, `expires_at`, entries in canonical order),
+   signs it and uploads it with `PUT /v2/users/{user_id}/hosting-record {hosting_record}` (no
+   token; at most 8192 decoded bytes). Checks, in order: the record verifies for `user_id` (400
+   `invalid_hosting_record`, the message names the gim-core error code); the user is local to this
+   hub (404 `not_found`); `expires_at - now` is between 1 hour and 30 days (400
+   `invalid_hosting_record`, `lifetime_out_of_range`); a lower `seq`, or the same `seq` with a
+   different body, is 409 `stale_hosting_record`, the identical record is 200 unchanged. The first
+   record is 201. The response is `{user_id, hosting_record, seq, expires_at, hosted}`; `hosted`
+   says whether the record lists this hub. A hosted record is published to the federation DHT.
+3. Records should live 7 days and be renewed (new `seq`) when less than 3 days remain. When less
+   than 48 hours remain, the hub emits `hosting_record.expiring` (payload
+   `{user_id, expires_at, seq}`) to the user's active devices, once per record `seq` and at most
+   once per 24 hours.
+
+`GET /v2/users/{user_id}/hosting-record` (no token) returns the stored record of a local user, or
+the newest valid record of a remote user resolved through federation (cache, the user's hubs, the
+DHT): 404 `not_found` if none is known or it expired, 503 `peer_unavailable` (with `Retry-After`
+seconds) if a needed peer hub did not answer and nothing else is known.
+
+Federated actions of a user without a valid record listing their hub fail with 403
+`hosting_record_required`.
+
+## Remote users and cross-hub claims
+
+With federation ([`federation.md`](federation.md) §5.1, §5.2), clients keep talking only to their
+own hub:
+
+- `GET /v2/users/{user_id}` and `GET /v2/users/{user_id}/device-list` also answer for users of
+  other hubs. The hub serves its cached copy of the user's DeviceList, fetching it from the user's
+  hub when it is not cached or older than `GIM_HUB_DEVICE_LIST_CACHE_HOURS` (default 24). A stale
+  copy is served while the user's hub is unreachable; without any copy the answer is 503
+  `peer_unavailable` (with `Retry-After` seconds), and 404 `not_found` if no hosting record of the
+  user is known. `handle` is absent for remote users (handles are per-hub).
+- When a hosted user's DeviceList is replaced, the hub pushes it to the hubs sharing groups with
+  the user; those hubs emit `device_list.updated` to their users in those groups, as for a local
+  update.
+- `POST /v2/keypackages/claim` routes each target by its hosting record: targets on this hub are
+  claimed locally; targets on another hub are claimed from their primary hub on the caller's
+  behalf (in parallel). The response gains `unavailable: [ClaimTarget]` for targets whose hub could
+  not be reached, refused the request or timed out; retry those later (claims are never retried
+  by the hub). `missing` keeps its meaning (unknown user, no active device, no KeyPackage). If any
+  target is on another hub, the caller needs a valid hosting record listing this hub (403
+  `hosting_record_required`); no package is claimed then.
+
+## Groups across hubs
+
+With federation ([`federation.md`](federation.md) §5.3, §5.4, §6), a group may have members on
+several hubs. The hub named by the gid prefix owns the group and assigns every `seq`; every other
+hub with a member keeps a replica. Clients still talk only to their own hub, and the API behaves
+as on a single hub:
+
+- `POST /v2/groups/{gid}/commits` and `POST /v2/groups/{gid}/messages` for a group owned by
+  another hub are forwarded to the owner; the response is the owner's result (same `seq`,
+  `epoch`, `duplicate`, 409 `stale_epoch` with `current_epoch`, `client_id` replay), and the
+  local replica already holds the message when the client gets it. Additional errors: 403
+  `hosting_record_required` (no valid hosting record lists this hub), 502 `peer_refused` (the
+  owning hub refused), 503 `peer_unavailable` with `Retry-After` (the owning hub is unreachable;
+  retry with the same Commit or `client_id`, both are idempotent).
+- Adding a member of another hub works like a local Add: claim the KeyPackage through your own
+  hub (`POST /v2/keypackages/claim`), then commit. The owning hub checks the added member's
+  credential against their DeviceList, fetched from their hub. The Welcome reaches the member's
+  devices through their own hub (`welcome` event and `GET /v2/welcomes/pending`, with the
+  Commit's `seq` and `epoch`).
+- Events (`message`, `group.member_added`, `group.member_removed` with `user_id`, `welcome`) are
+  emitted by each member's own hub, after the owner sequenced the message and delivered it to
+  that hub (seconds normally; after a hub outage the missed messages arrive in `seq` order, without
+  gaps or duplicates).
+- `GET /v2/groups`, `GET /v2/groups/{gid}` and `GET /v2/groups/{gid}/messages` are served from
+  the replica, also while the owning hub is down. A replica holds the log from the Commit that
+  added its hub's first member on; a lower `from_seq` returns messages starting there.
+
+## Push
+
+`PUT /v2/push/registration` stores the calling device's push registration (one per device,
+replacing the previous one) and `DELETE` removes it; both return 204. Tokens are validated per
+provider (400 `validation_failed`). The hub then pushes `message` and `welcome` events to the
+device's provider (never to the sender's own device). Payload, provider mapping and the test-only
+`GET /v2/debug/push-log` (off by default): [`push.md`](push.md).
+
+## Differences from v1
 
 | Area | v1 (gim-server) | v2 (gim-hub) |
 |---|---|---|
@@ -183,11 +273,15 @@ ranges.
 
 Implemented: `/healthz`, sign-in (`/v2/auth/*`), DeviceLists and users (`/v2/users/*`, `/v2/me`),
 recovery backups, device linking (`/v2/link-bundles*`), handles, KeyPackages, groups and commits,
-messages, pending Welcomes, events (long-poll and `/v2/stream`) and blobs.
+messages, pending Welcomes, events (long-poll and `/v2/stream`), blobs, hosting records,
+federation (remote users and KeyPackage claims, groups across hubs) and push (registration and
+delivery for local and federated events; log provider, APNs, FCM and UnifiedPush when
+configured).
 
 Pending:
 
-- `PUT`/`DELETE /v2/push/registration` return 501 `not_implemented`.
+- Push: no real APNs/FCM credentials have been exercised yet; UnifiedPush bodies are not Web Push
+  encrypted (RFC 8291).
 - Validation of an added member's MLS credential (type `0xF001`) against their DeviceList is not
   enforced yet: the hub accepts every added member until gim-core identity part 3 defines the
   credential format. The 400 `validation_failed` rejection for credentials in the commit table

@@ -561,6 +561,7 @@ async fn claim_key_packages(
                 })
                 .collect(),
             missing,
+            unavailable: Vec::new(),
         })
     }
     .await;

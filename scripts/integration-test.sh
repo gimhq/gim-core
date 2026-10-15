@@ -1,50 +1,32 @@
 #!/usr/bin/env bash
-# Runs testing/gim-integration-testing against a real gim-server container.
+# Runs testing/gim-integration-testing against a real gim-hub container.
 #
-# Builds gim-server from GIM_SERVER_SRC, starts it on the traefik network,
-# waits for /healthz and runs the tests in a rust:1 container on the same
-# network. The server container is always stopped on exit.
+# Builds gim-hub (GIM_HUB_SRC at GIM_HUB_REV, see scripts/gim-hub-dev.sh),
+# starts it on the traefik network, waits for /healthz and runs the tests in
+# a rust:1 container on the same network. The hub container is always
+# stopped on exit. The hub commit is printed before the tests run.
 #
-# Env: SUBTASK_ID (default: short git sha) names the server container;
-#      GIM_SERVER_SRC (default: /srv/gimhq/im-client/server).
+# Env: SUBTASK_ID (default: short git sha) names the hub container;
+#      GIM_HUB_SRC, GIM_HUB_REV, GIM_HUB_BUILD (see scripts/gim-hub-dev.sh);
+#      extra arguments are passed to the test binaries (e.g. a test name).
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SUBTASK_ID=${SUBTASK_ID:-$(git -C "$repo" rev-parse --short HEAD)}
-GIM_SERVER_SRC=${GIM_SERVER_SRC:-/srv/gimhq/im-client/server}
-server=ai-agent-gim-server-$SUBTASK_ID
+hub=ai-agent-gim-hub-it-$SUBTASK_ID
 cargo_cache=/srv/.tmp/cache/cargo
 
-docker build --label ai-agent=true -t ai-agent/gim-server "$GIM_SERVER_SRC"
-
 cleanup() {
-    docker stop "$server" >/dev/null 2>&1 || true
+    "$repo/scripts/gim-hub-dev.sh" stop "$hub"
 }
 trap cleanup EXIT
 
-docker run -d --rm --label ai-agent=true --network traefik --name "$server" \
-    ai-agent/gim-server >/dev/null
-
-echo "waiting for $server /healthz"
-healthy=
-for _ in $(seq 1 60); do
-    if docker exec "$server" bun -e \
-        "fetch('http://127.0.0.1:8080/healthz').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))" \
-        >/dev/null 2>&1; then
-        healthy=1
-        break
-    fi
-    sleep 1
-done
-if [ -z "$healthy" ]; then
-    echo "gim-server did not become healthy" >&2
-    docker logs "$server" >&2 || true
-    exit 1
-fi
+"$repo/scripts/gim-hub-dev.sh" start "$hub" >/dev/null
+echo "gim-hub commit under test: $("$repo/scripts/gim-hub-dev.sh" commit "$hub")"
 
 mkdir -p "$cargo_cache"
 docker run --rm --label ai-agent=true --network traefik \
     -v "$repo:$repo" -w "$repo" \
     -v "$cargo_cache:/cache/cargo" -e CARGO_HOME=/cache/cargo \
-    -e GIM_SERVER_URL="http://$server:8080" \
-    rust:1 cargo test -p gim-integration-testing -- --nocapture
+    -e GIM_HUB_URL="http://$hub:8080" \
+    rust:1 cargo test -p gim-integration-testing --no-fail-fast -- --include-ignored --nocapture "$@"
