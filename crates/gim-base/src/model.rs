@@ -240,6 +240,47 @@ pub struct MediaCacheEntry {
     pub last_access_ms: u64,
 }
 
+/// An own commit whose acceptance is not confirmed yet, or whose follow-up
+/// is not done yet. One per group; written in the transaction that creates
+/// the MLS pending commit, so a restarted client re-posts the same commit
+/// (same `client_id`) before any other work in the group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingCommit {
+    pub group_id: GroupId,
+    pub client_id: ClientId,
+    pub epoch: u64,
+    pub payload: Vec<u8>,
+    /// Accepted and merged; only `then` is left to do.
+    pub merged: bool,
+    pub then: AfterCommit,
+}
+
+/// What follows an accepted [`PendingCommit`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AfterCommit {
+    Nothing,
+    /// Post the Welcome of the added devices.
+    Welcome(PendingWelcome),
+    /// Drop the removed devices from the group's fan-out list.
+    RemoveFromFanOut(Vec<DeviceRef>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingWelcome {
+    pub client_id: ClientId,
+    pub epoch: u64,
+    pub payload: Vec<u8>,
+    pub recipients: Vec<DeviceRef>,
+}
+
+/// A device dropped from a group's fan-out list (a `member_removed` event)
+/// that may still be in the MLS tree and has to be removed by a commit.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DepartedMember {
+    pub group_id: GroupId,
+    pub device: DeviceRef,
+}
+
 /// User directory cache entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserInfo {
