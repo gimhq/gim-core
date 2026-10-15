@@ -84,7 +84,10 @@ async fn hosting_records_resolve_across_hubs() {
             || async { peer_hub.hosting_record(&user).await.ok().flatten() },
         )
         .await;
-        assert!(!resolved.hosted, "{name}: the peer hub does not host the user");
+        assert!(
+            !resolved.hosted,
+            "{name}: the peer hub does not host the user"
+        );
         assert_eq!(resolved.seq, published.seq, "{name}");
         assert_eq!(resolved.record, published.record, "{name}");
     }
@@ -309,11 +312,9 @@ async fn cross_hub_group() {
     dave.client.leave_chat(chat.clone()).await.unwrap();
     let without_dave = ids(&[&alice, &bob, &carol]);
     for (name, user) in [("alice", &alice), ("bob", &bob), ("carol", &carol)] {
-        eventually_within(
-            &format!("dave removed at {name}"),
-            FED_TIMEOUT,
-            || async { (member_ids(&user.client, &chat).await == without_dave).then_some(()) },
-        )
+        eventually_within(&format!("dave removed at {name}"), FED_TIMEOUT, || async {
+            (member_ids(&user.client, &chat).await == without_dave).then_some(())
+        })
         .await;
     }
     assert!(matches!(
@@ -373,7 +374,9 @@ async fn concurrent_commits_across_hubs() {
 
     let (carol_id, dave_id) = (carol.user_id(), dave.user_id());
     let (by_alice, by_bob) = tokio::join!(
-        alice.client.add_members(&g, std::slice::from_ref(&carol_id)),
+        alice
+            .client
+            .add_members(&g, std::slice::from_ref(&carol_id)),
         bob.client.add_members(&g, std::slice::from_ref(&dave_id)),
     );
     by_alice.unwrap();
@@ -457,7 +460,7 @@ async fn peer_outage_and_recovery() {
 
     let owned_by_a = alice
         .client
-        .create_group_chat(Some("Owned by a".into()), &[dave_id.clone()])
+        .create_group_chat(Some("Owned by a".into()), std::slice::from_ref(&dave_id))
         .await
         .unwrap();
     assert!(alice
@@ -467,7 +470,10 @@ async fn peer_outage_and_recovery() {
         .lock()
         .unwrap()
         .contains(&dave_id));
-    assert_eq!(alice.client.pending_invites(&owned_by_a), [dave_id.clone()]);
+    assert_eq!(
+        alice.client.pending_invites(&owned_by_a),
+        std::slice::from_ref(&dave_id)
+    );
 
     fed.b.start().await;
     sync_until("the message at bob", &bob, |d| {
@@ -513,7 +519,10 @@ fn readdress(message: &[u8], group_id: &GroupId) -> Vec<u8> {
     assert_eq!(header[2..], [0, 2], "not a PrivateMessage");
     let (len, prefix) = match rest[0] >> 6 {
         0 => (usize::from(rest[0] & 0x3f), 1),
-        1 => (usize::from(u16::from_be_bytes([rest[0] & 0x3f, rest[1]])), 2),
+        1 => (
+            usize::from(u16::from_be_bytes([rest[0] & 0x3f, rest[1]])),
+            2,
+        ),
         _ => panic!("group id too long"),
     };
     let id = group_id.as_str().as_bytes();
@@ -575,7 +584,10 @@ async fn non_allowlisted_hub_refused() {
     eprintln!("eve's direct chat with alice: {dm:?}");
     if let Ok(dm) = &dm {
         let members = eve.hub_group(dm).await.members;
-        assert_eq!(members.into_iter().collect::<BTreeSet<_>>(), devices(&[&eve]));
+        assert_eq!(
+            members.into_iter().collect::<BTreeSet<_>>(),
+            devices(&[&eve])
+        );
     }
 
     // Eve posts to the group owned by hub a through hub x (an MLS message
@@ -593,12 +605,7 @@ async fn non_allowlisted_hub_refused() {
     let last_seq = alice.hub_group(&g).await.last_seq;
     let err = eve
         .hub
-        .post_message(
-            &eve_token,
-            &g,
-            ClientId::new("eve-1").unwrap(),
-            mls_message,
-        )
+        .post_message(&eve_token, &g, ClientId::new("eve-1").unwrap(), mls_message)
         .await
         .unwrap_err();
     eprintln!("eve's post to a group owned by hub a: {err:?}");

@@ -236,11 +236,17 @@ fn cli_to_cli_interop_across_hubs() {
     // A DM owned by hub a: text both ways and an image.
     let chat = chat_of(&alice.ok(&["dm", &bob.user_id]));
     let hello = alice.send(&chat, "Leaving Split at 06:00");
-    let got = bob.wait_for(&chat, &["--text", "Leaving Split", "--from", &alice.user_id]);
+    let got = bob.wait_for(
+        &chat,
+        &["--text", "Leaving Split", "--from", &alice.user_id],
+    );
     assert_eq!(got["id"], hello.as_str(), "{got}");
     assert_eq!(got["sender"]["user_id"], alice.user_id.as_str(), "{got}");
     let reply = bob.send(&chat, "See you in Hvar");
-    let got = alice.wait_for(&chat, &["--text", "See you in Hvar", "--from", &bob.user_id]);
+    let got = alice.wait_for(
+        &chat,
+        &["--text", "See you in Hvar", "--from", &bob.user_id],
+    );
     assert_eq!(got["id"], reply.as_str(), "{got}");
     let png = alice.dir.path().join("bay.png");
     std::fs::write(&png, PNG).unwrap();
