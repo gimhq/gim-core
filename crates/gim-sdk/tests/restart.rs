@@ -7,11 +7,15 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-use gim_base::model::{DepartedMember, MessageContent, MessageKind, PendingMedia, SendState};
-use gim_base::{BaseClient, BaseError, StateReader};
-use gim_common::{now_ms, GroupId};
+use gim_base::model::{
+    AfterCommit, DepartedMember, MessageContent, MessageKind, PendingCommit, PendingMedia,
+    SendState,
+};
+use gim_base::{BaseClient, BaseError, StateReader, StateStore, StoreTxn};
+use gim_common::{now_ms, ClientId, GroupId};
+use gim_crypto::MlsEngine;
 use gim_sdk::testing::MemorySecretStorage;
-use gim_sdk::{Client, ClientBuilder, COMMIT_POST_ATTEMPTS};
+use gim_sdk::{Client, ClientBuilder, SecretStorage, COMMIT_POST_ATTEMPTS, SESSION_SECRET_KEY};
 use gim_sqlite::{DbKey, SqliteStore};
 use tempfile::TempDir;
 
@@ -174,6 +178,75 @@ async fn departed_member_is_still_removed_after_restart() {
     assert_eq!(members.len(), 1);
     assert_eq!(members[0].device, bob.session().unwrap().device);
     assert!(bob.store().departed_members().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn store_reset_signs_out_instead_of_failing() {
+    let transport = FlakyTransport::new();
+    let node = Persistent::new(&transport);
+    let alice = node.register("alice").await;
+    drop(alice);
+
+    // Losing the database key resets the database; the keystore still
+    // holds the session.
+    node.secrets
+        .delete(ClientBuilder::<SqliteStore>::DB_KEY_SECRET_KEY)
+        .unwrap();
+    let alice = node.open();
+    assert!(!alice.restore_session().await.unwrap());
+    assert_eq!(node.secrets.get(SESSION_SECRET_KEY).unwrap(), None);
+    alice.register("alice", "alice").await.unwrap();
+    node.restart(alice).await;
+}
+
+#[tokio::test]
+async fn dangling_pending_commits_are_reconciled_after_restart() {
+    let transport = FlakyTransport::new();
+    let node = Persistent::new(&transport);
+    let alice = node.register("alice").await;
+    let bob = Device::register(&transport, "bob").await;
+    let g = alice
+        .create_group_chat(None, &[bob.user_id()])
+        .await
+        .unwrap();
+    bob.sync().await;
+    let commits = server_messages(&transport, &g, &alice, gim_test::MessageKind::Commit).len();
+
+    // An MLS pending commit without its record (it blocks sending), and a
+    // record of a group whose MLS state is gone.
+    let gone = GroupId::new("gone").unwrap();
+    let engine = MlsEngine::new();
+    let bob_device = bob.device();
+    alice
+        .store()
+        .transaction(|txn| {
+            engine.remove_members(&*txn, &g, &[bob_device])?;
+            txn.upsert_pending_commit(&PendingCommit {
+                group_id: gone.clone(),
+                client_id: ClientId::new("dangling-commit").unwrap(),
+                epoch: 1,
+                payload: vec![1],
+                merged: false,
+                then: AfterCommit::Nothing,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+
+    let alice = node.restart(alice).await;
+    assert!(alice.store().pending_commits().unwrap().is_empty());
+    assert_eq!(
+        server_messages(&transport, &g, &alice, gim_test::MessageKind::Commit).len(),
+        commits
+    );
+    alice.send_text(&g, "after restart", None).await.unwrap();
+    bob.sync().await;
+    assert_eq!(bob.messages(&g).len(), 1);
+    assert_eq!(alice.store().chat(&g).unwrap().unwrap().members.len(), 2);
+
+    // Idempotent.
+    let alice = node.restart(alice).await;
+    assert!(alice.store().pending_commits().unwrap().is_empty());
 }
 
 fn write_outgoing(client: &Client<SqliteStore>, dir: &str) -> String {
