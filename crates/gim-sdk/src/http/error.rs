@@ -1,17 +1,36 @@
 //! HTTP status and reqwest error mapping onto [`TransportError`].
 
 use std::error::Error as _;
+use std::time::Duration;
 
 use gim_proto::v2::{CursorExpiredError, ErrorResponse};
 use reqwest::StatusCode;
 
 use crate::transport::TransportError;
 
+/// `code: message` of an error body, or the status.
+fn message(status: StatusCode, body: &[u8]) -> String {
+    serde_json::from_slice::<ErrorResponse>(body)
+        .map(|e| format!("{}: {}", e.error.code, e.error.message))
+        .unwrap_or_else(|_| status.to_string())
+}
+
+/// Maps a throttled response whose retries are used up.
+pub(super) fn retry_later(
+    status: StatusCode,
+    retry_after: Duration,
+    body: &[u8],
+) -> TransportError {
+    TransportError::RetryLater {
+        status: status.as_u16(),
+        retry_after_secs: retry_after.as_secs(),
+        reason: message(status, body),
+    }
+}
+
 /// Maps a non-2xx response.
 pub(super) fn from_status(status: StatusCode, body: &[u8]) -> TransportError {
-    let message = serde_json::from_slice::<ErrorResponse>(body)
-        .map(|e| format!("{}: {}", e.error.code, e.error.message))
-        .unwrap_or_else(|_| status.to_string());
+    let message = message(status, body);
     match status {
         StatusCode::UNAUTHORIZED => TransportError::Unauthorized,
         StatusCode::NOT_FOUND => TransportError::NotFound(message),

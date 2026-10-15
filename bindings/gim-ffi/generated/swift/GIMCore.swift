@@ -1149,10 +1149,12 @@ public protocol GimClientProtocol: AnyObject, Sendable {
      * after losing every device: becomes a new device of `user_id`, signed
      * in, with a new self group. Chats are not rejoined automatically.
      *
-     * With `revoke_others` the previous devices are revoked. Keeping them
-     * (`revoke_others == false`) needs the user's current DeviceList
-     * cached locally, which a fresh install does not have: it then fails
-     * with `InvalidInput`.
+     * Reads the user's current DeviceList from the hub (no session
+     * needed) and publishes the next one with this device added. With
+     * `revoke_others` every previously listed device is revoked; without
+     * it they all stay active. Fails with `NotFound` if the hub has no
+     * DeviceList of the user, and with `RetryLater` while the hub keeps
+     * throttling the read.
      */
     func restoreFromRecovery(userId: String, recoveryCode: String, revokeOthers: Bool) async throws 
     
@@ -1781,10 +1783,12 @@ open func removeMember(chatId: String, userId: String)async throws   {
      * after losing every device: becomes a new device of `user_id`, signed
      * in, with a new self group. Chats are not rejoined automatically.
      *
-     * With `revoke_others` the previous devices are revoked. Keeping them
-     * (`revoke_others == false`) needs the user's current DeviceList
-     * cached locally, which a fresh install does not have: it then fails
-     * with `InvalidInput`.
+     * Reads the user's current DeviceList from the hub (no session
+     * needed) and publishes the next one with this device added. With
+     * `revoke_others` every previously listed device is revoked; without
+     * it they all stay active. Fails with `NotFound` if the hub has no
+     * DeviceList of the user, and with `RetryLater` while the hub keeps
+     * throttling the read.
      */
 open func restoreFromRecovery(userId: String, recoveryCode: String, revokeOthers: Bool)async throws   {
     return
@@ -4701,6 +4705,13 @@ enum GimError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
     case Server(status: UInt16, reason: String
     )
     /**
+     * The hub is throttling the call (HTTP 429 `rate_limited`) or a remote
+     * hub is unavailable (HTTP 503 `peer_unavailable`), and gim-core's
+     * bounded retries are used up; try again after `retry_after_secs`.
+     */
+    case RetryLater(status: UInt16, retryAfterSecs: UInt64, reason: String
+    )
+    /**
      * The operation was cancelled (sign-out, `stop_sync`, `cancel_send`).
      */
     case Cancelled
@@ -4762,9 +4773,14 @@ public struct FfiConverterTypeGimError: FfiConverterRustBuffer {
             status: try FfiConverterUInt16.read(from: &buf), 
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 8: return .Cancelled
-        case 9: return .NotImplemented
-        case 10: return .Internal(
+        case 8: return .RetryLater(
+            status: try FfiConverterUInt16.read(from: &buf), 
+            retryAfterSecs: try FfiConverterUInt64.read(from: &buf), 
+            reason: try FfiConverterString.read(from: &buf)
+            )
+        case 9: return .Cancelled
+        case 10: return .NotImplemented
+        case 11: return .Internal(
             reason: try FfiConverterString.read(from: &buf)
             )
 
@@ -4814,16 +4830,23 @@ public struct FfiConverterTypeGimError: FfiConverterRustBuffer {
             FfiConverterString.write(reason, into: &buf)
             
         
-        case .Cancelled:
+        case let .RetryLater(status,retryAfterSecs,reason):
             writeInt(&buf, Int32(8))
+            FfiConverterUInt16.write(status, into: &buf)
+            FfiConverterUInt64.write(retryAfterSecs, into: &buf)
+            FfiConverterString.write(reason, into: &buf)
+            
         
-        
-        case .NotImplemented:
+        case .Cancelled:
             writeInt(&buf, Int32(9))
         
         
-        case let .Internal(reason):
+        case .NotImplemented:
             writeInt(&buf, Int32(10))
+        
+        
+        case let .Internal(reason):
+            writeInt(&buf, Int32(11))
             FfiConverterString.write(reason, into: &buf)
             
         }
@@ -5983,7 +6006,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_gim_core_checksum_method_gimclient_remove_member() != 31958) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_gim_core_checksum_method_gimclient_restore_from_recovery() != 55724) {
+    if (uniffi_gim_core_checksum_method_gimclient_restore_from_recovery() != 56825) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_gimclient_retry_send() != 31098) {

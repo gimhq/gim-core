@@ -77,10 +77,12 @@ user's signed DeviceList. Handles are optional directory entries pointing at a u
   the old device approved but the link was abandoned, revoke the new device with
   `revokeDevice(approval.deviceId())`. See `docs/identity.md`, "Device link flow".
 - **Restore** after losing every device: `restoreFromRecovery(userId, recoveryCode,
-  revokeOthers)` on a fresh client. Pass `revokeOthers = true`: keeping the old devices needs the
-  user's DeviceList cached locally, which a fresh install never has, so `false` fails with
-  `InvalidInput`. Chats are not rejoined automatically; other members (or another own device)
-  must add this device again.
+  revokeOthers)` on a fresh client. It reads the user's current DeviceList from the hub (a public
+  read, no session needed), verifies it against the recovered root key and publishes the next one
+  (seq + 1) with this device added: `revokeOthers = true` revokes every previously listed device
+  (they can no longer sign in and peers remove them), `false` keeps them all active. A list that
+  lands concurrently is read and rebuilt once. Chats are not rejoined automatically; other members
+  (or another own device) must add this device again.
 - **Devices**: `devices()` lists the user's devices, `userDevices(userId)` another user's, and
   `revokeDevice(deviceId)` revokes another own device (it is removed from every chat and can no
   longer sign in).
@@ -106,7 +108,7 @@ implementations fast and thread-safe.
 | `userId()` | `String?` | Synchronous. `null`/`nil` without a session. |
 | `localStateReset()` | `Boolean` | Synchronous. Whether opening this client discarded an existing local database. |
 | `createIdentity(displayName)` | recovery code | Creates the user with this device as its first one and signs in. |
-| `restoreFromRecovery(userId, recoveryCode, revokeOthers)` | | See *Identity and devices*. `InvalidInput` for a malformed code, or `revokeOthers == false` without a cached DeviceList. |
+| `restoreFromRecovery(userId, recoveryCode, revokeOthers)` | | See *Identity and devices*. `InvalidInput` for a malformed code, `Crypto` for a wrong one, `NotFound` if the hub has no DeviceList of the user, `RetryLater` while the hub throttles the read. |
 | `startLink(hubs)` | `LinkSession` | Synchronous. New device; `LinkSession.qrString()`. |
 | `waitLink(link)` | SAS | New device; signs in once the bundle arrives. |
 | `confirmLink(accepted)` | | New device; `false` wipes it like `signOut()`. |
@@ -217,6 +219,7 @@ The chat list is ordered most recently updated first; a timeline oldest first.
 | `Crypto(reason)` | MLS or media decryption failure. | Report; show placeholder. |
 | `Storage(reason)` | Local database or file system failure. | Report; may need disk space. |
 | `Server(status, reason)` | Non-success HTTP status from the hub. | Show generic error. |
+| `RetryLater(status, retryAfterSecs, reason)` | The hub throttles a public read (429 `rate_limited`) or a remote hub is unavailable (503 `peer_unavailable`), and gim-core's bounded retries (2 retries, at most 60 s of waiting) are used up. | Retry after `retryAfterSecs`. |
 | `Cancelled` | Cancelled by `stopSync`, `signOut` or `cancelSend`. | Ignore. |
 | `NotImplemented` | In the contract but not implemented in this build. | Development builds only. |
 | `Internal(reason)` | Bug, or an unexpected exception thrown by a platform hook. | Report. |

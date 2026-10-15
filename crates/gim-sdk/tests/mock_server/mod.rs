@@ -389,14 +389,11 @@ async fn put_device_list(
     reply(result)
 }
 
-async fn device_list(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(user): Path<String>,
-) -> Response {
+/// A public read: any bearer token is ignored, as on the hub.
+async fn device_list(State(state): State<AppState>, Path(user): Path<String>) -> Response {
     let result = async {
-        let (token, user) = (state.token(&headers)?, user_id(&user)?);
-        let list = state.transport.device_list(&token, &user).await?;
+        let user = user_id(&user)?;
+        let list = state.transport.device_list(None, &user).await?;
         let list = list.ok_or_else(|| TransportError::NotFound(user.to_string()))?;
         Ok(v2::DeviceList {
             user_id: user.to_string(),
@@ -430,14 +427,11 @@ async fn put_recovery_backup(
     reply(result)
 }
 
-async fn user(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(user): Path<String>,
-) -> Response {
+/// A public read: any bearer token is ignored, as on the hub.
+async fn user(State(state): State<AppState>, Path(user): Path<String>) -> Response {
     let result = async {
-        let (token, user) = (state.token(&headers)?, user_id(&user)?);
-        let record = state.transport.user(&token, &user).await?;
+        let user = user_id(&user)?;
+        let record = state.transport.user(None, &user).await?;
         let record = record.ok_or_else(|| TransportError::NotFound(user.to_string()))?;
         Ok(v2::User {
             user_id: record.user_id.to_string(),

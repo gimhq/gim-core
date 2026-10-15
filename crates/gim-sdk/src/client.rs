@@ -641,7 +641,7 @@ impl<S: StateStore + 'static> Client<S> {
             let looked_up = self
                 .authed(|t| {
                     let user_id = user_id.clone();
-                    async move { self.inner.transport.user(&t, &user_id).await }
+                    async move { self.inner.transport.user(Some(&t), &user_id).await }
                 })
                 .await;
             match looked_up {
