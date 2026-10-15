@@ -10,6 +10,7 @@ use rusqlite::{Connection, TransactionBehavior};
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_schema.sql"),
     include_str!("../migrations/0002_pending_leaves.sql"),
+    include_str!("../migrations/0003_pending_invites.sql"),
 ];
 
 /// Schema version written by this build.
@@ -79,6 +80,7 @@ mod tests {
             "crypto_groups",
             "pending_commits",
             "pending_leaves",
+            "pending_invites",
             "departed_members",
             "device_lists",
             "membership_events",
@@ -103,10 +105,40 @@ mod tests {
         migrate(&mut conn).unwrap();
         assert_eq!(schema_version(&conn).unwrap(), SCHEMA_VERSION);
         assert!(tables(&conn).iter().any(|t| t == "pending_leaves"));
+        assert!(tables(&conn).iter().any(|t| t == "pending_invites"));
         let kept: i64 = conn
             .query_row("SELECT COUNT(*) FROM pending_commits", [], |row| row.get(0))
             .unwrap();
         assert_eq!(kept, 1);
+    }
+
+    #[test]
+    fn migrates_a_v2_database_keeping_its_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        conn.execute_batch(MIGRATIONS[1]).unwrap();
+        conn.pragma_update(None, "user_version", 2).unwrap();
+        conn.execute(
+            "INSERT INTO pending_leaves (group_id, data) VALUES ('crew', x'01')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO pending_commits (group_id, data) VALUES ('crew', x'00')",
+            [],
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert!(tables(&conn).iter().any(|t| t == "pending_invites"));
+        for table in ["pending_leaves", "pending_commits"] {
+            let kept: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(kept, 1, "{table}");
+        }
     }
 
     #[test]

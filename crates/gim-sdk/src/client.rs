@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex, Notify};
 
 use crate::identity::merge_directory_user;
-use crate::invites::PendingInvites;
+use crate::invites::{load_pending_invites, PendingInvites};
 use crate::send::TypingState;
 use crate::stream::ConnectionState;
 use crate::sync::SyncSettings;
@@ -180,7 +180,8 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
     }
 
     /// A client without a session; call [`Client::create_identity`] or
-    /// [`Client::restore_session`] next. Loads the stored DeviceLists.
+    /// [`Client::restore_session`] next. Loads the stored DeviceLists and
+    /// pending invites.
     ///
     /// Creates the data directory and its `tmp` subdirectory owner-only
     /// (0700 on Unix). Fails with [`ClientError::InvalidInput`] if no data
@@ -199,6 +200,7 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
                 tracing::warn!(%user_id, error = %err, "dropping a stored device list");
             }
         }
+        let pending_invites = load_pending_invites(&*self.store)?;
         Ok(Client {
             inner: Arc::new(Inner {
                 store: self.store,
@@ -225,7 +227,7 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
                 proposal_timers: Default::default(),
                 hosting_lock: Mutex::new(()),
                 hosting_wake: Notify::new(),
-                pending_invites: Default::default(),
+                pending_invites: std::sync::Mutex::new(pending_invites),
                 invite_wake: Notify::new(),
                 commit_retry_at: Default::default(),
             }),
@@ -319,7 +321,7 @@ pub(crate) struct Inner<S> {
     /// Cuts the hosting record renewal wait short.
     pub(crate) hosting_wake: Notify,
     /// Invitees whose hub was unreachable when they were added; retried by
-    /// the sync loop. In memory only.
+    /// the sync loop. Mirrored to the store.
     pub(crate) pending_invites: std::sync::Mutex<PendingInvites>,
     /// Cuts the pending invite retry wait short.
     pub(crate) invite_wake: Notify,
@@ -501,7 +503,7 @@ impl<S: StateStore + 'static> Client<S> {
         let _guard = self.inner.group_lock.lock().await;
         let members = self.chat_devices(group_id).await?;
         let claim = self.claim_key_packages(&session, users, &members).await?;
-        self.add_pending_invites(group_id, &claim.unavailable);
+        self.add_pending_invites(group_id, &claim.unavailable).await;
         if claim.key_packages.is_empty() {
             if !claim.unavailable.is_empty() {
                 return Ok(());
@@ -727,7 +729,8 @@ impl<S: StateStore + 'static> Client<S> {
         self.emit(&changes);
         // Invitees on unreachable hubs are added later by the sync loop; a
         // chat with only those starts with this user alone.
-        self.add_pending_invites(&group_id, &claim.unavailable);
+        self.add_pending_invites(&group_id, &claim.unavailable)
+            .await;
         let added = !claim.key_packages.is_empty();
         if added {
             self.commit(&session, &group_id, CommitOp::Add(claim.key_packages))

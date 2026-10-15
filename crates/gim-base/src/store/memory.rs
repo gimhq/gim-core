@@ -17,7 +17,7 @@ use openmls_memory_storage::MemoryStorage;
 use super::{StateReader, StateStore, StoreResult, StoreTxn};
 use crate::model::{
     Chat, DepartedMember, GroupCursor, GroupMessage, MediaCacheEntry, MembershipEvent, Message,
-    OutboxEntry, OutboxState, PendingCommit, PendingLeave, UserInfo,
+    OutboxEntry, OutboxState, PendingCommit, PendingInvite, PendingLeave, UserInfo,
 };
 use crate::{BaseError, StoreError};
 
@@ -42,6 +42,7 @@ struct Rows {
     users: BTreeMap<UserId, UserInfo>,
     pending_commits: BTreeMap<GroupId, PendingCommit>,
     pending_leaves: BTreeMap<GroupId, PendingLeave>,
+    pending_invites: BTreeMap<(GroupId, UserId), PendingInvite>,
     departed: BTreeSet<DepartedMember>,
     membership: BTreeMap<(GroupId, u64, UserId), MembershipEvent>,
     device_lists: BTreeMap<UserId, Vec<u8>>,
@@ -238,6 +239,14 @@ impl StateReader for MemoryStore {
         Ok(read(&self.rows)?.pending_leaves.values().cloned().collect())
     }
 
+    fn pending_invites(&self) -> StoreResult<Vec<PendingInvite>> {
+        Ok(read(&self.rows)?
+            .pending_invites
+            .values()
+            .cloned()
+            .collect())
+    }
+
     fn departed_members(&self) -> StoreResult<Vec<DepartedMember>> {
         Ok(read(&self.rows)?.departed.iter().cloned().collect())
     }
@@ -333,6 +342,10 @@ impl StateReader for MemoryTxn {
         Ok(self.rows.pending_leaves.values().cloned().collect())
     }
 
+    fn pending_invites(&self) -> StoreResult<Vec<PendingInvite>> {
+        Ok(self.rows.pending_invites.values().cloned().collect())
+    }
+
     fn departed_members(&self) -> StoreResult<Vec<DepartedMember>> {
         Ok(self.rows.departed.iter().cloned().collect())
     }
@@ -367,6 +380,7 @@ impl StoreTxn for MemoryTxn {
         rows.parked.retain(|(g, _), _| g != group_id);
         rows.pending_commits.remove(group_id);
         rows.pending_leaves.remove(group_id);
+        rows.pending_invites.retain(|(g, _), _| g != group_id);
         rows.departed.retain(|d| &d.group_id != group_id);
         rows.membership.retain(|(g, _, _), _| g != group_id);
         rows.self_groups.retain(|g| g != group_id);
@@ -463,6 +477,21 @@ impl StoreTxn for MemoryTxn {
 
     fn remove_pending_leave(&mut self, group_id: &GroupId) -> StoreResult<()> {
         self.rows.pending_leaves.remove(group_id);
+        Ok(())
+    }
+
+    fn upsert_pending_invite(&mut self, invite: &PendingInvite) -> StoreResult<()> {
+        self.rows.pending_invites.insert(
+            (invite.group_id.clone(), invite.user_id.clone()),
+            invite.clone(),
+        );
+        Ok(())
+    }
+
+    fn remove_pending_invite(&mut self, group_id: &GroupId, user_id: &UserId) -> StoreResult<()> {
+        self.rows
+            .pending_invites
+            .remove(&(group_id.clone(), user_id.clone()));
         Ok(())
     }
 

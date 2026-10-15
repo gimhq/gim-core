@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use gim_base::model::{
     Chat, DepartedMember, GroupCursor, GroupMessage, MediaCacheEntry, MembershipEvent, Message,
-    OutboxEntry, PendingCommit, PendingLeave, UserInfo,
+    OutboxEntry, PendingCommit, PendingInvite, PendingLeave, UserInfo,
 };
 use gim_base::{BaseError, StateReader, StateStore, StoreError, StoreTxn, WriteTarget};
 use gim_common::{DeviceRef, GroupId, MessageId, UserId};
@@ -432,6 +432,11 @@ macro_rules! delegate_reader {
                 Reader($conn).pending_leaves()
             }
 
+            fn pending_invites(&self) -> StoreResult<Vec<PendingInvite>> {
+                let $this = self;
+                Reader($conn).pending_invites()
+            }
+
             fn departed_members(&self) -> StoreResult<Vec<DepartedMember>> {
                 let $this = self;
                 Reader($conn).departed_members()
@@ -488,6 +493,7 @@ impl StoreTxn for SqliteTxn<'_> {
             "parked_messages",
             "pending_commits",
             "pending_leaves",
+            "pending_invites",
             "departed_members",
             "membership_events",
             "self_groups",
@@ -665,6 +671,28 @@ impl StoreTxn for SqliteTxn<'_> {
         self.execute(
             "DELETE FROM pending_leaves WHERE group_id = ?1",
             [group_id.as_str()],
+        )
+    }
+
+    fn upsert_pending_invite(&mut self, invite: &PendingInvite) -> StoreResult<()> {
+        self.execute(
+            "INSERT OR REPLACE INTO pending_invites \
+             (group_id, user_id, created_at_ms, next_retry_at_ms, attempts) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                invite.group_id.as_str(),
+                invite.user_id.as_str(),
+                invite.created_at_ms,
+                invite.next_retry_at_ms,
+                invite.attempts
+            ],
+        )
+    }
+
+    fn remove_pending_invite(&mut self, group_id: &GroupId, user_id: &UserId) -> StoreResult<()> {
+        self.execute(
+            "DELETE FROM pending_invites WHERE group_id = ?1 AND user_id = ?2",
+            [group_id.as_str(), user_id.as_str()],
         )
     }
 
