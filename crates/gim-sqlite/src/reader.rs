@@ -17,8 +17,7 @@ type StoreResult<T> = Result<T, StoreError>;
 pub(crate) struct Reader<'c>(pub &'c Connection);
 
 const MESSAGE_COLUMNS: &str = "message_id, group_id, seq, sent_at_ms, data";
-const OUTBOX_COLUMNS: &str =
-    "message_id, group_id, state, next_attempt_at_ms, created_at_ms, data";
+const OUTBOX_COLUMNS: &str = "message_id, group_id, state, next_attempt_at_ms, created_at_ms, data";
 
 /// A query bound that fits SQLite's signed 64-bit integers.
 pub(crate) fn bound(value: u64) -> i64 {

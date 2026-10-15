@@ -80,6 +80,19 @@ fn state_and_mls_groups_survive_reopen() {
     assert_eq!(bob.message(&hey).content, text_content("hey"));
 }
 
+#[cfg(unix)]
+#[test]
+fn creates_missing_data_dir_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("device").join("data");
+    SqliteStore::open(&data_dir).unwrap();
+    assert!(data_dir.join(DATABASE_FILE_NAME).is_file());
+    let mode = std::fs::metadata(&data_dir).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o700);
+}
+
 #[test]
 fn failure_after_mls_processing_rolls_back_epoch_and_rows() {
     let dir = tempfile::tempdir().unwrap();
@@ -447,7 +460,10 @@ fn assert_same_reads(expected: &impl StateReader, actual: &impl StateReader) {
         expected.media_entries().unwrap()
     );
     for blob_id in ["b0", "b1", "none"] {
-        assert_eq!(actual.media(blob_id).unwrap(), expected.media(blob_id).unwrap());
+        assert_eq!(
+            actual.media(blob_id).unwrap(),
+            expected.media(blob_id).unwrap()
+        );
     }
     for user in ["alice", "bob"] {
         let user = UserId::new(user).unwrap();

@@ -29,9 +29,7 @@ use rusqlite::{params, Connection, Transaction, TransactionBehavior};
 pub use migrations::SCHEMA_VERSION;
 
 use reader::{bound, outbox_state_str, sql_err, Reader};
-use rows::{
-    encode, ChatData, MemberRow, MessageData, OutboxData, OutboxKindRow, ParkedData,
-};
+use rows::{encode, ChatData, MemberRow, MessageData, OutboxData, OutboxKindRow, ParkedData};
 
 type StoreResult<T> = Result<T, StoreError>;
 
@@ -78,9 +76,15 @@ impl std::fmt::Debug for SqliteStore {
 
 impl SqliteStore {
     /// Opens (creating if needed) `<data_dir>/gim.sqlite3` and migrates it.
+    /// A missing `data_dir` is created owner-only on Unix, since the
+    /// database (and its -wal/-shm files) holds the device's private keys.
     pub fn open(data_dir: impl AsRef<Path>) -> StoreResult<Self> {
         let data_dir = data_dir.as_ref();
-        std::fs::create_dir_all(data_dir).map_err(StoreError::new)?;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder.create(data_dir).map_err(StoreError::new)?;
         let conn = Connection::open(data_dir.join(DATABASE_FILE_NAME)).map_err(sql_err)?;
         Self::init(conn)
     }
@@ -92,10 +96,8 @@ impl SqliteStore {
     fn init(mut conn: Connection) -> StoreResult<Self> {
         conn.busy_timeout(BUSY_TIMEOUT).map_err(sql_err)?;
         // In-memory databases report "memory"; nothing to check.
-        conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| {
-            row.get::<_, String>(0)
-        })
-        .map_err(sql_err)?;
+        conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))
+            .map_err(sql_err)?;
         conn.pragma_update(None, "synchronous", "NORMAL")
             .map_err(sql_err)?;
         conn.pragma_update(None, "foreign_keys", true)
@@ -486,7 +488,9 @@ impl<'a> CryptoStore for SqliteTxn<'a> {
         let mut rows = stmt.query([]).map_err(sql_err)?;
         let mut ids = BTreeSet::new();
         while let Some(row) = rows.next().map_err(sql_err)? {
-            ids.insert(GroupId::new(row.get::<_, String>(0).map_err(sql_err)?).map_err(StoreError::new)?);
+            ids.insert(
+                GroupId::new(row.get::<_, String>(0).map_err(sql_err)?).map_err(StoreError::new)?,
+            );
         }
         Ok(ids)
     }
