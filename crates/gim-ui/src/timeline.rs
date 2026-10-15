@@ -15,8 +15,8 @@ use tokio::task::JoinHandle;
 
 use crate::diff;
 use crate::items::{
-    message_content, preview_text, profile, reaction_groups, send_state, MessageItem,
-    ReplyPreview, TimelineItem, UserProfile,
+    message_content, preview_text, profile, reaction_groups, send_state, MessageItem, ReplyPreview,
+    TimelineItem, UserProfile,
 };
 use crate::listener::{lock, own_user, recv_batch, with_state, Received};
 use crate::Result;
@@ -58,7 +58,10 @@ pub struct Timeline {
 
 impl Timeline {
     /// Opens the timeline with [`TimelineOptions::default`] (UTC days).
-    pub async fn new<S: StateStore + 'static>(client: &Client<S>, group_id: GroupId) -> Result<Self> {
+    pub async fn new<S: StateStore + 'static>(
+        client: &Client<S>,
+        group_id: GroupId,
+    ) -> Result<Self> {
         Self::with_options(client, group_id, TimelineOptions::default()).await
     }
 
@@ -93,14 +96,16 @@ impl Timeline {
                 if matches!(received, Received::Closed) {
                     break;
                 }
-                let _ = with_state(&task_store, &task_state, move |store, state| {
-                    match received {
+                let _ = with_state(
+                    &task_store,
+                    &task_state,
+                    move |store, state| match received {
                         Received::Changes(changes) => state
                             .apply(store, &changes)
                             .or_else(|_| state.reload(store)),
                         _ => state.reload(store),
-                    }
-                })
+                    },
+                )
                 .await;
             }
         });
@@ -205,7 +210,8 @@ impl State {
             }
         }
         self.has_more = has_more;
-        self.messages.sort_by(|a, b| order_key(a).cmp(&order_key(b)));
+        self.messages
+            .sort_by(|a, b| order_key(a).cmp(&order_key(b)));
         self.render_where(store, |_| false)?;
         self.publish();
         Ok(has_more)
@@ -255,7 +261,8 @@ impl State {
         if touched.is_empty() && !rerender_all && !changed {
             return Ok(());
         }
-        self.messages.sort_by(|a, b| order_key(a).cmp(&order_key(b)));
+        self.messages
+            .sort_by(|a, b| order_key(a).cmp(&order_key(b)));
         self.render_where(store, |m| {
             rerender_all
                 || touched.contains(&m.message_id)

@@ -22,7 +22,11 @@ async fn ordered_by_update_with_minimal_diffs() {
     bob.client.find_user("alice").await.unwrap();
     bob.client.find_user("carol").await.unwrap();
 
-    let with_alice = alice.client.create_direct_chat(&bob.user_id()).await.unwrap();
+    let with_alice = alice
+        .client
+        .create_direct_chat(&bob.user_id())
+        .await
+        .unwrap();
     alice.send_text(&with_alice, "hello").await;
     bob.sync().await;
     pause();
@@ -47,7 +51,11 @@ async fn ordered_by_update_with_minimal_diffs() {
     assert_eq!(direct.member_count, 2);
     let preview = direct.last_message.as_ref().unwrap();
     assert_eq!(
-        (preview.sender_name.as_str(), preview.text.as_str(), preview.is_own),
+        (
+            preview.sender_name.as_str(),
+            preview.text.as_str(),
+            preview.is_own
+        ),
         ("Alice", "hello", false)
     );
     // The name is not shared with joiners yet: other members' names.

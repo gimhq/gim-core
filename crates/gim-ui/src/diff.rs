@@ -154,7 +154,10 @@ mod tests {
 
     #[test]
     fn inserts_and_removes() {
-        let diffs = run(&[('a', 0), ('c', 0), ('d', 0)], &[('x', 0), ('a', 0), ('b', 0)]);
+        let diffs = run(
+            &[('a', 0), ('c', 0), ('d', 0)],
+            &[('x', 0), ('a', 0), ('b', 0)],
+        );
         assert_eq!(
             diffs,
             vec![

@@ -50,7 +50,9 @@ pub struct MessagePreview {
 pub enum TimelineItem {
     Message(MessageItem),
     /// Inserted before the first item of each local calendar day.
-    DateSeparator { day_start_ms: u64 },
+    DateSeparator {
+        day_start_ms: u64,
+    },
     MembershipChange {
         user_name: String,
         change: MembershipChangeKind,
@@ -246,11 +248,9 @@ pub(crate) fn preview_text(message: &Message) -> String {
     };
     match &message.content {
         model::MessageContent::Text { body } => body.clone(),
-        model::MessageContent::Media { media, caption } => media_text(
-            &media.mime,
-            media.file_name.as_deref(),
-            caption.as_deref(),
-        ),
+        model::MessageContent::Media { media, caption } => {
+            media_text(&media.mime, media.file_name.as_deref(), caption.as_deref())
+        }
         model::MessageContent::PendingMedia(pending) => {
             let file_name = std::path::Path::new(&pending.local_path)
                 .file_name()

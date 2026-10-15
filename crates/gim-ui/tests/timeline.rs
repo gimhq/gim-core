@@ -8,8 +8,8 @@ use gim_common::{now_ms, GroupId};
 use gim_proto::envelope::Content;
 use gim_sdk::testing::FakeTransport;
 use gim_ui::{
-    MessageContent, MessageItem, ReactionGroup, SendState, Timeline, TimelineItem,
-    TimelineOptions, Vector, VectorDiff,
+    MessageContent, MessageItem, ReactionGroup, SendState, Timeline, TimelineItem, TimelineOptions,
+    Vector, VectorDiff,
 };
 
 fn messages(items: &Vector<TimelineItem>) -> Vec<&MessageItem> {
@@ -31,7 +31,11 @@ async fn direct_chat(transport: &FakeTransport) -> (Device, Device, GroupId) {
     let alice = Device::register(transport, "alice", "Alice").await;
     let bob = Device::register(transport, "bob", "Bob").await;
     bob.client.find_user("alice").await.unwrap();
-    let g = alice.client.create_direct_chat(&bob.user_id()).await.unwrap();
+    let g = alice
+        .client
+        .create_direct_chat(&bob.user_id())
+        .await
+        .unwrap();
     (alice, bob, g)
 }
 
@@ -179,7 +183,11 @@ async fn own_pending_failed_and_reply_preview() {
     let (mut items, stream) = timeline.items();
     let mut stream = pin!(stream);
     let find = |items: &Vector<TimelineItem>, id| -> MessageItem {
-        (*messages(items).into_iter().find(|m| &m.message_id == id).unwrap()).clone()
+        (*messages(items)
+            .into_iter()
+            .find(|m| &m.message_id == id)
+            .unwrap())
+        .clone()
     };
     let failed = find(&items, &failed);
     assert_eq!(
@@ -233,7 +241,14 @@ async fn date_separators() {
     let (alice, bob, g) = direct_chat(&transport).await;
     let sender = alice.device();
     seed(&bob.store, &g, &sender, 1, JAN_1_MS + 10 * HOUR_MS, "jan 1");
-    seed(&bob.store, &g, &sender, 2, JAN_1_MS + DAY_MS + 9 * HOUR_MS, "jan 2");
+    seed(
+        &bob.store,
+        &g,
+        &sender,
+        2,
+        JAN_1_MS + DAY_MS + 9 * HOUR_MS,
+        "jan 2",
+    );
 
     let timeline = Timeline::new(&bob.client, g.clone()).await.unwrap();
     let (mut items, stream) = timeline.items();
@@ -247,8 +262,10 @@ async fn date_separators() {
     alice.send_text(&g, "today").await;
     bob.sync().await;
     let diffs = next(&mut stream).await;
-    let [VectorDiff::Insert { index: 4, value: sep }, VectorDiff::Insert { index: 5, value }] =
-        diffs.as_slice()
+    let [VectorDiff::Insert {
+        index: 4,
+        value: sep,
+    }, VectorDiff::Insert { index: 5, value }] = diffs.as_slice()
     else {
         panic!("unexpected diffs {diffs:?}");
     };
@@ -273,8 +290,22 @@ async fn date_separators_follow_utc_offset() {
     let g = GroupId::new("local-only").unwrap();
     let sender = alice.device();
     // 22:30 UTC on Jan 1 is 01:30 on Jan 2 at UTC+3.
-    seed(&bob.store, &g, &sender, 1, JAN_1_MS + 22 * HOUR_MS + HOUR_MS / 2, "late");
-    seed(&bob.store, &g, &sender, 2, JAN_1_MS + DAY_MS + 10 * HOUR_MS, "next");
+    seed(
+        &bob.store,
+        &g,
+        &sender,
+        1,
+        JAN_1_MS + 22 * HOUR_MS + HOUR_MS / 2,
+        "late",
+    );
+    seed(
+        &bob.store,
+        &g,
+        &sender,
+        2,
+        JAN_1_MS + DAY_MS + 10 * HOUR_MS,
+        "next",
+    );
 
     let utc = Timeline::new(&bob.client, g.clone()).await.unwrap();
     assert_eq!(utc.items().0.len(), 4);
@@ -298,7 +329,14 @@ async fn back_pagination() {
     let g = GroupId::new("paged").unwrap();
     let sender = alice.device();
     for seq in 1..=25 {
-        seed(&bob.store, &g, &sender, seq, JAN_1_MS + seq * 1000, &format!("m{seq}"));
+        seed(
+            &bob.store,
+            &g,
+            &sender,
+            seq,
+            JAN_1_MS + seq * 1000,
+            &format!("m{seq}"),
+        );
     }
 
     let options = TimelineOptions {
