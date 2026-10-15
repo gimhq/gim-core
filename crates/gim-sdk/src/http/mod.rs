@@ -238,6 +238,51 @@ impl Transport for HttpTransport {
         Ok(())
     }
 
+    async fn recovery_backup(&self, user_id: &UserId) -> TransportResult<Option<Vec<u8>>> {
+        let path = paths::user_recovery_backup(user_id.as_str());
+        let backup: Option<v2::RecoveryBackup> =
+            Self::json_opt(self.api(Method::GET, &path, None)).await?;
+        Ok(backup.map(|b| b.backup))
+    }
+
+    async fn post_link_bundle(
+        &self,
+        token: &AccessToken,
+        link_id: &str,
+        sealed_bundle: Vec<u8>,
+        expires_in: Duration,
+    ) -> TransportResult<()> {
+        let request = v2::CreateLinkBundleRequest {
+            link_id: link_id.to_string(),
+            sealed_bundle,
+            expires_in: expires_in.as_secs().clamp(1, 600) as u32,
+        };
+        let _: v2::LinkBundleCreated = Self::json(
+            self.api(Method::POST, paths::LINK_BUNDLES, Some(token))
+                .json(&request),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn fetch_link_bundle(
+        &self,
+        link_id: &str,
+        wait: Duration,
+    ) -> TransportResult<Option<Vec<u8>>> {
+        let wait = wait.min(MAX_WAIT);
+        let query = v2::LinkBundleQuery {
+            wait: Some(wait.as_secs() as u32),
+        };
+        let bundle: Option<v2::LinkBundle> = Self::json_opt(
+            self.request(Method::GET, &paths::link_bundle(link_id), None)
+                .timeout(self.request_timeout + wait)
+                .query(&query),
+        )
+        .await?;
+        Ok(bundle.map(|b| b.sealed_bundle))
+    }
+
     async fn device_list(
         &self,
         token: &AccessToken,

@@ -436,6 +436,11 @@ macro_rules! delegate_reader {
                 let $this = self;
                 Reader($conn).device_lists()
             }
+
+            fn self_groups(&self) -> StoreResult<Vec<GroupId>> {
+                let $this = self;
+                Reader($conn).self_groups()
+            }
         }
     };
 }
@@ -474,6 +479,7 @@ impl StoreTxn for SqliteTxn<'_> {
             "pending_commits",
             "departed_members",
             "membership_events",
+            "self_groups",
         ] {
             self.execute(
                 &format!("DELETE FROM {table} WHERE group_id = ?1"),
@@ -677,6 +683,12 @@ impl StoreTxn for SqliteTxn<'_> {
         self.execute(
             "INSERT OR REPLACE INTO device_lists (user_id, data) VALUES (?1, ?2)",
             params![user_id.as_str(), device_list],
+        )
+    }
+    fn add_self_group(&mut self, group_id: &GroupId) -> StoreResult<()> {
+        self.execute(
+            "INSERT OR IGNORE INTO self_groups (group_id) VALUES (?1)",
+            [group_id.as_str()],
         )
     }
 }
