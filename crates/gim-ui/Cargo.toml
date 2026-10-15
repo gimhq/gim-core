@@ -6,4 +6,18 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+eyeball.workspace = true
+eyeball-im.workspace = true
+futures-core.workspace = true
+futures-util.workspace = true
+gim-base.workspace = true
+gim-common.workspace = true
+gim-proto.workspace = true
 gim-sdk.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+
+[dev-dependencies]
+gim-sdk = { workspace = true, features = ["testing"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
