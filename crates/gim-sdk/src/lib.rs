@@ -13,14 +13,21 @@
 
 mod client;
 mod error;
+mod media;
+mod outbox;
 mod secrets;
+mod send;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod transport;
 
 pub use client::{
-    Client, ClientBuilder, Session, KEY_PACKAGE_BATCH, MAX_COMMIT_RETRIES, SESSION_SECRET_KEY,
+    Client, ClientBuilder, Session, COMMIT_POST_ATTEMPTS, KEY_PACKAGE_BATCH, MAX_COMMIT_RETRIES,
+    SESSION_SECRET_KEY,
 };
 pub use error::{ClientError, Result};
+pub use media::DOWNLOAD_PIECE;
+pub use outbox::OutboxSender;
 pub use secrets::{SecretStorage, SecretStorageError};
+pub use send::TYPING_INTERVAL;
 pub use transport::{Transport, TransportError};

@@ -1,5 +1,5 @@
 use gim_base::BaseError;
-use gim_crypto::CryptoError;
+use gim_crypto::{CryptoError, MediaError};
 
 use crate::transport::{PostError, TransportError};
 use crate::SecretStorageError;
@@ -23,6 +23,10 @@ pub enum ClientError {
     Base(#[from] BaseError),
     #[error(transparent)]
     SecretStorage(#[from] SecretStorageError),
+    #[error(transparent)]
+    Media(#[from] MediaError),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
     #[error("blocking task failed: {0}")]
     Task(String),
 }
