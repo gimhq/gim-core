@@ -15,14 +15,15 @@ pub const GIM_CREDENTIAL_TYPE: u16 = 0xF001;
 /// First element of the credential content.
 const CREDENTIAL_VERSION: u64 = 1;
 
-/// Source of the latest verified [`DeviceList`] per user, consulted for
-/// revocations. A lookup that knows no list for a user means no revocations
-/// are known for it.
+/// Source of the latest verified [`DeviceList`] per user. Validation is
+/// fail-closed: a credential of a user for whom the lookup knows no list is
+/// rejected, so the caller fetches the list before validating.
 pub trait DeviceListLookup {
     fn device_list(&self, user_id: &UserId) -> Option<DeviceList>;
 }
 
-/// A [`DeviceListLookup`] that knows no device lists.
+/// A [`DeviceListLookup`] that knows no device lists: every gim credential
+/// fails validation against it with `device_list_unknown`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoDeviceLists;
 
@@ -48,8 +49,12 @@ pub enum CredentialError {
     Cert(gim_identity::IdentityError),
     #[error("leaf signature key does not match the certified device key")]
     LeafKeyMismatch,
+    #[error("no device list of {user} is known")]
+    DeviceListUnknown { user: UserId },
     #[error("device {device} of {user} is revoked")]
     RevokedDevice { user: UserId, device: DeviceId },
+    #[error("device {device} is not certified in the device list of {user}")]
+    DeviceNotInList { user: UserId, device: DeviceId },
 }
 
 impl CredentialError {
@@ -66,7 +71,9 @@ impl CredentialError {
             Self::Cert(IdentityError::DeviceIdMismatch) => "device_id_mismatch",
             Self::Cert(_) => "invalid_cert",
             Self::LeafKeyMismatch => "leaf_key_mismatch",
+            Self::DeviceListUnknown { .. } => "device_list_unknown",
             Self::RevokedDevice { .. } => "revoked_device",
+            Self::DeviceNotInList { .. } => "device_not_in_list",
         }
     }
 }
@@ -112,7 +119,9 @@ impl GimCredential {
     }
 
     /// Parses the content; rejects any encoding other than the canonical
-    /// one. Does not verify the certificate (see [`GimCredential::verify`]).
+    /// one. Checks the outer array, then the version, then the shape of the
+    /// version-1 content. Does not verify the certificate (see
+    /// [`GimCredential::verify`]).
     pub fn decode(bytes: &[u8]) -> Result<Self, CredentialError> {
         let malformed = |reason: &str| CredentialError::MalformedContent(reason.into());
         let value: Value = ciborium::from_reader(bytes).map_err(|e| malformed(&e.to_string()))?;
@@ -122,15 +131,15 @@ impl GimCredential {
         let Value::Array(items) = value else {
             return Err(malformed("content is not an array"));
         };
-        let [version, root, cert]: [Value; 3] = items
-            .try_into()
-            .map_err(|_| malformed("content is not an array of 3 items"))?;
-        let Value::Integer(version) = version else {
+        let Some(Value::Integer(version)) = items.first() else {
             return Err(malformed("version is not an integer"));
         };
-        if u64::try_from(version).ok() != Some(CREDENTIAL_VERSION) {
+        if u64::try_from(*version).ok() != Some(CREDENTIAL_VERSION) {
             return Err(CredentialError::UnsupportedVersion);
         }
+        let [_, root, cert]: [Value; 3] = items
+            .try_into()
+            .map_err(|_| malformed("content is not an array of 3 items"))?;
         let (Value::Bytes(root), Value::Bytes(cert)) = (root, cert) else {
             return Err(malformed("expected byte strings"));
         };
@@ -170,8 +179,9 @@ impl GimCredential {
 
 /// Validates a leaf credential: it is a [`GimCredential`] whose chain
 /// verifies, whose certified device key equals `leaf_signature_key`, and
-/// whose device is not revoked in the latest list `lookup` knows for the
-/// user. Returns the certified device.
+/// whose device is certified with that key in the latest list `lookup` knows
+/// for the user. Fails closed when `lookup` knows no list for the user.
+/// Returns the certified device.
 pub fn validate(
     credential: &Credential,
     leaf_signature_key: &[u8],
@@ -190,11 +200,19 @@ pub fn check(
     if cert.device_public_key.as_bytes().as_slice() != leaf_signature_key {
         return Err(CredentialError::LeafKeyMismatch);
     }
-    if lookup
-        .device_list(&cert.user_id)
-        .is_some_and(|list| list.is_revoked(&cert.device_id))
-    {
+    let Some(list) = lookup.device_list(&cert.user_id) else {
+        return Err(CredentialError::DeviceListUnknown { user: cert.user_id });
+    };
+    if list.is_revoked(&cert.device_id) {
         return Err(CredentialError::RevokedDevice {
+            user: cert.user_id,
+            device: cert.device_id,
+        });
+    }
+    if !list.certs().any(|listed| {
+        listed.device_id == cert.device_id && listed.device_public_key == cert.device_public_key
+    }) {
+        return Err(CredentialError::DeviceNotInList {
             user: cert.user_id,
             device: cert.device_id,
         });
@@ -260,49 +278,109 @@ mod tests {
         assert!(GimCredential::decode(&indefinite).is_err());
     }
 
+    /// Knows one device list.
+    struct Known(DeviceList);
+
+    impl DeviceListLookup for Known {
+        fn device_list(&self, user_id: &UserId) -> Option<DeviceList> {
+            (self.0.user_id() == user_id).then(|| self.0.clone())
+        }
+    }
+
+    fn list_of(credential: &GimCredential) -> DeviceList {
+        DeviceList::new(
+            *credential.root_public_key(),
+            1,
+            vec![credential.signed_cert().clone()],
+            vec![],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn decode_checks_version_before_shape() {
+        let (credential, _) = sample();
+        let items = |version: u64, extra: usize| {
+            let mut items = vec![
+                Value::Integer(version.into()),
+                Value::Bytes(credential.root_public_key().as_bytes().to_vec()),
+                Value::Bytes(credential.signed_cert().to_bytes()),
+            ];
+            items.extend((0..extra).map(|_| Value::Null));
+            GimCredential::decode(&encode_cbor(&Value::Array(items)))
+        };
+        assert!(matches!(
+            items(2, 1),
+            Err(CredentialError::UnsupportedVersion)
+        ));
+        assert!(matches!(
+            items(1, 1),
+            Err(CredentialError::MalformedContent(_))
+        ));
+        assert!(matches!(
+            GimCredential::decode(&encode_cbor(&Value::Array(vec![]))),
+            Err(CredentialError::MalformedContent(_))
+        ));
+    }
+
     #[test]
     fn validate_checks_chain_key_and_type() {
         let (credential, device) = sample();
+        let lists = Known(list_of(&credential));
         let key = device.public().as_bytes().to_vec();
-        let device_ref = validate(&credential.to_mls(), &key, &NoDeviceLists).unwrap();
+        let device_ref = validate(&credential.to_mls(), &key, &lists).unwrap();
         assert_eq!(device_ref.user_id, credential.root_public_key().user_id());
         assert_eq!(device_ref.device_id, device.public().device_id());
 
         let other = DeviceSigningKey::from_seed(&[3; 32]).public();
-        assert!(validate(&credential.to_mls(), other.as_bytes(), &NoDeviceLists).is_err());
+        assert!(validate(&credential.to_mls(), other.as_bytes(), &lists).is_err());
 
         let forged = GimCredential::new(
             RootKey::from_seed(&[9; 32]).public(),
             credential.signed_cert().clone(),
         );
         assert!(matches!(
-            validate(&forged.to_mls(), &key, &NoDeviceLists),
+            validate(&forged.to_mls(), &key, &lists),
             Err(CryptoError::InvalidCredential { .. })
         ));
 
         let basic = Credential::new(CredentialType::Basic, credential.encode());
-        assert!(validate(&basic, &key, &NoDeviceLists).is_err());
+        assert!(validate(&basic, &key, &lists).is_err());
     }
 
     #[test]
-    fn validate_rejects_revoked_device() {
-        struct Revoking(DeviceList);
-        impl DeviceListLookup for Revoking {
-            fn device_list(&self, user_id: &UserId) -> Option<DeviceList> {
-                (self.0.user_id() == user_id).then(|| self.0.clone())
-            }
-        }
+    fn validate_fails_closed_without_a_list() {
         let (credential, device) = sample();
+        let key = device.public().as_bytes().to_vec();
+        let err = check(&credential.to_mls(), &key, &NoDeviceLists).unwrap_err();
+        assert_eq!(err.code(), "device_list_unknown");
+    }
+
+    #[test]
+    fn validate_requires_device_certified_in_list() {
+        let (credential, device) = sample();
+        let root = RootKey::from_seed(&[1; 32]);
+        let other = DeviceSigningKey::from_seed(&[3; 32]).public();
         let list = DeviceList::new(
-            *credential.root_public_key(),
+            root.public(),
             1,
-            vec![credential.signed_cert().clone()],
+            vec![SignedDeviceCert::issue(&root, &other, 7, 1)],
             vec![],
         )
         .unwrap();
         let key = device.public().as_bytes().to_vec();
-        assert!(validate(&credential.to_mls(), &key, &Revoking(list.clone())).is_ok());
+        let err = check(&credential.to_mls(), &key, &Known(list)).unwrap_err();
+        assert_eq!(err.code(), "device_not_in_list");
+    }
+
+    #[test]
+    fn validate_rejects_revoked_device() {
+        let (credential, device) = sample();
+        let list = list_of(&credential);
+        let key = device.public().as_bytes().to_vec();
+        assert!(validate(&credential.to_mls(), &key, &Known(list.clone())).is_ok());
         let revoked = list.revoke(&device.public().device_id()).unwrap();
-        assert!(validate(&credential.to_mls(), &key, &Revoking(revoked)).is_err());
+        let err = check(&credential.to_mls(), &key, &Known(revoked)).unwrap_err();
+        assert_eq!(err.code(), "revoked_device");
     }
 }

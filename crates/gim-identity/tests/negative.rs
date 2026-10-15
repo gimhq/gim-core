@@ -394,6 +394,19 @@ fn hosting_record_cases(cases: &mut Vec<Value>) {
         "unsupported_version",
     );
     add(
+        "hosting_record_no_hubs",
+        &resign(|body| body[5] = Cbor::Array(vec![])),
+        context.clone(),
+        "hub_count",
+    );
+    // The count is checked before the entries are decoded.
+    add(
+        "hosting_record_too_many_hubs",
+        &resign(|body| body[5] = Cbor::Array(vec![Cbor::Null; 17])),
+        context.clone(),
+        "hub_count",
+    );
+    add(
         "hosting_record_duplicate_hub",
         &resign(|body| {
             let Cbor::Array(hubs) = &mut body[5] else {
