@@ -126,6 +126,27 @@ fn key_packages() {
 }
 
 #[test]
+fn key_packages_are_bare_tls() {
+    // The hub contract carries a bare TLS-encoded KeyPackage, not an
+    // MLSMessage wrapping one.
+    let alice = dev("alice");
+    let kp = alice.kps(1).remove(0);
+    let bare = KeyPackageIn::tls_deserialize_exact(&kp).unwrap();
+    assert!(deserialize(&kp).is_err());
+
+    let key_package = bare
+        .validate(&alice.engine.crypto, ProtocolVersion::Mls10)
+        .unwrap();
+    let wrapped = MlsMessageOut::from(key_package)
+        .tls_serialize_detached()
+        .unwrap();
+    assert!(matches!(
+        alice.engine.validate_key_package(&wrapped),
+        Err(CryptoError::InvalidInput { .. })
+    ));
+}
+
+#[test]
 fn last_resort_key_package_is_reusable() {
     let (alice, bob) = (dev("alice"), dev("bob"));
     let lr = bob

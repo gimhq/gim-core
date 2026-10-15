@@ -289,7 +289,7 @@ pub trait Transport: Send + Sync {
     }
 
     /// Uploads one-time KeyPackages, or with `last_resort` exactly one that
-    /// replaces the last-resort KeyPackage (TLS-serialized `MlsMessage`s).
+    /// replaces the last-resort KeyPackage (bare TLS-serialized KeyPackages).
     async fn upload_key_packages(
         &self,
         token: &AccessToken,
