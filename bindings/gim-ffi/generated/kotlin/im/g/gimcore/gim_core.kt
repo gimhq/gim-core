@@ -1357,7 +1357,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_gim_core_checksum_method_gimclient_remove_member() and 0xFFFF) != 31958) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_gim_core_checksum_method_gimclient_restore_from_recovery() and 0xFFFF) != 55724) {
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_restore_from_recovery() and 0xFFFF) != 56825) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_retry_send() and 0xFFFF) != 31098) {
@@ -2729,10 +2729,12 @@ public interface GimClientInterface {
      * after losing every device: becomes a new device of `user_id`, signed
      * in, with a new self group. Chats are not rejoined automatically.
      *
-     * With `revoke_others` the previous devices are revoked. Keeping them
-     * (`revoke_others == false`) needs the user's current DeviceList
-     * cached locally, which a fresh install does not have: it then fails
-     * with `InvalidInput`.
+     * Reads the user's current DeviceList from the hub (no session
+     * needed) and publishes the next one with this device added. With
+     * `revoke_others` every previously listed device is revoked; without
+     * it they all stay active. Fails with `NotFound` if the hub has no
+     * DeviceList of the user, and with `RetryLater` while the hub keeps
+     * throttling the read.
      */
     suspend fun `restoreFromRecovery`(`userId`: kotlin.String, `recoveryCode`: kotlin.String, `revokeOthers`: kotlin.Boolean)
     
@@ -3579,10 +3581,12 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
      * after losing every device: becomes a new device of `user_id`, signed
      * in, with a new self group. Chats are not rejoined automatically.
      *
-     * With `revoke_others` the previous devices are revoked. Keeping them
-     * (`revoke_others == false`) needs the user's current DeviceList
-     * cached locally, which a fresh install does not have: it then fails
-     * with `InvalidInput`.
+     * Reads the user's current DeviceList from the hub (no session
+     * needed) and publishes the next one with this device added. With
+     * `revoke_others` every previously listed device is revoked; without
+     * it they all stay active. Fails with `NotFound` if the hub has no
+     * DeviceList of the user, and with `RetryLater` while the hub keeps
+     * throttling the read.
      */
     @Throws(GimException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -7451,6 +7455,23 @@ sealed class GimException: kotlin.Exception() {
     }
     
     /**
+     * The hub is throttling the call (HTTP 429 `rate_limited`) or a remote
+     * hub is unavailable (HTTP 503 `peer_unavailable`), and gim-core's
+     * bounded retries are used up; try again after `retry_after_secs`.
+     */
+    class RetryLater(
+        
+        val `status`: kotlin.UShort, 
+        
+        val `retryAfterSecs`: kotlin.ULong, 
+        
+        val `reason`: kotlin.String
+        ) : GimException() {
+        override val message
+            get() = "status=${ `status` }, retryAfterSecs=${ `retryAfterSecs` }, reason=${ `reason` }"
+    }
+    
+    /**
      * The operation was cancelled (sign-out, `stop_sync`, `cancel_send`).
      */
     class Cancelled(
@@ -7518,9 +7539,14 @@ public object FfiConverterTypeGimError : FfiConverterRustBuffer<GimException> {
                 FfiConverterUShort.read(buf),
                 FfiConverterString.read(buf),
                 )
-            8 -> GimException.Cancelled()
-            9 -> GimException.NotImplemented()
-            10 -> GimException.Internal(
+            8 -> GimException.RetryLater(
+                FfiConverterUShort.read(buf),
+                FfiConverterULong.read(buf),
+                FfiConverterString.read(buf),
+                )
+            9 -> GimException.Cancelled()
+            10 -> GimException.NotImplemented()
+            11 -> GimException.Internal(
                 FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
@@ -7562,6 +7588,13 @@ public object FfiConverterTypeGimError : FfiConverterRustBuffer<GimException> {
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
                 + FfiConverterUShort.allocationSize(value.`status`)
+                + FfiConverterString.allocationSize(value.`reason`)
+            )
+            is GimException.RetryLater -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterUShort.allocationSize(value.`status`)
+                + FfiConverterULong.allocationSize(value.`retryAfterSecs`)
                 + FfiConverterString.allocationSize(value.`reason`)
             )
             is GimException.Cancelled -> (
@@ -7617,16 +7650,23 @@ public object FfiConverterTypeGimError : FfiConverterRustBuffer<GimException> {
                 FfiConverterString.write(value.`reason`, buf)
                 Unit
             }
-            is GimException.Cancelled -> {
+            is GimException.RetryLater -> {
                 buf.putInt(8)
+                FfiConverterUShort.write(value.`status`, buf)
+                FfiConverterULong.write(value.`retryAfterSecs`, buf)
+                FfiConverterString.write(value.`reason`, buf)
                 Unit
             }
-            is GimException.NotImplemented -> {
+            is GimException.Cancelled -> {
                 buf.putInt(9)
                 Unit
             }
-            is GimException.Internal -> {
+            is GimException.NotImplemented -> {
                 buf.putInt(10)
+                Unit
+            }
+            is GimException.Internal -> {
+                buf.putInt(11)
                 FfiConverterString.write(value.`reason`, buf)
                 Unit
             }

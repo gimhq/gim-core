@@ -373,10 +373,12 @@ impl GimClient {
     /// after losing every device: becomes a new device of `user_id`, signed
     /// in, with a new self group. Chats are not rejoined automatically.
     ///
-    /// With `revoke_others` the previous devices are revoked. Keeping them
-    /// (`revoke_others == false`) needs the user's current DeviceList
-    /// cached locally, which a fresh install does not have: it then fails
-    /// with `InvalidInput`.
+    /// Reads the user's current DeviceList from the hub (no session
+    /// needed) and publishes the next one with this device added. With
+    /// `revoke_others` every previously listed device is revoked; without
+    /// it they all stay active. Fails with `NotFound` if the hub has no
+    /// DeviceList of the user, and with `RetryLater` while the hub keeps
+    /// throttling the read.
     pub async fn restore_from_recovery(
         &self,
         user_id: String,
