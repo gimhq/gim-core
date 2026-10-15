@@ -100,7 +100,9 @@ impl MockServer {
         let app = Router::new()
             .route("/v1/devices", post(register))
             .route("/v1/keypackages", post(upload_key_packages))
+            .route("/v1/keypackages/count", get(key_package_count))
             .route("/v1/me", get(me))
+            .route("/v1/groups", get(groups))
             .route("/v1/groups/{group_id}", get(group))
             .route("/v1/groups/{group_id}/messages", get(messages))
             .route("/v1/events", get(events))
@@ -248,6 +250,19 @@ async fn upload_key_packages(
     .into_response()
 }
 
+async fn key_package_count(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let device = match state.authenticate(&headers) {
+        Ok(device) => device,
+        Err(response) => return response,
+    };
+    let service = state.transport.service();
+    Json(dto::KeyPackageCount {
+        available: service.key_package_count(&device) as u64,
+        has_last_resort: service.has_last_resort_key_package(&device),
+    })
+    .into_response()
+}
+
 async fn me(State(state): State<AppState>, headers: HeaderMap) -> Response {
     match state.authenticate(&headers) {
         Ok(device) => Json(dto::Me {
@@ -276,14 +291,34 @@ async fn group(
     if !info.members.contains(&device) {
         return error(StatusCode::FORBIDDEN, "forbidden");
     }
-    Json(dto::Group {
+    Json(group_dto(info, &device)).into_response()
+}
+
+async fn groups(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let device = match state.authenticate(&headers) {
+        Ok(device) => device,
+        Err(response) => return response,
+    };
+    let groups = state
+        .transport
+        .service()
+        .groups_of(&device)
+        .into_iter()
+        .map(|info| group_dto(info, &device))
+        .collect();
+    Json(dto::GroupList { groups }).into_response()
+}
+
+/// The fake service does not track creators: `device` stands in.
+fn group_dto(info: gim_test::GroupInfo, device: &DeviceRef) -> dto::Group {
+    dto::Group {
         group_id: info.group_id,
         kind: match info.kind {
             gim_test::GroupKind::Direct => dto::GroupKind::Direct,
             gim_test::GroupKind::Group => dto::GroupKind::Group,
         },
         epoch: info.epoch,
-        created_by_device_id: device.device_id,
+        created_by_device_id: device.device_id.clone(),
         created_at: 0,
         members: info
             .members
@@ -293,8 +328,7 @@ async fn group(
                 user_id: d.user_id,
             })
             .collect(),
-    })
-    .into_response()
+    }
 }
 
 /// Group history as this device may see it: Welcomes addressed to other
