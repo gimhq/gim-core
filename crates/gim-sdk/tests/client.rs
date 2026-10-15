@@ -3,12 +3,16 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use gim_base::model::{ChatKind, Membership, Message, MessageContent, SendState, StateChange};
+use gim_base::model::{
+    ChatKind, Membership, MembershipChangeKind, Message, MessageContent, SendState, StateChange,
+};
 use gim_base::{MemoryStore, StateReader};
 use gim_common::{GroupId, MessageId, UserId};
 use gim_proto::envelope::Content;
 use gim_sdk::testing::{FakeTransport, MemorySecretStorage};
-use gim_sdk::{Client, ClientBuilder, ClientError, SecretStorage, KEY_PACKAGE_BATCH};
+use gim_sdk::{
+    Client, ClientBuilder, ClientError, SecretStorage, KEY_PACKAGE_BATCH, SESSION_SECRET_KEY,
+};
 use gim_test::KEY_PACKAGES_LOW_THRESHOLD;
 use tempfile::TempDir;
 
@@ -173,6 +177,28 @@ async fn register_restore_and_find_user() {
 }
 
 #[tokio::test]
+async fn lost_store_identity_signs_out() {
+    let transport = FakeTransport::new();
+    let alice = Device::register(&transport, "alice").await;
+
+    // The store was reset while the keystore kept the session secret.
+    let reset = build(
+        &transport,
+        &Arc::new(MemoryStore::new()),
+        &alice.secrets,
+        alice.data_dir.path(),
+    );
+    assert!(!reset.restore_session().await.unwrap());
+    assert!(reset.session().is_none());
+    assert_eq!(alice.secrets.get(SESSION_SECRET_KEY).unwrap(), None);
+    assert!(!reset.restore_session().await.unwrap());
+
+    // Onboarding registers a new device.
+    let session = reset.register("alice", "Alice").await.unwrap();
+    assert_ne!(Some(session), alice.client.session());
+}
+
+#[tokio::test]
 async fn direct_chat_between_two_clients() {
     let transport = FakeTransport::new();
     let alice = Device::register(&transport, "alice").await;
@@ -306,11 +332,23 @@ async fn add_remove_and_leave() {
         sorted(vec![alice.user_id(), carol.user_id()])
     );
 
+    let mut changes = carol.client.subscribe_changes();
     carol.client.leave(&g).await.unwrap();
     assert_eq!(
         carol.store.chat(&g).unwrap().unwrap().membership,
         Membership::Left
     );
+    // Carol's device records her own Left, like the other members do.
+    let left = carol.store.membership_events(&g).unwrap().pop().unwrap();
+    assert_eq!(
+        (left.user_id.clone(), left.kind),
+        (carol.user_id(), MembershipChangeKind::Left)
+    );
+    let mut emitted = Vec::new();
+    while let Ok(change) = changes.try_recv() {
+        emitted.push(change);
+    }
+    assert!(emitted.contains(&StateChange::MembershipChanged(left)));
     alice.send_text(&g, "after carol left").await;
     carol.sync().await;
     assert_eq!(carol.texts(&g), vec!["welcome carol", "without bob"]);

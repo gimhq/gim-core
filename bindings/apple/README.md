@@ -60,6 +60,22 @@ prints the slice and zip sizes). What keeps it small:
   `opt-level = "s"`, fat LTO, one codegen unit, no debug info, `panic =
   "unwind"` (UniFFI needs it).
 
+### SQLCipher and OpenSSL
+
+The local database is SQLCipher (`rusqlite` feature
+`bundled-sqlcipher-vendored-openssl`): `openssl-src` builds a static
+`libcrypto` for each slice (`ios64-cross` / `iossimulator-arm64-xcrun`, needs
+Xcode's clang, `perl` and `make`) and rustc bundles it into `libgim_core.a`.
+That adds roughly 14 MB per slice to the archives and about 7-8 MB to the zip;
+the app's linker dead-strips the unused parts.
+
+libsqlite3-sys can use CommonCrypto instead (`-DSQLCIPHER_CRYPTO_CC`, linking
+`Security`), but only with plain `bundled-sqlcipher` and an Apple host
+building for an Apple target. With one workspace feature set that is not
+possible: it would need a target-specific `rusqlite` dependency
+(`bundled-sqlcipher` on Apple, `bundled-sqlcipher-vendored-openssl`
+elsewhere), so every target keeps the vendored OpenSSL.
+
 ### Bitcode
 
 The sysroot's `compiler_builtins` objects are never part of LTO and are copied

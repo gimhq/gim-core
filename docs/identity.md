@@ -286,6 +286,58 @@ Verification of an `AuthResponse` by the hub `expected_audience` at time
 
 On success the hub has authenticated the device `(user_id, device_id)`.
 
+## MLS credential
+
+Test vectors: `crates/gim-crypto/tests/vectors/credential.json` (same root
+and device seeds as `identity.json`).
+
+Every MLS leaf (KeyPackage and group leaf) of a device carries a
+self-certifying credential of MLS credential type `0xF001`
+(`GIM_CREDENTIAL_TYPE`, in the MLS private-use range). Its
+`serialized_content` is:
+
+```
+GimCredential = [
+  1,                            ; version
+  root_pubkey: bstr .size 32,   ; the user's root public key
+  signed_device_cert: bstr,     ; SignedDeviceCert of this device
+]
+```
+
+The content is deterministic CBOR (see *Encoding*): definite lengths,
+shortest-form heads, no trailing bytes. A decoder re-encodes the decoded item
+and rejects the content unless the result equals the received bytes. Leaf
+capabilities list `0xF001` as the only supported credential type.
+
+Validation of a leaf, given its credential, its MLS signature key and the
+latest `DeviceList` the validator knows for the user (if any), runs these
+steps in order and stops at the first failure (error name in brackets):
+
+1. The credential type is `0xF001` (basic and any other type are rejected)
+   [`wrong_credential_type`].
+2. The content decodes: deterministic CBOR [`non_canonical_cbor`], an array
+   of exactly three items with byte strings in the key and cert positions and
+   a valid 32-byte Ed25519 `root_pubkey` [`malformed_content`], version `1`
+   [`unsupported_version`].
+3. `signed_device_cert` verifies under `root_pubkey` following the
+   *DeviceCert* rules and their *Verification order*: the signature
+   [`bad_cert_signature`], then `user_id` derived from `root_pubkey`
+   [`user_id_mismatch`] and `device_id` derived from `device_sig_pubkey`
+   [`device_id_mismatch`]; any other certificate failure [`invalid_cert`].
+4. The leaf's MLS signature key equals the certified `device_sig_pubkey`
+   [`leaf_key_mismatch`].
+5. `device_id` is not revoked in the latest known `DeviceList` of `user_id`
+   [`revoked_device`]. Knowing no list for the user means no known
+   revocations.
+
+The leaf's device is `(user_id, device_id)` from the certificate.
+
+A device validates: every leaf of the ratchet tree of a Welcome (including
+the sender) before joining; the committer's leaf, the update-path leaf, and
+every Add and Update proposal of an incoming commit before merging it; Add
+and Update proposals before storing them; and the KeyPackages it adds
+itself. A rejected Welcome or commit leaves the local group state unchanged.
+
 ## Reserved
 
 Recovery backups and device-link bundles are specified by the following

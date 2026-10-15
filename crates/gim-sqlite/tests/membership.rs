@@ -3,12 +3,12 @@
 
 mod common;
 
-use common::{group, Device};
+use common::{group, Device, NOW};
 use gim_base::model::{
-    GroupMessage, IncomingEvent, MembershipChangeKind as Kind, MessageContent, MessageKind,
-    StateChange,
+    GroupMessage, IncomingEvent, Membership, MembershipChangeKind as Kind, MessageContent,
+    MessageKind, StateChange,
 };
-use gim_base::StateReader;
+use gim_base::{StateReader, StateStore};
 use gim_common::GroupId;
 use gim_proto::envelope::Content;
 use gim_test::FakeDeliveryService;
@@ -184,4 +184,57 @@ fn history_messages_are_inserted_once_without_unread() {
         .apply_history(&carol.store, &carol.engine, before_join)
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn leaving_records_the_own_left_event() {
+    let ds = FakeDeliveryService::new();
+    let g = group("crew");
+    let (alice, bob) = (Device::new("alice"), Device::new("bob"));
+    alice.create_chat(&ds, &g);
+    alice.add(&ds, &g, &[&bob]);
+    bob.sync(&ds);
+    let last = alice.send_text(&ds, &g, "hi");
+    bob.sync(&ds);
+    let last_seq = bob.message(&last).seq.unwrap();
+
+    // Bob left the fan-out list; his device records it as others will.
+    ds.remove_member(&g, &bob.me).unwrap();
+    let changes = bob
+        .client
+        .leave_chat(&bob.store, &bob.engine, &g, NOW)
+        .unwrap();
+    let left_bob = event(last_seq + 1, "bob", "bob", Kind::Left);
+    assert!(changes.iter().any(|c| matches!(
+        c,
+        StateChange::MembershipChanged(e) if e.kind == Kind::Left && e.seq == last_seq + 1
+    )));
+    let chat = bob.store.chat(&g).unwrap().unwrap();
+    assert_eq!(chat.membership, Membership::Left);
+    assert_eq!(events(&bob, &g).last(), Some(&left_bob));
+    let has_group = bob
+        .store
+        .transaction(|txn| Ok(bob.engine.has_group(&*txn, &g)?))
+        .unwrap();
+    assert!(!has_group);
+
+    // Leaving again changes nothing.
+    let before = events(&bob, &g);
+    let again = bob
+        .client
+        .leave_chat(&bob.store, &bob.engine, &g, NOW)
+        .unwrap();
+    assert!(again.is_empty());
+    assert_eq!(events(&bob, &g), before);
+
+    // Alice removes him from the tree and records the same kind of event.
+    alice.apply(IncomingEvent::MemberRemoved {
+        group_id: g.clone(),
+        device: bob.me.clone(),
+    });
+    let remove_bob = alice.remove(&ds, &g, &[&bob]);
+    assert_eq!(
+        events(&alice, &g).last(),
+        Some(&event(remove_bob, "bob", "alice", Kind::Left))
+    );
 }
