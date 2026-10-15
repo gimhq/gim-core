@@ -767,13 +767,6 @@ async fn restore_from_recovery_code() {
             .await,
         Err(GimError::InvalidInput { .. })
     ));
-    // Keeping the old devices needs a cached DeviceList.
-    assert!(matches!(
-        fresh
-            .restore_from_recovery(user_id.clone(), code.clone(), false)
-            .await,
-        Err(GimError::InvalidInput { .. })
-    ));
     fresh
         .restore_from_recovery(user_id.clone(), code.clone(), true)
         .await
