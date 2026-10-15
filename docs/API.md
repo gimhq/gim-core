@@ -34,8 +34,10 @@ milliseconds (`u64`). Counts and indices are `u32`.
    that case show onboarding and call `register(handle, displayName)`, which returns the new
    `Session`. Most other calls fail with `NotRegistered` until a session exists.
 3. **Sync**: call `startSync()` when the app comes to the foreground and `stopSync()` when it goes
-   to the background. Sync reconnects on its own; report reachability changes with
-   `setNetworkReachable(reachable)` so it can back off or reconnect immediately.
+   to the background. Sync reconnects on its own: after a failure it reports `Offline` and retries
+   with exponential backoff (up to 60 s). Report reachability changes with
+   `setNetworkReachable(reachable)`: `true` after `false` wakes the loop for an immediate reconnect
+   and retries pending sends; `false` neither pauses sync nor forces `Offline`.
 4. **Listeners**: subscribe with `chatList(listener)`, `timeline(chatId).addListener(listener)`,
    `connectionState(listener)` and `typing(chatId, listener)`. Each returns a `TaskHandle`.
 5. **Sign out**: `signOut()` stops sync and deletes the session, the local database and the
@@ -62,13 +64,13 @@ implementations fast and thread-safe.
 | `register(handle, displayName)` | `Session` | |
 | `signOut()` | | |
 | `startSync()` / `stopSync()` | | |
-| `setNetworkReachable(reachable)` | | Synchronous, never throws. |
+| `setNetworkReachable(reachable)` | | Synchronous, never throws. Becoming reachable reconnects and retries the outbox at once; becoming unreachable changes nothing by itself. |
 | `findUser(handle)` | `UserProfile?` | `null`/`nil` if no such user. |
 | `createDirectChat(userId)` | chat id | Returns the existing direct chat if there is one. |
-| `createGroupChat(name, memberUserIds)` | chat id | |
-| `chatMembers(chatId)` | `[UserProfile]` | Current members, one entry per user (not per device), including the signed-in user. Names come from the local user directory (filled by `findUser` and registration); unknown users fall back to the user id. No members listener in M1: re-query when a `ChatListDiff` touches that chat or a `TimelineItem.MembershipChange` arrives. |
+| `createGroupChat(name, memberUserIds)` | chat id | The name is shared with the members (and with members added later) in an encrypted group info message. |
+| `chatMembers(chatId)` | `[UserProfile]` | Current members, one entry per user (not per device), including the signed-in user. Names come from the local user directory, filled by `findUser`, registration, and directory lookups the client makes for members of created or joined chats, added members and unknown senders; until a lookup succeeds a user shows as its user id. Resolved names arrive as `ChatListDiff`s and timeline `Set`s. No members listener in M1: re-query when a `ChatListDiff` touches that chat or a `TimelineItem.MembershipChange` arrives. |
 | `addMembers(chatId, userIds)`, `removeMember(chatId, userId)`, `leaveChat(chatId)` | | |
-| `setGroupInfo(chatId, name?, avatarFilePath?)` | | `null`/`nil` leaves a field unchanged. Not implemented in M1 (`NotImplemented`). |
+| `setGroupInfo(chatId, name?, avatarFilePath?)` | | `null`/`nil` leaves a field unchanged; at least one must be set. The avatar is encrypted and uploaded before the call returns (MIME type from the file extension), then the change is applied locally and sent to the members. `InvalidInput` for direct chats. |
 | `sendText(chatId, body, replyTo?)` | message id | The message appears in the timeline immediately with `SendState.Pending`. |
 | `sendMedia(chatId, filePath, mime, caption?, replyTo?)` | message id | The file is copied before the call returns. |
 | `editMessage(chatId, messageId, newBody)`, `deleteMessage(chatId, messageId)` | | |
@@ -80,7 +82,7 @@ implementations fast and thread-safe.
 | `fetchThumbnail(chatId, messageId, destPath)` | file path? | `null`/`nil` if the media has no thumbnail. |
 | `chatList(listener)` | `TaskHandle` | |
 | `timeline(chatId)` | `Timeline` | |
-| `connectionState(listener)` | `TaskHandle` | `Offline` until `startSync` and while unreachable; `Connecting` → `Syncing` (catching up) → `Connected`. |
+| `connectionState(listener)` | `TaskHandle` | `Offline` until `startSync` and after a failure while waiting to retry; `Connecting` → `Syncing` (catching up) → `Connected`. |
 | `typing(chatId, listener)` | `TaskHandle` | Reports user ids other than the signed-in user. |
 
 A message id is the client id chosen when the message is queued; it stays the same from local echo
@@ -100,8 +102,11 @@ Encryption keys and blob ids never leave Rust; pass the ids to `fetchMedia` / `f
 - `chatId()`.
 
 `TimelineItem` is a `Message` (`MessageItem`), a `DateSeparator` (start of a calendar day; in M1
-days are UTC days, not local ones) or a `MembershipChange` (`Added`, `Removed`, `Left`; not produced
-in M1). `paginateBackwards` only pages through locally stored history in M1. `MessageItem.sendState` is set only for own
+days are UTC days, not local ones) or a `MembershipChange` (`Added`, `Removed`, `Left`; group chats
+only, in seq order among the messages, at the time the change was applied on this device).
+`paginateBackwards` pages through locally stored history first, then through the server history:
+messages this device cannot decrypt (sent before it joined, or already read once and removed
+locally) are skipped, and it returns `false` once nothing older is readable. `MessageItem.sendState` is set only for own
 messages: `Pending → Sent → Delivered → Read`, or `Failed(reason)`.
 
 ## Listeners and threading

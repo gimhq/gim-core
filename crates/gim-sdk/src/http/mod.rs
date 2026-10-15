@@ -300,6 +300,23 @@ impl Transport for HttpTransport {
         }
     }
 
+    async fn user(
+        &self,
+        token: &AccessToken,
+        user_id: &UserId,
+    ) -> TransportResult<Option<UserInfo>> {
+        let request = self.api(Method::GET, &paths::user(user_id), Some(token));
+        match Self::json::<dto::User>(request).await {
+            Ok(user) => Ok(Some(UserInfo {
+                user_id: user.user_id,
+                handle: user.handle,
+                display_name: user.display_name,
+            })),
+            Err(TransportError::NotFound(_)) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
     async fn list_devices(
         &self,
         token: &AccessToken,

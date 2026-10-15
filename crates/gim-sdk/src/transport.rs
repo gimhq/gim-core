@@ -132,6 +132,13 @@ pub trait Transport: Send + Sync {
         handle: &str,
     ) -> TransportResult<Option<UserInfo>>;
 
+    /// Looks a user up by id; `None` if there is no such user.
+    async fn user(
+        &self,
+        token: &AccessToken,
+        user_id: &UserId,
+    ) -> TransportResult<Option<UserInfo>>;
+
     async fn list_devices(
         &self,
         token: &AccessToken,

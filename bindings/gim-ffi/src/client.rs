@@ -299,6 +299,23 @@ fn copy_outgoing(data_dir: &Path, source: &Path) -> Result<PathBuf, GimError> {
     Ok(copy)
 }
 
+/// MIME type of an avatar image, from its file extension.
+fn image_mime(path: &Path) -> String {
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    match extension.as_deref() {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("heic") => "image/heic",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
 fn remove_if_exists(path: &Path) -> std::io::Result<()> {
     let removed = if path.is_dir() {
         std::fs::remove_dir_all(path)
@@ -473,16 +490,23 @@ impl GimClient {
         Ok(sdk.leave(&group_id).await?)
     }
 
-    /// Updates the group name and/or avatar; `None` leaves a field unchanged.
+    /// Updates the group name and/or avatar and shares them with the
+    /// members; `None` leaves a field unchanged. The avatar file is
+    /// encrypted and uploaded before this returns.
     pub async fn set_group_info(
         &self,
         chat_id: String,
         name: Option<String>,
         avatar_file_path: Option<String>,
     ) -> Result<(), GimError> {
-        // gim-sdk cannot share group info yet.
-        let _ = (chat_id, name, avatar_file_path);
-        Err(GimError::NotImplemented)
+        let sdk = self.sdk()?;
+        let group_id: GroupId = parse_id("chat_id", chat_id)?;
+        let avatar = avatar_file_path.map(|path| {
+            let mime = image_mime(Path::new(&path));
+            (PathBuf::from(path), mime)
+        });
+        sdk.set_group_info(&group_id, name, avatar).await?;
+        Ok(())
     }
 
     /// Queues a text message and returns its message id (the client id).

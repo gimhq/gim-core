@@ -520,6 +520,64 @@ async fn group_members() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn group_info_and_member_names_reach_joiners() {
+    let transport = FakeTransport::new();
+    let alice = User::register(&transport, "alice", "Alice").await;
+    let bob = User::register(&transport, "bob", "Bob").await;
+    // No find_user: member names are looked up by the clients.
+    let chat = alice
+        .client
+        .create_group_chat("Crew".to_string(), vec![bob.user_id.clone()])
+        .await
+        .unwrap();
+    let (list, _list_handle) = bob.chat_list().await;
+    bob.client.start_sync().await.unwrap();
+    list.wait("the shared group name", |items| {
+        items.iter().any(|c| c.chat_id == chat && c.name == "Crew")
+    })
+    .await;
+    let mut names: Vec<String> = bob
+        .client
+        .chat_members(chat.clone())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|p| p.display_name)
+        .collect();
+    names.sort();
+    assert_eq!(names, ["Alice", "Bob"]);
+
+    let avatar = alice.hooks.path("boat.png");
+    std::fs::write(&avatar, b"png bytes").unwrap();
+    alice
+        .client
+        .set_group_info(
+            chat.clone(),
+            Some("Ionian crew".to_string()),
+            Some(avatar.to_str().unwrap().to_string()),
+        )
+        .await
+        .unwrap();
+    let rows = list
+        .wait("the new name and avatar", |items| {
+            items
+                .iter()
+                .any(|c| c.chat_id == chat && c.name == "Ionian crew" && c.avatar.is_some())
+        })
+        .await;
+    let row = rows.iter().find(|c| c.chat_id == chat).unwrap();
+    let avatar = row.avatar.as_ref().unwrap();
+    assert_eq!(avatar.mime, "image/png");
+    assert_eq!(avatar.message_id, "");
+
+    assert!(matches!(
+        alice.client.set_group_info(chat.clone(), None, None).await,
+        Err(GimError::InvalidInput { .. })
+    ));
+    bob.client.stop_sync().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sign_out_deletes_local_state() {
     let transport = FakeTransport::new();
     let alice = User::register(&transport, "alice", "Alice").await;

@@ -58,8 +58,8 @@ async fn ordered_by_update_with_minimal_diffs() {
         ),
         ("Alice", "hello", false)
     );
-    // The name is not shared with joiners yet: other members' names.
-    assert_eq!(items[0].name, "Carol");
+    // The creator shares the name with the joiners.
+    assert_eq!(items[0].name, "trip");
     assert_eq!(items[0].kind, ChatKind::Group);
     assert_eq!(items[0].last_message.as_ref().unwrap().text, "hey");
 

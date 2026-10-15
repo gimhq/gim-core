@@ -8,8 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use common::{group, setup, text, Device, NOW};
 use gim_base::model::{
     AfterCommit, Chat, ChatKind, ChatMember, DepartedMember, GroupCursor, GroupMessage,
-    MediaCacheEntry, Membership, Message, MessageContent, MessageKind, OutboxEntry, OutboxKind,
-    OutboxState, PendingCommit, PendingMedia, PendingWelcome, PreparedPayload, SendState, UserInfo,
+    MediaCacheEntry, Membership, MembershipChangeKind, MembershipEvent, Message, MessageContent,
+    MessageKind, OutboxEntry, OutboxKind, OutboxState, PendingCommit, PendingMedia, PendingWelcome,
+    PreparedPayload, SendState, UserInfo,
 };
 use gim_base::{
     BaseError, MemoryStore, StateReader, StateStore, StoreError, StoreTxn, WriteTarget,
@@ -172,6 +173,10 @@ fn reads_match_memory_store() {
     assert_same_reads(&memory, &sqlite);
     assert_eq!(sqlite.pending_commits().unwrap().len(), 3);
     assert_eq!(sqlite.departed_members().unwrap().len(), 3);
+    let crew = sqlite.membership_events(&group("crew")).unwrap();
+    let order: Vec<(u64, &str)> = crew.iter().map(|e| (e.seq, e.user_id.as_str())).collect();
+    assert_eq!(order, [(3, "bob"), (3, "carol"), (9, "bob")]);
+    assert_eq!(crew[2].kind, MembershipChangeKind::Removed);
     memory.transaction(|txn| Ok(update_rows(txn)?)).unwrap();
     sqlite.transaction(|txn| Ok(update_rows(txn)?)).unwrap();
     assert_same_reads(&memory, &sqlite);
@@ -403,7 +408,34 @@ fn write_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
             device: device(user, dev),
         })?;
     }
+    for (g, seq, user, actor, kind) in [
+        ("crew", 9, "bob", "bob", MembershipChangeKind::Left),
+        ("crew", 3, "carol", "alice", MembershipChangeKind::Added),
+        ("crew", 3, "bob", "alice", MembershipChangeKind::Added),
+        ("dm", 2, "bob", "alice", MembershipChangeKind::Removed),
+        // Replaces the first row.
+        ("crew", 9, "bob", "alice", MembershipChangeKind::Removed),
+    ] {
+        txn.add_membership_event(&membership(g, seq, user, actor, kind))?;
+    }
     Ok(())
+}
+
+fn membership(
+    g: &str,
+    seq: u64,
+    user: &str,
+    actor: &str,
+    kind: MembershipChangeKind,
+) -> MembershipEvent {
+    MembershipEvent {
+        group_id: group(g),
+        seq,
+        user_id: UserId::new(user).unwrap(),
+        actor: UserId::new(actor).unwrap(),
+        kind,
+        at_ms: NOW + seq,
+    }
 }
 
 fn update_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
@@ -436,6 +468,13 @@ fn update_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
         group_id: group("crew"),
         device: device("dave", "phone"),
     })?;
+    txn.add_membership_event(&membership(
+        "crew",
+        12,
+        "dave",
+        "carol",
+        MembershipChangeKind::Added,
+    ))?;
     Ok(())
 }
 
@@ -473,6 +512,10 @@ fn assert_same_reads(expected: &impl StateReader, actual: &impl StateReader) {
         assert_eq!(
             actual.pending_commit(&g).unwrap(),
             expected.pending_commit(&g).unwrap()
+        );
+        assert_eq!(
+            actual.membership_events(&g).unwrap(),
+            expected.membership_events(&g).unwrap()
         );
     }
     assert_eq!(
