@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use gim_common::{now_ms, DeviceRef, GroupId, MessageId, UserId};
+use gim_common::{now_ms, ClientId, DeviceRef, GroupId, MessageId, UserId};
 use gim_crypto::{decrypt_to_envelope, CryptoError, DecryptedMessage, MlsEngine, ProcessedMessage};
 use gim_identity::SignedDeviceList;
 use gim_proto::envelope::{Contact, Content, Envelope, ReceiptKind};
@@ -11,7 +11,7 @@ use gim_proto::envelope::{Contact, Content, Envelope, ReceiptKind};
 use crate::model::{
     to_message_id, Chat, ChatKind, ChatMember, DepartedMember, GroupMessage, IncomingEvent,
     Membership, MembershipChangeKind, MembershipEvent, Message, MessageContent, MessageKind,
-    PendingCommit, SendState, StateChange, UserInfo,
+    PendingCommit, PendingLeave, SendState, StateChange, UserInfo,
 };
 use crate::{Result, StateReader, StateStore, StoreTxn};
 
@@ -114,11 +114,21 @@ impl BaseClient {
         seq: u64,
     ) -> Result<Vec<StateChange>> {
         store.transaction(|txn| {
+            let left = engine.pending_commit_leavers(&*txn, group_id)?;
             engine.merge_pending_commit(&*txn, group_id)?;
             txn.remove_pending_commit(group_id)?;
             let mut changes = Vec::new();
             let own_user = self.own.user_id.clone();
-            self.update_membership(txn, engine, group_id, seq, &own_user, None, &mut changes)?;
+            self.update_membership(
+                txn,
+                engine,
+                group_id,
+                seq,
+                &own_user,
+                None,
+                &left,
+                &mut changes,
+            )?;
             mark_applied(txn, group_id, seq)?;
             self.drain_parked(txn, engine, group_id, &mut changes)?;
             Ok(changes)
@@ -142,12 +152,12 @@ impl BaseClient {
         })
     }
 
-    /// Records that this device left the group, after it left the group's
-    /// fan-out list: deletes the local MLS group, marks the chat `Left` and
-    /// records the own user's `Left` membership event, like other members
-    /// record it from the removal commit. This device never sees that
-    /// commit, so the event takes the seq after the last one applied here.
-    /// A chat that is not joined only loses its MLS group.
+    /// Records that this device left the group without applying the commit
+    /// that removed it: deletes the local MLS group and the pending leave,
+    /// marks the chat `Left` and records the own user's `Left` membership
+    /// event, like other members record it from the removal commit. The
+    /// event takes the seq after the last one applied here. A chat that is
+    /// left already only loses its MLS group.
     pub fn leave_chat<S: StateStore>(
         &self,
         store: &S,
@@ -156,37 +166,158 @@ impl BaseClient {
         now_ms: u64,
     ) -> Result<Vec<StateChange>> {
         store.transaction(|txn| {
-            if engine.has_group(&*txn, group_id)? {
-                engine.delete_group(&*txn, group_id)?;
-            }
-            let Some(mut chat) = txn.chat(group_id)? else {
-                return Ok(vec![]);
-            };
+            let mut changes = Vec::new();
+            self.finish_leave(txn, engine, group_id, now_ms, &mut changes)?;
+            Ok(changes)
+        })
+    }
+
+    fn finish_leave<T: StoreTxn>(
+        &self,
+        txn: &mut T,
+        engine: &MlsEngine,
+        group_id: &GroupId,
+        now_ms: u64,
+        changes: &mut Vec<StateChange>,
+    ) -> Result<()> {
+        if engine.has_group(&*txn, group_id)? {
+            engine.delete_group(&*txn, group_id)?;
+        }
+        txn.remove_pending_leave(group_id)?;
+        let Some(mut chat) = txn.chat(group_id)? else {
+            return Ok(());
+        };
+        if chat.membership == Membership::Left {
+            return Ok(());
+        }
+        let cursor = txn.group_cursor(group_id)?;
+        let applied = cursor
+            .ahead
+            .last()
+            .copied()
+            .unwrap_or(cursor.contiguous_seq);
+        chat.membership = Membership::Left;
+        chat.updated_at_ms = chat.updated_at_ms.max(now_ms);
+        let event = MembershipEvent {
+            group_id: group_id.clone(),
+            seq: applied.max(chat.last_seq) + 1,
+            user_id: self.own.user_id.clone(),
+            actor: self.own.user_id.clone(),
+            kind: MembershipChangeKind::Left,
+            at_ms: now_ms,
+        };
+        txn.upsert_chat(&chat)?;
+        txn.add_membership_event(&event)?;
+        changes.push(StateChange::ChatUpserted(chat));
+        changes.push(StateChange::MembershipChanged(event));
+        Ok(())
+    }
+
+    /// Starts leaving a joined group: creates a Remove proposal for this
+    /// device's leaf at the current epoch, keeps it as the group's
+    /// [`PendingLeave`] (posted with `client_id`) and marks the chat
+    /// `Leaving`. The device stays a member until another member commits
+    /// the proposal.
+    pub fn start_leave<S: StateStore>(
+        &self,
+        store: &S,
+        engine: &MlsEngine,
+        group_id: &GroupId,
+        client_id: ClientId,
+        now_ms: u64,
+    ) -> Result<(PendingLeave, Vec<StateChange>)> {
+        store.transaction(|txn| {
+            let mut chat = txn
+                .chat(group_id)?
+                .ok_or_else(|| crate::BaseError::NotFound(format!("chat {group_id}")))?;
             if chat.membership != Membership::Joined {
-                return Ok(vec![]);
+                return Err(crate::BaseError::InvalidState(format!(
+                    "chat {group_id} is not joined"
+                )));
             }
-            let cursor = txn.group_cursor(group_id)?;
-            let applied = cursor
-                .ahead
-                .last()
-                .copied()
-                .unwrap_or(cursor.contiguous_seq);
-            chat.membership = Membership::Left;
-            chat.updated_at_ms = chat.updated_at_ms.max(now_ms);
-            let event = MembershipEvent {
+            let leave = PendingLeave {
                 group_id: group_id.clone(),
-                seq: applied.max(chat.last_seq) + 1,
-                user_id: self.own.user_id.clone(),
-                actor: self.own.user_id.clone(),
-                kind: MembershipChangeKind::Left,
-                at_ms: now_ms,
+                client_id,
+                epoch: engine.group_epoch(&*txn, group_id)?,
+                payload: engine.leave_group(&*txn, group_id)?,
+                attempts: 1,
+                accepted: false,
             };
+            txn.upsert_pending_leave(&leave)?;
+            chat.membership = Membership::Leaving;
+            chat.updated_at_ms = chat.updated_at_ms.max(now_ms);
             txn.upsert_chat(&chat)?;
-            txn.add_membership_event(&event)?;
-            Ok(vec![
-                StateChange::ChatUpserted(chat),
-                StateChange::MembershipChanged(event),
-            ])
+            Ok((leave, vec![StateChange::ChatUpserted(chat)]))
+        })
+    }
+
+    /// Replaces the pending leave by a fresh proposal for the group's
+    /// current epoch, after an epoch ended without removing this device;
+    /// counts an attempt.
+    pub fn renew_leave<S: StateStore>(
+        &self,
+        store: &S,
+        engine: &MlsEngine,
+        group_id: &GroupId,
+        client_id: ClientId,
+    ) -> Result<PendingLeave> {
+        store.transaction(|txn| {
+            let mut leave = txn.pending_leave(group_id)?.ok_or_else(|| {
+                crate::BaseError::NotFound(format!("pending leave of {group_id}"))
+            })?;
+            leave.epoch = engine.group_epoch(&*txn, group_id)?;
+            leave.payload = engine.leave_group(&*txn, group_id)?;
+            leave.client_id = client_id;
+            leave.attempts += 1;
+            leave.accepted = false;
+            txn.upsert_pending_leave(&leave)?;
+            Ok(leave)
+        })
+    }
+
+    /// Records that the hub accepted the pending leave posted with
+    /// `client_id`.
+    pub fn leave_accepted<S: StateStore>(
+        &self,
+        store: &S,
+        group_id: &GroupId,
+        client_id: &ClientId,
+    ) -> Result<()> {
+        store.transaction(|txn| {
+            if let Some(mut leave) = txn
+                .pending_leave(group_id)?
+                .filter(|l| &l.client_id == client_id)
+            {
+                leave.accepted = true;
+                txn.upsert_pending_leave(&leave)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Gives up leaving after the hub refused the proposal for good: drops
+    /// it (and the group's other pending proposals) and returns the chat to
+    /// `Joined`.
+    pub fn abort_leave<S: StateStore>(
+        &self,
+        store: &S,
+        engine: &MlsEngine,
+        group_id: &GroupId,
+    ) -> Result<Vec<StateChange>> {
+        store.transaction(|txn| {
+            txn.remove_pending_leave(group_id)?;
+            if engine.has_group(&*txn, group_id)? {
+                engine.clear_pending_proposals(&*txn, group_id)?;
+            }
+            let Some(mut chat) = txn
+                .chat(group_id)?
+                .filter(|c| c.membership == Membership::Leaving)
+            else {
+                return Ok(vec![]);
+            };
+            chat.membership = Membership::Joined;
+            txn.upsert_chat(&chat)?;
+            Ok(vec![StateChange::ChatUpserted(chat)])
         })
     }
 
@@ -270,10 +401,18 @@ impl BaseClient {
                             txn.add_departed_member(&DepartedMember { group_id, device })?;
                         }
                     } else if let Some(mut chat) = txn.chat(&group_id)? {
-                        if chat.membership == Membership::Joined {
-                            chat.membership = Membership::Left;
-                            txn.upsert_chat(&chat)?;
-                            changes.push(StateChange::ChatUpserted(chat));
+                        match chat.membership {
+                            // Removed after asking to: done leaving, even
+                            // without the removal commit.
+                            Membership::Leaving => {
+                                self.finish_leave(txn, engine, &group_id, now_ms(), &mut changes)?
+                            }
+                            Membership::Joined => {
+                                chat.membership = Membership::Left;
+                                txn.upsert_chat(&chat)?;
+                                changes.push(StateChange::ChatUpserted(chat));
+                            }
+                            Membership::Left => {}
                         }
                     }
                 }
@@ -331,6 +470,8 @@ impl BaseClient {
                 .map(|m| m.message_id.clone())
                 .collect();
             let mut changes = Vec::new();
+            // Nothing is sent from a chat being left.
+            let leaving = chat.membership == Membership::Leaving;
             let last_seq = newer.iter().filter_map(|m| m.seq).max();
             if last_seq.is_some() || chat.unread_count != 0 {
                 chat.last_read_seq = last_seq.unwrap_or(chat.last_read_seq);
@@ -338,7 +479,7 @@ impl BaseClient {
                 txn.upsert_chat(&chat)?;
                 changes.push(StateChange::ChatUpserted(chat));
             }
-            let receipt = if ids.is_empty() {
+            let receipt = if ids.is_empty() || leaving {
                 None
             } else {
                 Some(self.enqueue_receipt(txn, group_id, ReceiptKind::Read, ids, now_ms)?)
@@ -461,6 +602,7 @@ impl BaseClient {
             DecryptedMessage::Handshake(ProcessedMessage::Commit {
                 sender,
                 removed,
+                left,
                 self_removed,
                 ..
             }) => {
@@ -472,20 +614,12 @@ impl BaseClient {
                     message.seq,
                     &sender.user_id,
                     removed,
+                    &left,
                     changes,
                 )?
             }
-            DecryptedMessage::Handshake(ProcessedMessage::Proposal {
-                removed: Some(device),
-                ..
-            }) if device != self.own => {
-                // A member leaving (or proposed for removal): one of the
-                // others commits it.
-                txn.add_departed_member(&DepartedMember {
-                    group_id: group_id.clone(),
-                    device,
-                })?;
-            }
+            // A Proposal is kept pending in the MLS group; gim-sdk has a
+            // member commit it by reference.
             DecryptedMessage::Handshake(_) => {}
         }
         Ok(Outcome::Applied)
@@ -538,9 +672,10 @@ impl BaseClient {
     }
 
     /// Refreshes the member list after the commit of `actor` at `seq` and
-    /// records the users it added or removed (`Left` for those who left the
-    /// fan-out list themselves). `removed` is set when the
-    /// commit removed this device; the group is gone then.
+    /// records the users it added or removed (`Left` for those who left
+    /// themselves: by their own proposal, `left`, or by leaving the fan-out
+    /// list). `removed` is set when the commit removed this device; the
+    /// group is gone then, and so is its pending leave.
     #[allow(clippy::too_many_arguments)]
     fn update_membership<T: StoreTxn>(
         &self,
@@ -550,6 +685,7 @@ impl BaseClient {
         seq: u64,
         actor: &UserId,
         removed: Option<&[DeviceRef]>,
+        left: &[DeviceRef],
         changes: &mut Vec<StateChange>,
     ) -> Result<()> {
         let now = now_ms();
@@ -559,6 +695,7 @@ impl BaseClient {
             Some(removed) => {
                 chat.membership = Membership::Left;
                 chat.members.retain(|m| !removed.contains(&m.device));
+                txn.remove_pending_leave(group_id)?;
                 Vec::new()
             }
             None => {
@@ -584,15 +721,27 @@ impl BaseClient {
             .map(|u| (u, MembershipChangeKind::Added));
         // A user who left the fan-out list by themselves is removed from
         // the tree by another member's commit.
+        let left_users: BTreeSet<&UserId> = left.iter().map(|d| &d.user_id).collect();
         let gone = users_before.difference(&users_after).map(|u| {
-            let kind = if u == actor || departed_users.contains(u) {
+            let kind = if u == actor || departed_users.contains(u) || left_users.contains(u) {
                 MembershipChangeKind::Left
             } else {
                 MembershipChangeKind::Removed
             };
             (u, kind)
         });
-        for (user_id, kind) in added.chain(gone) {
+        let mut events: Vec<(&UserId, MembershipChangeKind, &UserId)> = added
+            .chain(gone)
+            .map(|(user_id, kind)| (user_id, kind, actor))
+            .collect();
+        if removed.is_some() && left.contains(&self.own) {
+            // This device left by its own proposal: recorded as its own
+            // `Left`, as when the removal commit is not seen.
+            let own_user = &self.own.user_id;
+            events.retain(|(user_id, ..)| *user_id != own_user);
+            events.push((own_user, MembershipChangeKind::Left, own_user));
+        }
+        for (user_id, kind, actor) in events {
             let event = MembershipEvent {
                 group_id: group_id.clone(),
                 seq,
@@ -995,13 +1144,16 @@ impl BaseClient {
         chat.updated_at_ms = chat.updated_at_ms.max(message.sent_at_ms);
         if !own_user && message.seq.is_some_and(|seq| seq > chat.last_read_seq) {
             chat.unread_count += 1;
-            self.enqueue_receipt(
-                txn,
-                group_id,
-                ReceiptKind::Delivered,
-                vec![message.message_id.clone()],
-                now_ms,
-            )?;
+            // Nothing is sent from a chat being left.
+            if chat.membership != Membership::Leaving {
+                self.enqueue_receipt(
+                    txn,
+                    group_id,
+                    ReceiptKind::Delivered,
+                    vec![message.message_id.clone()],
+                    now_ms,
+                )?;
+            }
         }
         txn.upsert_chat(&chat)?;
         changes.push(StateChange::MessageUpserted(message));

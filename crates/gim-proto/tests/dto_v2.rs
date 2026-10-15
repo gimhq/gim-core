@@ -778,6 +778,35 @@ fn unknown_event_type_does_not_fail_the_list() {
 }
 
 #[test]
+fn message_id_is_parsed_and_optional() {
+    let mut json = message_json();
+    json["message_id"] = json!("m-01HZX3");
+    let message = round_trip::<Message>(json);
+    assert_eq!(message.message_id.as_deref(), Some("m-01HZX3"));
+    // Hubs before f4da007 do not send it.
+    assert_eq!(round_trip::<Message>(message_json()).message_id, None);
+    // In a message event too.
+    let mut proposal = message_json();
+    proposal["kind"] = json!("proposal");
+    proposal["message_id"] = json!("m-2");
+    let event: Event = round_trip(event_json(1, "message", proposal));
+    assert!(matches!(
+        &event.data,
+        EventData::Message(m) if m.message_id.as_deref() == Some("m-2") && m.kind == MessageKind::Proposal
+    ));
+}
+
+#[test]
+fn proposal_commit_result_keeps_the_epoch() {
+    // A Proposal is sequenced without an epoch change; a resubmit is a
+    // duplicate with the original result.
+    let first: CommitResult = round_trip(json!({"seq": 8, "epoch": 3, "duplicate": false}));
+    let again: CommitResult = round_trip(json!({"seq": 8, "epoch": 3, "duplicate": true}));
+    assert_eq!((first.seq, first.epoch), (again.seq, again.epoch));
+    assert!(again.duplicate && !first.duplicate);
+}
+
+#[test]
 fn message_kind_proposal_and_unknown() {
     let mut proposal = message_json();
     proposal["kind"] = json!("proposal");

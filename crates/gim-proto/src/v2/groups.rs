@@ -71,11 +71,12 @@ pub struct SubmitCommitRequest {
     pub ratchet_tree: Option<Vec<u8>>,
 }
 
-/// `CommitResult`: 201 (200 with `duplicate` on a resend of the same Commit).
+/// `CommitResult`: 201 (200 with `duplicate` on a resend of the same Commit
+/// or Proposal).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitResult {
     pub seq: u64,
-    /// Epoch after the Commit.
+    /// Epoch after the Commit; unchanged for a Proposal.
     pub epoch: u64,
     pub duplicate: bool,
 }
@@ -86,8 +87,9 @@ pub struct CommitResult {
 pub enum MessageKind {
     Commit,
     Application,
-    /// A standalone handshake Proposal (e.g. a member's self-Remove).
-    /// Announced by gim-hub H3-FX3; not yet in the vendored contract.
+    /// A standalone handshake Proposal (e.g. a member's self-Remove),
+    /// pending until a Commit references it (gim-hub f4da007; not yet in
+    /// the vendored contract).
     Proposal,
     /// Any kind this client does not know yet.
     #[serde(other)]
@@ -102,6 +104,11 @@ pub struct Message {
     pub sender_user_id: String,
     pub sender_device_id: String,
     pub client_id: String,
+    /// Opaque id assigned by the owning hub, identical on every hub storing
+    /// the message (cross-hub dedup key). Always sent by gim-hub f4da007;
+    /// absent from older hubs and from the vendored contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
     pub kind: MessageKind,
     pub epoch: u64,
     /// MLSMessage: PublicMessage for Commits and Proposals, PrivateMessage

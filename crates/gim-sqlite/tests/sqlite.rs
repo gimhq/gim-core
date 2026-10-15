@@ -9,7 +9,7 @@ use common::{group, key, setup, text, Device, NOW};
 use gim_base::model::{
     Chat, ChatKind, ChatMember, DepartedMember, GroupCursor, GroupMessage, MediaCacheEntry,
     Membership, MembershipChangeKind, MembershipEvent, Message, MessageContent, MessageKind,
-    OutboxEntry, OutboxKind, OutboxState, PendingCommit, PendingMedia, PendingWelcome,
+    OutboxEntry, OutboxKind, OutboxState, PendingCommit, PendingLeave, PendingMedia, PendingWelcome,
     PreparedPayload, SendState, UserInfo,
 };
 use gim_base::{
@@ -172,6 +172,11 @@ fn reads_match_memory_store() {
     sqlite.transaction(|txn| Ok(write_rows(txn)?)).unwrap();
     assert_same_reads(&memory, &sqlite);
     assert_eq!(sqlite.pending_commits().unwrap().len(), 3);
+    assert_eq!(sqlite.pending_leaves().unwrap().len(), 2);
+    assert_eq!(
+        sqlite.chat(&group("anchor")).unwrap().unwrap().membership,
+        Membership::Leaving
+    );
     assert_eq!(sqlite.departed_members().unwrap().len(), 3);
     assert_eq!(sqlite.device_lists().unwrap().len(), 2);
     let crew = sqlite.membership_events(&group("crew")).unwrap();
@@ -191,6 +196,9 @@ fn reads_match_memory_store() {
         })
         .unwrap();
     assert_same_reads(&memory, &sqlite);
+    // Removing the chat removes its pending leave.
+    assert_eq!(sqlite.pending_leave(&group("crew")).unwrap(), None);
+    assert!(sqlite.pending_leave(&group("anchor")).unwrap().is_some());
 }
 
 fn reopen(device: Device, dir: &std::path::Path) -> Device {
@@ -279,7 +287,9 @@ fn write_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
     dm.membership = Membership::Left;
     txn.upsert_chat(&dm)?;
     // Same updated_at as crew: ties are ordered by group id.
-    txn.upsert_chat(&Chat::new(group("anchor"), ChatKind::Group, NOW))?;
+    let mut anchor = Chat::new(group("anchor"), ChatKind::Group, NOW);
+    anchor.membership = Membership::Leaving;
+    txn.upsert_chat(&anchor)?;
 
     // Inserted out of order; two unsent own messages.
     for (message_id, seq, sent_at) in [
@@ -392,6 +402,16 @@ fn write_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
     ))?;
     txn.upsert_pending_commit(&commit("dm", None))?;
     txn.upsert_pending_commit(&commit("anchor", None))?;
+    for g in ["crew", "anchor"] {
+        txn.upsert_pending_leave(&PendingLeave {
+            group_id: group(g),
+            client_id: ClientId::new(format!("leave-{g}")).unwrap(),
+            epoch: 4,
+            payload: vec![7, 1],
+            attempts: 1,
+            accepted: false,
+        })?;
+    }
     for (user, data) in [("bob", vec![1, 2]), ("alice", vec![3])] {
         txn.upsert_device_list(&UserId::new(user).unwrap(), &data)?;
     }
@@ -463,6 +483,11 @@ fn update_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
     txn.upsert_pending_commit(&retried)?;
     txn.upsert_device_list(&UserId::new("bob").unwrap(), &[4])?;
     txn.remove_pending_commit(&group("anchor"))?;
+    let mut renewed = txn.pending_leave(&group("anchor"))?.unwrap();
+    renewed.epoch = 5;
+    renewed.attempts = 2;
+    renewed.accepted = true;
+    txn.upsert_pending_leave(&renewed)?;
     txn.remove_departed_member(&DepartedMember {
         group_id: group("crew"),
         device: device("dave", "phone"),
@@ -513,6 +538,10 @@ fn assert_same_reads(expected: &impl StateReader, actual: &impl StateReader) {
             expected.pending_commit(&g).unwrap()
         );
         assert_eq!(
+            actual.pending_leave(&g).unwrap(),
+            expected.pending_leave(&g).unwrap()
+        );
+        assert_eq!(
             actual.membership_events(&g).unwrap(),
             expected.membership_events(&g).unwrap()
         );
@@ -520,6 +549,10 @@ fn assert_same_reads(expected: &impl StateReader, actual: &impl StateReader) {
     assert_eq!(
         actual.pending_commits().unwrap(),
         expected.pending_commits().unwrap()
+    );
+    assert_eq!(
+        actual.pending_leaves().unwrap(),
+        expected.pending_leaves().unwrap()
     );
     assert_eq!(
         actual.departed_members().unwrap(),
