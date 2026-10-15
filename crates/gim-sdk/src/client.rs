@@ -12,9 +12,11 @@ use gim_base::model::{
     AfterCommit, ChatKind, DepartedMember, Membership, MessageKind, PendingCommit, PendingWelcome,
     StateChange, UserInfo,
 };
-use gim_base::{new_message_id, BaseClient, BaseError, StateReader, StateStore, StoreTxn};
+use gim_base::{
+    new_message_id, BaseClient, BaseError, StateReader, StateStore, StoreError, StoreTxn,
+};
 use gim_common::{now_ms, ClientId, DeviceRef, GroupId, MessageId, UserId};
-use gim_crypto::MlsEngine;
+use gim_crypto::{CryptoStore, MlsEngine};
 use gim_proto::envelope::Content;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex, Notify};
@@ -349,7 +351,10 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Restores the session persisted by [`Client::register`]; `false` if
-    /// there is none. Then removes file copies under
+    /// there is none, or if the store lost the device identity (database
+    /// reset or deleted), in which case the stale session secret is
+    /// deleted. Reconciles MLS pending commits with their records, then
+    /// removes file copies under
     /// [`Client::outgoing_dir`] that no queued upload needs, and re-posts
     /// commits whose outcome was unknown when the previous run stopped.
     pub async fn restore_session(&self) -> Result<bool> {
@@ -359,13 +364,32 @@ impl<S: StateStore + 'static> Client<S> {
         let session: Session = serde_json::from_slice(&encoded)
             .map_err(|e| ClientError::InvalidSession(e.to_string()))?;
         let identity = self
-            .run(|store, engine| store.transaction(|txn| Ok(engine.identity(&*txn)?)))
+            .run(|store, _| {
+                store.transaction(|txn| {
+                    let stored = txn.load_identity().map_err(StoreError::new)?;
+                    Ok(stored.map(|identity| identity.device))
+                })
+            })
             .await?;
+        let Some(identity) = identity else {
+            // The local database was reset or deleted: the session cannot
+            // be used without its MLS identity.
+            tracing::warn!("stored session has no local identity; signing out");
+            self.inner.secrets.delete(SESSION_SECRET_KEY)?;
+            return Ok(false);
+        };
         if identity != session.device {
             return Err(ClientError::InvalidSession(format!(
                 "store identity {identity} does not match session device {}",
                 session.device
             )));
+        }
+        let base = BaseClient::new(session.device.clone());
+        let repaired = self
+            .run(move |store, engine| base.reconcile_pending_commits(store, engine))
+            .await?;
+        if !repaired.is_empty() {
+            tracing::warn!(groups = ?repaired, "dropped dangling pending commits");
         }
         self.seed_device_directory(&session).await?;
         self.set_session(session.clone());
@@ -488,7 +512,8 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Leaves the group: drops this device from the fan-out list and the
-    /// local MLS group, and keeps the chat history as `Left`.
+    /// local MLS group, and keeps the chat history as `Left` with the own
+    /// user's `Left` membership event.
     ///
     /// The other members' MLS trees still contain this device until one of
     /// them removes it.
@@ -503,21 +528,9 @@ impl<S: StateStore + 'static> Client<S> {
                 std::slice::from_ref(&session.device),
             )
             .await?;
-        let group_id = group_id.clone();
+        let (gid, base) = (group_id.clone(), BaseClient::new(session.device.clone()));
         let changes = self
-            .run(move |store, engine| {
-                store.transaction(|txn| {
-                    if engine.has_group(&*txn, &group_id)? {
-                        engine.delete_group(&*txn, &group_id)?;
-                    }
-                    let Some(mut chat) = txn.chat(&group_id)? else {
-                        return Ok(vec![]);
-                    };
-                    chat.membership = Membership::Left;
-                    txn.upsert_chat(&chat)?;
-                    Ok(vec![StateChange::ChatUpserted(chat)])
-                })
-            })
+            .run(move |store, engine| base.leave_chat(store, engine, &gid, now_ms()))
             .await?;
         self.emit(&changes);
         Ok(())

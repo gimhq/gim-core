@@ -1,7 +1,7 @@
 //! Event processing: turns stream events into state rows inside one store
 //! transaction per event, MLS state included.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use gim_common::{now_ms, DeviceRef, GroupId, MessageId, UserId};
 use gim_crypto::{decrypt_to_envelope, CryptoError, DecryptedMessage, MlsEngine, ProcessedMessage};
@@ -10,7 +10,7 @@ use gim_proto::envelope::{Content, Envelope, ReceiptKind};
 use crate::model::{
     to_message_id, AfterCommit, Chat, ChatKind, ChatMember, DepartedMember, GroupMessage,
     IncomingEvent, Membership, MembershipChangeKind, MembershipEvent, Message, MessageContent,
-    MessageKind, SendState, StateChange,
+    MessageKind, PendingCommit, SendState, StateChange,
 };
 use crate::{Result, StateReader, StateStore, StoreTxn};
 
@@ -103,6 +103,103 @@ impl BaseClient {
             txn.remove_chat(group_id)?;
             Ok(vec![StateChange::ChatRemoved(group_id.clone())])
         })
+    }
+
+    /// Records that this device left the group, after it left the group's
+    /// fan-out list: deletes the local MLS group, marks the chat `Left` and
+    /// records the own user's `Left` membership event, like other members
+    /// record it from the removal commit. This device never sees that
+    /// commit, so the event takes the seq after the last one applied here.
+    /// A chat that is not joined only loses its MLS group.
+    pub fn leave_chat<S: StateStore>(
+        &self,
+        store: &S,
+        engine: &MlsEngine,
+        group_id: &GroupId,
+        now_ms: u64,
+    ) -> Result<Vec<StateChange>> {
+        store.transaction(|txn| {
+            if engine.has_group(&*txn, group_id)? {
+                engine.delete_group(&*txn, group_id)?;
+            }
+            let Some(mut chat) = txn.chat(group_id)? else {
+                return Ok(vec![]);
+            };
+            if chat.membership != Membership::Joined {
+                return Ok(vec![]);
+            }
+            let cursor = txn.group_cursor(group_id)?;
+            let applied = cursor
+                .ahead
+                .last()
+                .copied()
+                .unwrap_or(cursor.contiguous_seq);
+            chat.membership = Membership::Left;
+            chat.updated_at_ms = chat.updated_at_ms.max(now_ms);
+            let event = MembershipEvent {
+                group_id: group_id.clone(),
+                seq: applied.max(chat.last_seq) + 1,
+                user_id: self.own.user_id.clone(),
+                actor: self.own.user_id.clone(),
+                kind: MembershipChangeKind::Left,
+                at_ms: now_ms,
+            };
+            txn.upsert_chat(&chat)?;
+            txn.add_membership_event(&event)?;
+            Ok(vec![
+                StateChange::ChatUpserted(chat),
+                StateChange::MembershipChanged(event),
+            ])
+        })
+    }
+
+    /// Reconciles MLS pending commits with the persisted
+    /// [`crate::model::PendingCommit`] records; run at startup before any
+    /// group work. An MLS pending commit without an unmerged record can
+    /// never be posted and is cleared; an unmerged record whose MLS group
+    /// has no pending commit can never be merged and is dropped. Merged
+    /// records (only the follow-up left) are kept. Idempotent; returns the
+    /// groups that were repaired.
+    pub fn reconcile_pending_commits<S: StateStore>(
+        &self,
+        store: &S,
+        engine: &MlsEngine,
+    ) -> Result<Vec<GroupId>> {
+        let records: BTreeMap<GroupId, PendingCommit> = store
+            .pending_commits()?
+            .into_iter()
+            .map(|c| (c.group_id.clone(), c))
+            .collect();
+        let groups = store.transaction(|txn| Ok(engine.group_ids(&*txn)?))?;
+        let mut repaired = Vec::new();
+        for group_id in &groups {
+            let dangling = match records.get(group_id) {
+                Some(record) if !record.merged => {
+                    let dangling = !has_mls_pending_commit(store, engine, group_id)?;
+                    if dangling {
+                        store.transaction(|txn| Ok(txn.remove_pending_commit(group_id)?))?;
+                    }
+                    dangling
+                }
+                _ => {
+                    store.transaction(|txn| match engine.clear_pending_commit(&*txn, group_id) {
+                        Ok(()) => Ok(true),
+                        Err(CryptoError::NoPendingCommit) => Ok(false),
+                        Err(err) => Err(err.into()),
+                    })?
+                }
+            };
+            if dangling {
+                repaired.push(group_id.clone());
+            }
+        }
+        for (group_id, record) in records {
+            if !record.merged && !groups.contains(&group_id) {
+                store.transaction(|txn| Ok(txn.remove_pending_commit(&group_id)?))?;
+                repaired.push(group_id);
+            }
+        }
+        Ok(repaired)
     }
 
     /// Applies one stream event in one transaction.
@@ -807,6 +904,25 @@ fn aggregate_receipts(message: &Message, chat: &Chat, own_user: &UserId) -> Opti
     } else {
         SendState::Delivered
     })
+}
+
+/// Whether the group has an MLS pending commit. gim-crypto has no read for
+/// it, so this clears it in a transaction that is then rolled back.
+fn has_mls_pending_commit<S: StateStore>(
+    store: &S,
+    engine: &MlsEngine,
+    group_id: &GroupId,
+) -> Result<bool> {
+    const PROBE: &str = "pending commit probe";
+    let probed = store.transaction(|txn| match engine.clear_pending_commit(&*txn, group_id) {
+        Ok(()) => Err(crate::BaseError::InvalidState(PROBE.into())),
+        Err(CryptoError::NoPendingCommit) => Ok(false),
+        Err(err) => Err(err.into()),
+    });
+    match probed {
+        Err(crate::BaseError::InvalidState(reason)) if reason == PROBE => Ok(true),
+        probed => probed,
+    }
 }
 
 fn mark_applied<T: StoreTxn>(txn: &mut T, group_id: &GroupId, seq: u64) -> Result<()> {
