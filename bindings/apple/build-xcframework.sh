@@ -48,28 +48,56 @@ sim_lib=target/$sim_target/$profile/$lib_name
 
 GIM_CORE_LIB=$device_lib bash bindings/apple/generate-swift.sh
 
+# Members of an archive that carry an embedded __LLVM,__bitcode section.
+bitcode_members() {
+    "$llvm_bin/llvm-objdump" --section-headers "$1" \
+        | awk '/file format/ { m = $1 } $2 == "__bitcode" { print m }' \
+        | sed -e 's/^.*(//' -e 's/):$//' | sort -u
+}
+
 # The sysroot's compiler_builtins objects are never LTO'd and are copied into
 # the archive with an embedded __LLVM,__bitcode section that Xcode's tools
-# cannot parse: drop it (machine code only), plus debug and local symbols
-# (= strip -S -x). The exported UniFFI symbols must survive.
+# cannot parse (rustc's LLVM is newer). Only those members are rewritten, and
+# only their bitcode sections are dropped; every other member stays exactly as
+# rustc/cc produced it. Do not strip local symbols: __eh_frame relocates
+# against ltmp*/GCC_except_table* labels, and ld asserts ("LSDA in __eh_frame
+# section not supported") once they are gone.
 for lib in "$device_lib" "$sim_lib"; do
-    "$llvm_bin/llvm-objcopy" \
-        --remove-section=__LLVM,__bitcode \
-        --remove-section=__LLVM,__cmdline \
-        --strip-debug \
-        --discard-all \
-        "$lib"
-    sections=$("$llvm_bin/llvm-objdump" --section-headers "$lib")
-    bitcode_members=$(awk '/file format/ { m = $1 } $2 == "__bitcode" { print m }' <<< "$sections" | sort -u | wc -l | tr -d ' ')
-    symbols=$("$llvm_bin/llvm-nm" --quiet --extern-only --defined-only "$lib")
+    lib_path=$repo/$lib
+    if [[ -n $("$llvm_bin/llvm-ar" t "$lib_path" | sort | uniq -d) ]]; then
+        echo "error: $lib has duplicate member names" >&2
+        exit 1
+    fi
+    members=()
+    while IFS= read -r member; do
+        members+=("$member")
+    done < <(bitcode_members "$lib_path")
+    if (( ${#members[@]} > 0 )); then
+        work=$(mktemp -d)
+        (
+            cd "$work"
+            "$llvm_bin/llvm-ar" x "$lib_path" "${members[@]}"
+            for member in "${members[@]}"; do
+                "$llvm_bin/llvm-objcopy" \
+                    --remove-section=__LLVM,__bitcode \
+                    --remove-section=__LLVM,__cmdline \
+                    "$member"
+            done
+            # `r` replaces the members in place, keeping the member order.
+            "$llvm_bin/llvm-ar" r "$lib_path" "${members[@]}"
+        )
+        rm -rf "$work"
+    fi
+    remaining=$(bitcode_members "$lib_path" | wc -l | tr -d ' ')
+    symbols=$("$llvm_bin/llvm-nm" --quiet --extern-only --defined-only "$lib_path")
     exports=$(grep -c ' _uniffi_gim_core_fn_' <<< "$symbols" || true)
-    echo "$lib: $bitcode_members members with bitcode, $exports uniffi_gim_core_fn_* exports"
-    if [[ "$bitcode_members" != 0 ]]; then
+    echo "$lib: ${#members[@]} bitcode members rewritten, $remaining left, $exports uniffi_gim_core_fn_* exports"
+    if [[ "$remaining" != 0 ]]; then
         echo "error: $lib still contains bitcode sections" >&2
         exit 1
     fi
     if [[ "$exports" == 0 ]]; then
-        echo "error: $lib lost its uniffi_gim_core_fn_* exports after strip" >&2
+        echo "error: $lib has no uniffi_gim_core_fn_* exports" >&2
         exit 1
     fi
 done
