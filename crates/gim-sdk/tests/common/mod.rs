@@ -16,8 +16,8 @@ use gim_base::{MemoryStore, StateReader};
 use gim_common::{DeviceRef, GroupId, MessageId, UserId};
 use gim_sdk::testing::{FakeTransport, MemorySecretStorage};
 use gim_sdk::transport::{
-    AccessToken, EventBatch, GroupInfo, OutgoingMessage, PostError, Registration, Transport,
-    TransportError, TransportResult,
+    AccessToken, EventBatch, GroupInfo, KeyPackageCount, OutgoingMessage, PostError, Registration,
+    Transport, TransportError, TransportResult,
 };
 use gim_sdk::{Client, ClientBuilder, SecretStorage};
 use tempfile::TempDir;
@@ -98,6 +98,10 @@ impl Transport for FlakyTransport {
             .await
     }
 
+    async fn key_package_count(&self, t: &AccessToken) -> TransportResult<KeyPackageCount> {
+        self.inner.key_package_count(t).await
+    }
+
     async fn claim_key_package(&self, t: &AccessToken, d: &DeviceRef) -> TransportResult<Vec<u8>> {
         self.inner.claim_key_package(t, d).await
     }
@@ -113,6 +117,10 @@ impl Transport for FlakyTransport {
 
     async fn group_info(&self, t: &AccessToken, g: &GroupId) -> TransportResult<GroupInfo> {
         self.inner.group_info(t, g).await
+    }
+
+    async fn list_groups(&self, t: &AccessToken) -> TransportResult<Vec<GroupInfo>> {
+        self.inner.list_groups(t).await
     }
 
     async fn add_group_members(

@@ -297,6 +297,14 @@ impl FakeDeliveryService {
             .map_or(0, |k| k.one_time.len())
     }
 
+    /// Whether `device` has a last-resort KeyPackage.
+    pub fn has_last_resort_key_package(&self, device: &DeviceRef) -> bool {
+        self.lock()
+            .key_packages
+            .get(device)
+            .is_some_and(|k| k.last_resort.is_some())
+    }
+
     /// Registers a group (epoch 0) with its creator as the only member.
     pub fn create_group(
         &self,
@@ -346,6 +354,21 @@ impl FakeDeliveryService {
             epoch: group.epoch,
             members: group.members.iter().cloned().collect(),
         })
+    }
+
+    /// The groups whose fan-out list has `device`.
+    pub fn groups_of(&self, device: &DeviceRef) -> Vec<GroupInfo> {
+        self.lock()
+            .groups
+            .iter()
+            .filter(|(_, group)| group.members.contains(device))
+            .map(|(group_id, group)| GroupInfo {
+                group_id: group_id.clone(),
+                kind: group.kind,
+                epoch: group.epoch,
+                members: group.members.iter().cloned().collect(),
+            })
+            .collect()
     }
 
     /// Adds a device to the server-side fan-out list.
