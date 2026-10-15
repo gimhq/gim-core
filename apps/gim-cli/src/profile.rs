@@ -1,5 +1,6 @@
-//! Profile directory: `gim.sqlite3` (store), `secrets.json` (session),
-//! `config.json` (server URL), `tmp/` (media temp files).
+//! Profile directory: `gim.sqlite3` (SQLCipher store), `secrets.json`
+//! (session and database key), `config.json` (server URL), `tmp/` (media
+//! temp files).
 
 use std::fs;
 use std::io::ErrorKind as IoErrorKind;
@@ -7,9 +8,10 @@ use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use gim_base::BaseError;
 use gim_sdk::http::Url;
 use gim_sdk::{Client, ClientBuilder, HttpTransport, Session};
-use gim_sqlite::SqliteStore;
+use gim_sqlite::{DbKey, SqliteStore};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{CliError, ErrorKind, Result};
@@ -89,13 +91,24 @@ impl Profile {
             .map_err(|e| CliError::usage(format!("invalid server URL {server:?}: {e}")))?;
         let transport =
             HttpTransport::new(url).map_err(|e| CliError::new(ErrorKind::Server, e.to_string()))?;
-        let store = SqliteStore::open(&self.dir)?;
         let secrets = FileSecretStorage::new(self.dir.join(SECRETS_FILE));
-        Ok(
-            ClientBuilder::new(Arc::new(store), Arc::new(transport), Arc::new(secrets))
-                .data_dir(&self.dir)
-                .build()?,
-        )
+        let mut reset = false;
+        let builder =
+            ClientBuilder::open(Arc::new(transport), Arc::new(secrets), |key, new_key| {
+                let opened = SqliteStore::open_or_reset(&self.dir, &DbKey::new(*key), new_key)
+                    .map_err(BaseError::from)?;
+                reset = opened.1;
+                Ok::<_, BaseError>(opened)
+            })?;
+        if reset {
+            // An M1 plaintext database (or one the stored key cannot
+            // decrypt) was wiped.
+            eprintln!(
+                "gim: local database in {} was reset; local state is lost",
+                self.dir.display()
+            );
+        }
+        Ok(builder.data_dir(&self.dir).build()?)
     }
 }
 
@@ -179,6 +192,35 @@ mod tests {
         assert_eq!(
             profile.server(Some("http://b")).as_deref(),
             Some("http://b")
+        );
+    }
+
+    #[test]
+    fn client_keys_the_store_from_secrets_and_wipes_an_unreadable_db() {
+        use gim_sdk::SecretStorage;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("alice");
+        let profile = Profile::create(&dir).unwrap();
+        let db = dir.join(gim_sqlite::DATABASE_FILE_NAME);
+        // Stands in for an M1 plaintext database.
+        fs::write(&db, b"not an encrypted database").unwrap();
+        drop(profile.client("http://127.0.0.1:1").unwrap());
+        assert_ne!(fs::read(&db).unwrap(), b"not an encrypted database");
+        let secrets = FileSecretStorage::new(dir.join(SECRETS_FILE));
+        let key = secrets
+            .get(ClientBuilder::<SqliteStore>::DB_KEY_SECRET_KEY)
+            .unwrap()
+            .unwrap();
+        assert_eq!(key.len(), ClientBuilder::<SqliteStore>::DB_KEY_LEN);
+        // Reopening with the stored key keeps the database and the key.
+        let encrypted = fs::read(&db).unwrap();
+        drop(profile.client("http://127.0.0.1:1").unwrap());
+        assert_eq!(fs::read(&db).unwrap()[..16], encrypted[..16]);
+        assert_eq!(
+            secrets
+                .get(ClientBuilder::<SqliteStore>::DB_KEY_SECRET_KEY)
+                .unwrap(),
+            Some(key)
         );
     }
 }
