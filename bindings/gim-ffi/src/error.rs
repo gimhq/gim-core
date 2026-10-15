@@ -117,6 +117,25 @@ impl From<gim_sdk::TransportError> for GimError {
                 retry_after_secs,
                 reason,
             },
+            E::PeerUnavailable {
+                retry_after_secs: Some(retry_after_secs),
+                ..
+            } => Self::RetryLater {
+                status: 503,
+                retry_after_secs,
+                reason,
+            },
+            E::PeerUnavailable {
+                retry_after_secs: None,
+                ..
+            } => Self::Server {
+                status: 503,
+                reason,
+            },
+            E::PeerRefused(_) => Self::Server {
+                status: 502,
+                reason,
+            },
         }
     }
 }

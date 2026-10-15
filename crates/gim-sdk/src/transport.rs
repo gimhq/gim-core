@@ -92,6 +92,15 @@ pub struct ClaimedKeyPackage {
     pub key_package: Vec<u8>,
 }
 
+/// Result of [`Transport::claim_key_packages_federated`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeyPackageClaim {
+    pub key_packages: Vec<ClaimedKeyPackage>,
+    /// Users whose hub could not be reached, refused the request or timed
+    /// out (federation); claiming them again later may succeed.
+    pub unavailable: Vec<UserId>,
+}
+
 /// A Commit (or a Proposal) to submit to a group.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutgoingCommit {
@@ -206,6 +215,39 @@ pub enum TransportError {
     /// without a valid hosting record listing the hub.
     #[error("hosting record required: {0}")]
     HostingRecordRequired(String),
+    /// 503 `peer_unavailable`: the hub owning the group (or hosting the
+    /// user) could not be reached. The request may have been applied
+    /// there; resend it unchanged, after `retry_after_secs` if given.
+    #[error("peer hub unavailable: {reason}")]
+    PeerUnavailable {
+        retry_after_secs: Option<u64>,
+        reason: String,
+    },
+    /// 502 `peer_refused`: the peer hub refused the federated request;
+    /// resend it unchanged later.
+    #[error("peer hub refused the request: {0}")]
+    PeerRefused(String),
+}
+
+impl TransportError {
+    /// The delay the hub asked for before a retry, if any.
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::PeerUnavailable {
+                retry_after_secs, ..
+            } => retry_after_secs.map(Duration::from_secs),
+            Self::RetryLater {
+                retry_after_secs, ..
+            } => Some(Duration::from_secs(*retry_after_secs)),
+            _ => None,
+        }
+    }
+
+    /// A federated request failed at a peer hub (502/503); retry it
+    /// unchanged later.
+    pub fn is_peer_failure(&self) -> bool {
+        matches!(self, Self::PeerUnavailable { .. } | Self::PeerRefused(_))
+    }
 }
 
 /// Error of [`Transport::create_session`].
@@ -344,6 +386,20 @@ pub trait Transport: Send + Sync {
         users: &[UserId],
     ) -> TransportResult<Vec<ClaimedKeyPackage>>;
 
+    /// Like [`Transport::claim_key_packages`], also listing the users whose
+    /// hub could not be reached (federation). Transports without
+    /// federation report none.
+    async fn claim_key_packages_federated(
+        &self,
+        token: &AccessToken,
+        users: &[UserId],
+    ) -> TransportResult<KeyPackageClaim> {
+        Ok(KeyPackageClaim {
+            key_packages: self.claim_key_packages(token, users).await?,
+            unavailable: vec![],
+        })
+    }
+
     /// Creates a group (epoch 0, the caller as its only member); the hub
     /// assigns its id.
     async fn create_group(&self, token: &AccessToken, kind: ChatKind) -> TransportResult<GroupId>;
@@ -357,7 +413,10 @@ pub trait Transport: Send + Sync {
     /// The groups the calling device is a member of.
     async fn list_groups(&self, token: &AccessToken) -> TransportResult<Vec<GroupInfo>>;
 
-    /// Submits a Commit (with its Welcome) or a Proposal.
+    /// Submits a Commit (with its Welcome) or a Proposal. For a group
+    /// owned by another hub it may fail with
+    /// [`TransportError::PeerUnavailable`] or [`TransportError::PeerRefused`];
+    /// resubmit the same bytes.
     async fn submit_commit(
         &self,
         token: &AccessToken,

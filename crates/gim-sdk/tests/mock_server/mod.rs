@@ -1008,6 +1008,7 @@ pub fn fast_settings() -> SyncSettings {
         backoff_max: Duration::from_millis(200),
         long_poll_wait: Duration::from_secs(1),
         stream_retry: Duration::from_secs(60),
+        ..SyncSettings::default()
     }
 }
 

@@ -22,12 +22,13 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex, Notify};
 
 use crate::identity::merge_directory_user;
+use crate::invites::PendingInvites;
 use crate::send::TypingState;
 use crate::stream::ConnectionState;
 use crate::sync::SyncSettings;
 use crate::transport::{
-    AccessToken, ClaimedKeyPackage, CommitAccepted, OutgoingCommit, PostError, Transport,
-    TransportError,
+    AccessToken, ClaimedKeyPackage, CommitAccepted, KeyPackageClaim, OutgoingCommit, PostError,
+    Transport, TransportError,
 };
 use crate::{ClientError, Result, SecretStorage, SecretStorageError};
 
@@ -55,6 +56,13 @@ const CONNECTION_CAPACITY: usize = 64;
 /// Delay before re-posting a commit after an unknown outcome, times the
 /// attempt number.
 const COMMIT_REPOST_DELAY: Duration = Duration::from_millis(100);
+/// Longest `Retry-After` of a peer failure (502/503) waited for before
+/// re-posting a commit within one call; a longer one keeps the commit
+/// pending for a later resubmission.
+const COMMIT_RETRY_AFTER_MAX: Duration = Duration::from_secs(10);
+/// Delay before the sync loop resubmits a pending commit that failed at a
+/// peer hub without a `Retry-After`.
+const PEER_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 /// A signed-in device: who it is and its session token. Persisted in
 /// [`SecretStorage`] next to the root and device keys; the MLS identity
@@ -212,6 +220,9 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
                 link_pending: AtomicBool::new(false),
                 hosting_lock: Mutex::new(()),
                 hosting_wake: Notify::new(),
+                pending_invites: Default::default(),
+                invite_wake: Notify::new(),
+                commit_retry_at: Default::default(),
             }),
         })
     }
@@ -299,6 +310,14 @@ pub(crate) struct Inner<S> {
     pub(crate) hosting_lock: Mutex<()>,
     /// Cuts the hosting record renewal wait short.
     pub(crate) hosting_wake: Notify,
+    /// Invitees whose hub was unreachable when they were added; retried by
+    /// the sync loop. In memory only.
+    pub(crate) pending_invites: std::sync::Mutex<PendingInvites>,
+    /// Cuts the pending invite retry wait short.
+    pub(crate) invite_wake: Notify,
+    /// Unix milliseconds before which the sync loop does not resubmit a
+    /// group's pending commit, after a peer hub failure.
+    pub(crate) commit_retry_at: std::sync::Mutex<HashMap<GroupId, u64>>,
 }
 
 #[derive(Clone)]
@@ -315,9 +334,18 @@ enum Resolved {
     Conflict,
 }
 
-/// Whether the hub may have accepted a request that failed this way.
+/// Whether the hub may have accepted a request that failed this way; such
+/// requests are resent unchanged. Peer hub failures (502/503) count: the
+/// owning hub may have sequenced the request before the failure.
 pub(crate) fn outcome_unknown(err: &TransportError) -> bool {
-    matches!(err, TransportError::Network(_) | TransportError::Server(_))
+    matches!(err, TransportError::Network(_) | TransportError::Server(_)) || err.is_peer_failure()
+}
+
+/// The hub owning a group: the `<hub_id>` prefix of its id. Commits and
+/// messages of the group are sequenced there; this device's own hub only
+/// forwards them when it is another one.
+pub(crate) fn owner_hub(group_id: &GroupId) -> Option<&str> {
+    group_id.as_str().split_once('/').map(|(hub, _)| hub)
 }
 
 impl<S: StateStore + 'static> Client<S> {
@@ -447,13 +475,17 @@ impl<S: StateStore + 'static> Client<S> {
         let session = self.require_session()?;
         let _guard = self.inner.group_lock.lock().await;
         let members = self.chat_devices(group_id).await?;
-        let key_packages = self.claim_key_packages(&session, users, &members).await?;
-        if key_packages.is_empty() {
+        let claim = self.claim_key_packages(&session, users, &members).await?;
+        self.add_pending_invites(group_id, &claim.unavailable);
+        if claim.key_packages.is_empty() {
+            if !claim.unavailable.is_empty() {
+                return Ok(());
+            }
             return Err(ClientError::InvalidInput(
                 "no device to add has a KeyPackage".into(),
             ));
         }
-        self.commit(&session, group_id, CommitOp::Add(key_packages))
+        self.commit(&session, group_id, CommitOp::Add(claim.key_packages))
             .await
             .map(drop)
     }
@@ -560,18 +592,27 @@ impl<S: StateStore + 'static> Client<S> {
     ) -> Result<(GroupId, bool)> {
         let session = session.clone();
         let _guard = self.inner.group_lock.lock().await;
-        let key_packages = self.claim_key_packages(&session, users, &[]).await?;
+        let claim = self.claim_key_packages(&session, users, &[]).await?;
+        // Always on the own hub, which then owns the group.
         let group_id = self
             .authed(|t| async move { self.inner.transport.create_group(&t, kind).await })
             .await?;
+        if owner_hub(&group_id)
+            .is_some_and(|hub| !session.hub_id.is_empty() && hub != session.hub_id)
+        {
+            tracing::warn!(%group_id, hub_id = %session.hub_id, "the own hub created a group it does not own");
+        }
         let (gid, base) = (group_id.clone(), BaseClient::new(session.device.clone()));
         let changes = self
             .run(move |store, engine| base.create_chat(store, engine, &gid, kind, name, now_ms()))
             .await?;
         self.emit(&changes);
-        let added = !key_packages.is_empty();
+        // Invitees on unreachable hubs are added later by the sync loop; a
+        // chat with only those starts with this user alone.
+        self.add_pending_invites(&group_id, &claim.unavailable);
+        let added = !claim.key_packages.is_empty();
         if added {
-            self.commit(&session, &group_id, CommitOp::Add(key_packages))
+            self.commit(&session, &group_id, CommitOp::Add(claim.key_packages))
                 .await?;
         }
         Ok((group_id, added))
@@ -831,7 +872,9 @@ impl<S: StateStore + 'static> Client<S> {
             welcome,
             welcome_recipients,
         };
-        match self.submit_until_known(group_id, commit).await {
+        let submitted = self.submit_until_known(group_id, commit).await;
+        self.schedule_commit_retry(group_id, &submitted);
+        match submitted {
             Ok(accepted) => {
                 let (gid, base) = (group_id.clone(), BaseClient::new(session.device.clone()));
                 let changes = self
@@ -852,12 +895,79 @@ impl<S: StateStore + 'static> Client<S> {
                     })
                 })
                 .await?;
+                // Messages held back while the commit was pending (see
+                // `Client::defer_group_events`), e.g. the competing commit.
+                self.apply_parked(session, group_id).await?;
                 match err {
                     PostError::StaleEpoch { .. } => Ok(Resolved::Conflict),
                     PostError::Transport(err) => Err(err.into()),
                 }
             }
         }
+    }
+
+    /// After a peer hub failure, the sync loop waits for the `Retry-After`
+    /// (or [`PEER_RETRY_DELAY`]) before resubmitting the group's commit;
+    /// any other outcome clears the wait.
+    fn schedule_commit_retry(
+        &self,
+        group_id: &GroupId,
+        submitted: &Result<CommitAccepted, PostError>,
+    ) {
+        let mut retry_at = self
+            .inner
+            .commit_retry_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match submitted {
+            Err(PostError::Transport(err)) if err.is_peer_failure() => {
+                let delay = err.retry_after().unwrap_or(PEER_RETRY_DELAY);
+                tracing::info!(%group_id, owner_hub = ?owner_hub(group_id), ?delay, error = %err, "commit failed at a peer hub; kept pending");
+                retry_at.insert(group_id.clone(), now_ms() + delay.as_millis() as u64);
+            }
+            _ => {
+                retry_at.remove(group_id);
+            }
+        }
+    }
+
+    /// Settles every pending commit like [`Client::resolve_pending_commits`],
+    /// except those failing at a peer hub (or waiting to be resubmitted
+    /// after such a failure): their groups are returned with the error, and
+    /// the other groups go on.
+    pub(crate) async fn resolve_pending_commits_deferring(
+        &self,
+        session: &Session,
+    ) -> Result<BTreeMap<GroupId, ClientError>> {
+        let pending = self.run(|store, _| Ok(store.pending_commits()?)).await?;
+        let mut deferred = BTreeMap::new();
+        for commit in pending {
+            let group_id = commit.group_id;
+            let waiting = self
+                .inner
+                .commit_retry_at
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&group_id)
+                .map(|at| at.saturating_sub(now_ms()))
+                .filter(|left| *left > 0);
+            if let Some(left) = waiting {
+                let err = TransportError::PeerUnavailable {
+                    retry_after_secs: Some(left.div_ceil(1000)),
+                    reason: format!("pending commit of {group_id} waits for its owning hub"),
+                };
+                deferred.insert(group_id, err.into());
+                continue;
+            }
+            match self.resolve_pending_commit(session, &group_id).await {
+                Ok(_) => {}
+                Err(ClientError::Transport(err)) if err.is_peer_failure() => {
+                    deferred.insert(group_id, err.into());
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(deferred)
     }
 
     /// Settles every pending commit; stops at the first error.
@@ -871,8 +981,10 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Submits `commit`, again while the outcome is unknown, up to
-    /// [`COMMIT_POST_ATTEMPTS`] times. Safe because the hub recognizes a
-    /// resubmitted Commit by its hash (and a Proposal by its `client_id`).
+    /// [`COMMIT_POST_ATTEMPTS`] times, after the hub's `Retry-After` when it
+    /// gives one (up to [`COMMIT_RETRY_AFTER_MAX`]). Safe because the hub
+    /// recognizes a resubmitted Commit by its hash (and a Proposal by its
+    /// `client_id`).
     async fn submit_until_known(
         &self,
         group_id: &GroupId,
@@ -896,7 +1008,14 @@ impl<S: StateStore + 'static> Client<S> {
                 Err(PostError::Transport(err))
                     if outcome_unknown(&err) && attempt < COMMIT_POST_ATTEMPTS =>
                 {
-                    tokio::time::sleep(COMMIT_REPOST_DELAY * attempt).await;
+                    let delay = match err.retry_after() {
+                        Some(delay) if delay > COMMIT_RETRY_AFTER_MAX => {
+                            return Err(PostError::Transport(err))
+                        }
+                        Some(delay) => delay,
+                        None => COMMIT_REPOST_DELAY * attempt,
+                    };
+                    tokio::time::sleep(delay).await;
                 }
                 submitted => return submitted,
             }
@@ -960,6 +1079,12 @@ impl<S: StateStore + 'static> Client<S> {
             let op = CommitOp::Remove(devices.clone());
             // Merging the removal drops the candidates (gim-base).
             if let Err(err) = self.commit(session, &group_id, op).await {
+                // The commit stays pending until the owning hub is back; the
+                // other groups go on.
+                if matches!(&err, ClientError::Transport(e) if e.is_peer_failure()) {
+                    tracing::info!(%group_id, error = %err, "removal of departed members deferred");
+                    continue;
+                }
                 if !matches!(&err, ClientError::Transport(e) if outcome_unknown(e)) {
                     // Not retried: a definitive failure would repeat on
                     // every sync.
@@ -1036,13 +1161,14 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Claims a KeyPackage of every active device of `users` and of this
-    /// user's other devices, except this device and `exclude`.
+    /// user's other devices, except this device and `exclude`. Also returns
+    /// the requested users (not this one) whose hub was unavailable.
     pub(crate) async fn claim_key_packages(
         &self,
         session: &Session,
         users: &[UserId],
         exclude: &[DeviceRef],
-    ) -> Result<Vec<ClaimedKeyPackage>> {
+    ) -> Result<KeyPackageClaim> {
         let users: Vec<UserId> = users
             .iter()
             .chain([&session.device.user_id])
@@ -1053,20 +1179,38 @@ impl<S: StateStore + 'static> Client<S> {
         let claimed = self
             .authed(|t| {
                 let users = users.clone();
-                async move { self.inner.transport.claim_key_packages(&t, &users).await }
+                async move {
+                    self.inner
+                        .transport
+                        .claim_key_packages_federated(&t, &users)
+                        .await
+                }
             })
             .await?;
         // Only requested users, one KeyPackage per device: the hub must not
         // pick who joins.
         let mut seen = BTreeSet::new();
-        Ok(claimed
+        let key_packages: Vec<ClaimedKeyPackage> = claimed
+            .key_packages
             .into_iter()
             .filter(|k| users.contains(&k.device.user_id) && seen.insert(k.device.clone()))
             .filter(|k| k.device != session.device && !exclude.contains(&k.device))
-            .collect())
+            .collect();
+        let unavailable = claimed
+            .unavailable
+            .into_iter()
+            .filter(|u| *u != session.device.user_id && users.contains(u))
+            .filter(|u| !key_packages.iter().any(|k| k.device.user_id == *u))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        Ok(KeyPackageClaim {
+            key_packages,
+            unavailable,
+        })
     }
 
-    async fn chat_devices(&self, group_id: &GroupId) -> Result<Vec<DeviceRef>> {
+    pub(crate) async fn chat_devices(&self, group_id: &GroupId) -> Result<Vec<DeviceRef>> {
         let gid = group_id.clone();
         let chat = self
             .run(move |store, _| {
