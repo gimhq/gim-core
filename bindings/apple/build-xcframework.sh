@@ -31,6 +31,10 @@ out=out/ios
 lib_name=libgim_core.a
 
 rustup target add "$device_target" "$sim_target"
+rustup component add llvm-tools
+# rustc's own LLVM tools: Xcode's nm/strip cannot read objects carrying bitcode
+# from rustc's newer LLVM.
+llvm_bin=$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin
 
 # `--crate-type staticlib` alone: with gim-ffi's "lib" crate type in the same
 # build the archive also bundles every dependency's rlib objects (and their
@@ -44,10 +48,27 @@ sim_lib=target/$sim_target/$profile/$lib_name
 
 GIM_CORE_LIB=$device_lib bash bindings/apple/generate-swift.sh
 
-# Debug and local symbols only; the exported UniFFI symbols must survive.
+# The sysroot's compiler_builtins objects are never LTO'd and are copied into
+# the archive with an embedded __LLVM,__bitcode section that Xcode's tools
+# cannot parse: drop it (machine code only), plus debug and local symbols
+# (= strip -S -x). The exported UniFFI symbols must survive.
 for lib in "$device_lib" "$sim_lib"; do
-    strip -S -x "$lib"
-    if ! nm -gU "$lib" | grep -c ' _uniffi_gim_core_fn_' >/dev/null; then
+    "$llvm_bin/llvm-objcopy" \
+        --remove-section=__LLVM,__bitcode \
+        --remove-section=__LLVM,__cmdline \
+        --strip-debug \
+        --discard-all \
+        "$lib"
+    sections=$("$llvm_bin/llvm-objdump" --section-headers "$lib")
+    bitcode_members=$(awk '/file format/ { m = $1 } $2 == "__bitcode" { print m }' <<< "$sections" | sort -u | wc -l | tr -d ' ')
+    symbols=$("$llvm_bin/llvm-nm" --quiet --extern-only --defined-only "$lib")
+    exports=$(grep -c ' _uniffi_gim_core_fn_' <<< "$symbols" || true)
+    echo "$lib: $bitcode_members members with bitcode, $exports uniffi_gim_core_fn_* exports"
+    if [[ "$bitcode_members" != 0 ]]; then
+        echo "error: $lib still contains bitcode sections" >&2
+        exit 1
+    fi
+    if [[ "$exports" == 0 ]]; then
         echo "error: $lib lost its uniffi_gim_core_fn_* exports after strip" >&2
         exit 1
     fi

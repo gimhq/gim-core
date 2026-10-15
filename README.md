@@ -83,8 +83,8 @@ bash scripts/build-xcframework.sh   # macOS + Xcode: out/ios/GIMCore.xcframework
 ```
 
 The xcframework holds arm64 device and arm64 simulator slices only (no Intel-Mac
-simulator), built with the size-tuned `release-apple` profile and stripped, so
-the zip stays below 50 MB. See `bindings/apple/README.md` for the output layout
+simulator), built with the size-tuned `release-apple` profile and stripped of
+debug info, local symbols and embedded bitcode, so the zip stays below 50 MB. See `bindings/apple/README.md` for the output layout
 and size notes. `out/` is never committed.
 
 ## CI

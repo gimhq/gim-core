@@ -27,9 +27,11 @@ out/swift/
 
 Builds the `libgim_core.a` static library for `aarch64-apple-ios` (device) and
 `aarch64-apple-ios-sim` (simulator) with `IPHONEOS_DEPLOYMENT_TARGET=18.0`,
-generates the Swift bindings from the device library, strips debug and local
-symbols (`strip -S -x`, checking that the `uniffi_gim_core_fn_*` exports
-remain) and packages:
+generates the Swift bindings from the device library, post-processes both
+archives with rustc's `llvm-tools` (`llvm-objcopy`: drops `__LLVM,__bitcode` /
+`__LLVM,__cmdline` sections and debug and local symbols, like `strip -S -x`),
+fails if any member still has a `__bitcode` section (`llvm-objdump`) or the
+`uniffi_gim_core_fn_*` exports are gone (`llvm-nm`), and packages:
 
 ```
 out/ios/
@@ -58,5 +60,14 @@ prints the slice and zip sizes). What keeps it small:
 - `[profile.release-apple]` in the root `Cargo.toml`: `release` with
   `opt-level = "s"`, fat LTO, one codegen unit, no debug info, `panic =
   "unwind"` (UniFFI needs it). A profile `strip` does not apply to static
-  libraries, hence the explicit `strip -S -x`.
+  libraries, hence the explicit strip.
+
+### Bitcode
+
+The sysroot's `compiler_builtins` objects are never part of LTO and are copied
+into the staticlib as shipped, with an embedded `__LLVM,__bitcode` section.
+Xcode's `nm`/`strip`/linker read that bitcode and fail on rustc's newer LLVM
+("Unknown attribute kind"), so the script removes it. The archives hold
+machine code only. Rust's own LTO output has no embedded bitcode, so
+`-C embed-bitcode=no` is not needed. Xcode's `nm` is not used as a gate.
 
