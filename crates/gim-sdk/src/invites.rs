@@ -3,7 +3,8 @@
 //! federation). The sync loop claims them again with backoff and adds them
 //! once their hub answers; after [`SyncSettings::invite_ttl`] the invite is
 //! dropped and surfaced as a `Removed` membership change. Kept in memory
-//! only: a restart forgets them.
+//! and mirrored to the store after every change, so they survive restarts
+//! with their original TTL.
 //!
 //! [`SyncSettings::invite_ttl`]: crate::SyncSettings::invite_ttl
 
@@ -11,8 +12,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::time::Duration;
 
-use gim_base::model::{MembershipChangeKind, MembershipEvent, StateChange};
-use gim_base::{BaseError, StateStore};
+use gim_base::model::{self, MembershipChangeKind, MembershipEvent, StateChange};
+use gim_base::{BaseError, StateReader, StateStore, StoreTxn};
 use gim_common::{now_ms, GroupId, UserId};
 
 use crate::client::{CommitOp, Session};
@@ -37,6 +38,16 @@ pub(crate) struct PendingInvite {
 }
 
 impl PendingInvite {
+    fn row(&self, group_id: &GroupId, user_id: &UserId) -> model::PendingInvite {
+        model::PendingInvite {
+            group_id: group_id.clone(),
+            user_id: user_id.clone(),
+            created_at_ms: self.since_ms,
+            next_retry_at_ms: self.next_attempt_ms,
+            attempts: self.attempts,
+        }
+    }
+
     fn expires_ms(&self, ttl_ms: u64) -> u64 {
         self.since_ms.saturating_add(ttl_ms)
     }
@@ -45,6 +56,24 @@ impl PendingInvite {
     fn due_ms(&self, ttl_ms: u64) -> u64 {
         self.next_attempt_ms.min(self.expires_ms(ttl_ms))
     }
+}
+
+/// The pending invites recorded in the store.
+pub(crate) fn load_pending_invites(
+    store: &impl StateStore,
+) -> std::result::Result<PendingInvites, BaseError> {
+    let mut invites = PendingInvites::new();
+    for row in store.pending_invites()? {
+        invites.entry(row.group_id).or_default().insert(
+            row.user_id,
+            PendingInvite {
+                since_ms: row.created_at_ms,
+                attempts: row.attempts,
+                next_attempt_ms: row.next_retry_at_ms,
+            },
+        );
+    }
+    Ok(invites)
 }
 
 /// What one retry pass decided for a chat's due invitees.
@@ -110,30 +139,75 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Records `users` as pending invitees of the chat, first claim now.
-    pub(crate) fn add_pending_invites(&self, group_id: &GroupId, users: &[UserId]) {
+    pub(crate) async fn add_pending_invites(&self, group_id: &GroupId, users: &[UserId]) {
         if users.is_empty() {
             return;
         }
         tracing::info!(%group_id, ?users, "invitees' hubs unavailable; adding them later");
         let now = now_ms();
         let retry = self.invite_delay(0);
-        let mut invites = self.invites();
-        let chat = invites.entry(group_id.clone()).or_default();
-        for user_id in users {
-            chat.entry(user_id.clone()).or_insert(PendingInvite {
-                since_ms: now,
-                attempts: 0,
-                next_attempt_ms: now + retry,
-            });
+        {
+            let mut invites = self.invites();
+            let chat = invites.entry(group_id.clone()).or_default();
+            for user_id in users {
+                chat.entry(user_id.clone()).or_insert(PendingInvite {
+                    since_ms: now,
+                    attempts: 0,
+                    next_attempt_ms: now + retry,
+                });
+            }
         }
-        drop(invites);
+        self.persist_invites().await;
         self.inner.invite_wake.notify_one();
+    }
+
+    /// Writes the pending invites to the store: upserts the changed ones,
+    /// removes those gone. Read inside the (serialized) transaction, so the
+    /// last write stores the latest state. A failure is logged: the invites
+    /// stay pending in memory for this run.
+    async fn persist_invites(&self) {
+        let client = self.clone();
+        let persisted = self
+            .run(move |store, _| {
+                store.transaction(|txn| {
+                    let mut current: BTreeMap<(GroupId, UserId), model::PendingInvite> = client
+                        .invites()
+                        .iter()
+                        .flat_map(|(group_id, users)| {
+                            users.iter().map(move |(user_id, invite)| {
+                                (
+                                    (group_id.clone(), user_id.clone()),
+                                    invite.row(group_id, user_id),
+                                )
+                            })
+                        })
+                        .collect();
+                    for stored in txn.pending_invites()? {
+                        let key = (stored.group_id.clone(), stored.user_id.clone());
+                        match current.remove(&key) {
+                            Some(row) if row == stored => {}
+                            Some(row) => txn.upsert_pending_invite(&row)?,
+                            None => txn.remove_pending_invite(&key.0, &key.1)?,
+                        }
+                    }
+                    for row in current.values() {
+                        txn.upsert_pending_invite(row)?;
+                    }
+                    Ok(())
+                })
+            })
+            .await;
+        if let Err(err) = persisted {
+            tracing::warn!(error = %err, "pending invites not stored");
+        }
     }
 
     async fn retry_group_invites(&self, session: &Session, group_id: &GroupId) -> Result<()> {
         let outcome = {
             let _guard = self.inner.group_lock.lock().await;
-            self.retry_group_invites_locked(session, group_id).await?
+            let outcome = self.retry_group_invites_locked(session, group_id).await;
+            self.persist_invites().await;
+            outcome?
         };
         let Some(outcome) = outcome else {
             return Ok(());
