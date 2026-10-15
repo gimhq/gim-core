@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod config;
+pub mod credential;
 mod engine;
 mod envelope;
 mod error;
@@ -16,6 +17,7 @@ mod store;
 pub use config::{
     CIPHERSUITE, MAXIMUM_FORWARD_DISTANCE, MAX_PAST_EPOCHS, OUT_OF_ORDER_TOLERANCE, PADDING_SIZE,
 };
+pub use credential::{DeviceListLookup, GimCredential, NoDeviceLists, GIM_CREDENTIAL_TYPE};
 pub use engine::{
     CommitOutput, GroupJoined, MlsEngine, ProcessedMessage, MAX_KEY_PACKAGES_PER_CALL,
 };

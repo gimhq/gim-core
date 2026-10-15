@@ -286,6 +286,42 @@ Verification of an `AuthResponse` by the hub `expected_audience` at time
 
 On success the hub has authenticated the device `(user_id, device_id)`.
 
+## MLS credential
+
+Every MLS leaf (KeyPackage and group leaf) of a device carries a
+self-certifying credential of type `0xF001` (`GIM_CREDENTIAL_TYPE`, in the
+MLS private-use range). Its `serialized_content` is:
+
+```
+GimCredential = [
+  1,                            ; version
+  root_pubkey: bstr .size 32,   ; the user's root public key
+  signed_device_cert: bstr,     ; SignedDeviceCert of this device
+]
+```
+
+The content is deterministic CBOR (see *Encoding*); a decoder rejects any
+other encoding, trailing bytes, other versions and other lengths. Leaf
+capabilities list `0xF001` as the only supported credential type.
+
+A leaf is valid when:
+
+1. Its credential type is `0xF001` (basic and any other type are rejected)
+   and the content decodes.
+2. `signed_device_cert` verifies under `root_pubkey` (see *DeviceCert*),
+   which also checks that its `user_id` is derived from `root_pubkey`.
+3. The leaf's MLS signature key equals the certified `device_sig_pubkey`.
+4. `device_id` is not revoked in the latest `DeviceList` the validator knows
+   for `user_id`. Knowing no list for the user means no known revocations.
+
+The leaf's device is `(user_id, device_id)` from the certificate.
+
+A device validates: every leaf of the ratchet tree of a Welcome (including
+the sender) before joining; the committer's leaf, the update-path leaf, and
+every Add and Update proposal of an incoming commit before merging it; Add
+and Update proposals before storing them; and the KeyPackages it adds
+itself. A rejected Welcome or commit leaves the local group state unchanged.
+
 ## Reserved
 
 Recovery backups and device-link bundles are specified by the following

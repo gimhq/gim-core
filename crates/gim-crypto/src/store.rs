@@ -9,6 +9,9 @@ pub struct StoredIdentity {
     pub device: DeviceRef,
     pub signature_private_key: Vec<u8>,
     pub signature_public_key: Vec<u8>,
+    /// Encoded [`crate::GimCredential`]; `None` for a legacy identity using
+    /// an MLS basic credential.
+    pub credential: Option<Vec<u8>>,
 }
 
 impl std::fmt::Debug for StoredIdentity {
@@ -16,6 +19,7 @@ impl std::fmt::Debug for StoredIdentity {
         f.debug_struct("StoredIdentity")
             .field("device", &self.device)
             .field("signature_public_key", &self.signature_public_key)
+            .field("credential", &self.credential)
             .finish_non_exhaustive()
     }
 }

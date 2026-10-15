@@ -681,8 +681,8 @@ impl<'a> CryptoStore for SqliteTxn<'a> {
         let mut stmt = self
             .txn
             .prepare_cached(
-                "SELECT user_id, device_id, signature_private_key, signature_public_key \
-                 FROM crypto_identity WHERE id = 1",
+                "SELECT user_id, device_id, signature_private_key, signature_public_key, \
+                 credential FROM crypto_identity WHERE id = 1",
             )
             .map_err(sql_err)?;
         let mut rows = stmt.query([]).map_err(sql_err)?;
@@ -695,19 +695,21 @@ impl<'a> CryptoStore for SqliteTxn<'a> {
             device: DeviceRef::parse(&user_id, &device_id).map_err(StoreError::new)?,
             signature_private_key: row.get(2).map_err(sql_err)?,
             signature_public_key: row.get(3).map_err(sql_err)?,
+            credential: row.get(4).map_err(sql_err)?,
         }))
     }
 
     fn save_identity(&self, identity: &StoredIdentity) -> StoreResult<()> {
         self.execute(
             "INSERT OR REPLACE INTO crypto_identity \
-             (id, user_id, device_id, signature_private_key, signature_public_key) \
-             VALUES (1, ?1, ?2, ?3, ?4)",
+             (id, user_id, device_id, signature_private_key, signature_public_key, credential) \
+             VALUES (1, ?1, ?2, ?3, ?4, ?5)",
             params![
                 identity.device.user_id.as_str(),
                 identity.device.device_id.as_str(),
                 identity.signature_private_key,
-                identity.signature_public_key
+                identity.signature_public_key,
+                identity.credential
             ],
         )
     }
@@ -739,5 +741,30 @@ impl<'a> CryptoStore for SqliteTxn<'a> {
             "DELETE FROM crypto_groups WHERE group_id = ?1",
             [group_id.as_str()],
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_credential_round_trip() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        for credential in [Some(vec![7u8; 48]), None] {
+            let identity = StoredIdentity {
+                device: DeviceRef::parse("alice", "phone").unwrap(),
+                signature_private_key: vec![1; 32],
+                signature_public_key: vec![2; 32],
+                credential,
+            };
+            store
+                .transaction(|txn| Ok(txn.save_identity(&identity)?))
+                .unwrap();
+            let loaded = store
+                .transaction(|txn| Ok(txn.load_identity()?))
+                .unwrap();
+            assert_eq!(loaded, Some(identity));
+        }
     }
 }

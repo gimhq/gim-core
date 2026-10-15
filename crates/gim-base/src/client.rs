@@ -268,9 +268,11 @@ impl BaseClient {
                 return Err(err.into())
             }
             // Undecryptable or malformed: skip it so it cannot block the group.
-            Err(CryptoError::InvalidInput { .. } | CryptoError::Mls { .. }) => {
-                return Ok(Outcome::Applied)
-            }
+            Err(
+                CryptoError::InvalidInput { .. }
+                | CryptoError::Mls { .. }
+                | CryptoError::InvalidCredential { .. },
+            ) => return Ok(Outcome::Applied),
         };
         match decrypted {
             DecryptedMessage::Envelope {
