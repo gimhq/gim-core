@@ -10,6 +10,7 @@ use std::sync::atomic::Ordering;
 use gim_base::model::{Membership, StateChange};
 use gim_base::StateReader;
 use gim_common::GroupId;
+use gim_proto::v2;
 use gim_sdk::testing::FakeTransport;
 use gim_sdk::{ConnectionState, KEY_PACKAGE_BATCH};
 use mock_server::{fast_settings, reach_state, upserted_texts, wait_until, MockServer, Peer};
@@ -117,6 +118,39 @@ async fn seq_gap_is_backfilled_before_later_events() {
     s.bob.client.sync_once().await.unwrap();
     assert_eq!(s.bob.texts(&s.group_id), ["m1", "m2", "m3", "m4"]);
     assert_eq!(s.history_requests().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proposal_and_unknown_kinds_are_skipped() {
+    let s = setup().await;
+    let first = s.next_seq();
+    // m2 arrives as an event of kind proposal, m3 only in the history with
+    // an unknown kind.
+    let relabel = |seq, kind| {
+        s.server
+            .controls
+            .relabeled
+            .lock()
+            .unwrap()
+            .insert((s.group_id.clone(), seq), kind);
+    };
+    relabel(first + 1, v2::MessageKind::Proposal);
+    relabel(first + 2, v2::MessageKind::Unknown);
+    s.hide(first + 2);
+    for text in ["m1", "m2", "m3", "m4"] {
+        s.alice.send_text(&s.group_id, text).await;
+    }
+    s.bob.client.sync_once().await.unwrap();
+    assert_eq!(s.bob.texts(&s.group_id), ["m1", "m4"]);
+    let cursor = s.bob.store.group_cursor(&s.group_id).unwrap();
+    assert!(
+        cursor.contains(first + 3) && cursor.ahead.is_empty(),
+        "{cursor:?}"
+    );
+
+    s.alice.send_text(&s.group_id, "m5").await;
+    s.bob.client.sync_once().await.unwrap();
+    assert_eq!(s.bob.texts(&s.group_id), ["m1", "m4", "m5"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

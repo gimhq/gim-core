@@ -655,6 +655,68 @@ async fn group_messages_from_seq_inclusive() {
 }
 
 #[tokio::test]
+async fn group_messages_skip_proposal_and_unknown_kinds() {
+    let server = MockServer::start().await;
+    let page = |from: &str, messages: Vec<Value>| {
+        Mock::given(method("GET"))
+            .and(path("/v2/groups/g%2F1/messages"))
+            .and(query_param("from_seq", from))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "messages": messages,
+                "has_more": false,
+            })))
+    };
+    // A page of skipped kinds only is followed by the next one.
+    page(
+        "4",
+        vec![message_json(4, "proposal"), message_json(5, "foo")],
+    )
+    .mount(&server)
+    .await;
+    page(
+        "6",
+        vec![message_json(6, "application"), message_json(7, "proposal")],
+    )
+    .mount(&server)
+    .await;
+    page("8", vec![]).mount(&server).await;
+    let http = transport(&server);
+    let messages = http
+        .group_messages(&token(), &gid("g/1"), 4, 2)
+        .await
+        .unwrap();
+    assert_eq!(messages.iter().map(|m| m.seq).collect::<Vec<_>>(), vec![6]);
+    let messages = http
+        .group_messages(&token(), &gid("g/1"), 8, 2)
+        .await
+        .unwrap();
+    assert!(messages.is_empty());
+
+    // Message events of those kinds are dropped.
+    Mock::given(method("GET"))
+        .and(path("/v2/events"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "events": [
+                {"cursor": 1, "created_at": 0, "type": "message", "data": message_json(4, "proposal")},
+                {"cursor": 2, "created_at": 0, "type": "message", "data": message_json(5, "foo")},
+                {"cursor": 3, "created_at": 0, "type": "message", "data": message_json(6, "application")},
+            ],
+            "next_cursor": 3,
+        })))
+        .mount(&server)
+        .await;
+    let batch = http
+        .fetch_events(&token(), Some(0), Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(batch.next_cursor, 3);
+    assert!(matches!(
+        batch.events.as_slice(),
+        [HubEvent::Group(IncomingEvent::Message(m))] if m.seq == 6
+    ));
+}
+
+#[tokio::test]
 async fn upload_blob_streams_file() {
     let server = MockServer::start().await;
     let data: Vec<u8> = (0..200_000u32).map(|i| i as u8).collect();

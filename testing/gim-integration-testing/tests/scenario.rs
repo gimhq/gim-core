@@ -463,8 +463,8 @@ async fn media_send_and_fetch() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs a gim-hub: scripts/integration-test.sh"]
-async fn group_add_remove_leave() {
-    let Some(url) = server_url("group_add_remove_leave") else {
+async fn group_add_remove() {
+    let Some(url) = server_url("group_add_remove") else {
         return;
     };
     let alice = TestUser::register(&url, "alice", "Alice").await;
@@ -555,6 +555,38 @@ async fn group_add_remove_leave() {
     assert!(messages(&items)
         .iter()
         .all(|m| text(m) != Some("after carol")));
+}
+
+/// Leaving sends a PublicMessage self-Remove Proposal, which gim-hub
+/// e11ad00 rejects ("mls_message is not a Commit"); gim-hub H3-FX3 accepts
+/// it. Runs only with `GIM_HUB_FX3=1`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a gim-hub: scripts/integration-test.sh"]
+async fn group_leave() {
+    let Some(url) = server_url("group_leave") else {
+        return;
+    };
+    if std::env::var("GIM_HUB_FX3").as_deref() != Ok("1") {
+        eprintln!("group_leave skipped: needs gim-hub H3-FX3 (leave via PublicMessage Proposal); set GIM_HUB_FX3=1");
+        return;
+    }
+    let alice = TestUser::register(&url, "alice", "Alice").await;
+    let bob = TestUser::register(&url, "bob", "Bob").await;
+
+    let chat = alice
+        .client
+        .create_group_chat("Crew".to_string(), vec![bob.user_id.clone()])
+        .await
+        .unwrap();
+    let (bob_timeline, _bob_handle) = bob.timeline(&chat).await;
+    let first = alice
+        .client
+        .send_text(chat.clone(), "before leave".to_string(), None)
+        .await
+        .unwrap();
+    bob_timeline
+        .wait("first at bob", |items| message(items, &first).is_some())
+        .await;
 
     // Bob leaves: Alice commits his removal and stops sending to him.
     bob.client.leave_chat(chat.clone()).await.unwrap();

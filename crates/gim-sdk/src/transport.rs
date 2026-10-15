@@ -289,7 +289,7 @@ pub trait Transport: Send + Sync {
     }
 
     /// Uploads one-time KeyPackages, or with `last_resort` exactly one that
-    /// replaces the last-resort KeyPackage (TLS-serialized `MlsMessage`s).
+    /// replaces the last-resort KeyPackage (bare TLS-serialized KeyPackages).
     async fn upload_key_packages(
         &self,
         token: &AccessToken,
@@ -371,7 +371,8 @@ pub trait Transport: Send + Sync {
     async fn ack_welcome(&self, token: &AccessToken, group_id: &GroupId) -> TransportResult<()>;
 
     /// Up to `limit` messages of the group with `seq >= from_seq`,
-    /// ascending.
+    /// ascending. Kinds the SDK does not process yet are left out; empty
+    /// only at the end of the history.
     async fn group_messages(
         &self,
         token: &AccessToken,

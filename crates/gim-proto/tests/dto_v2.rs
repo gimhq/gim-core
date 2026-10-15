@@ -778,6 +778,31 @@ fn unknown_event_type_does_not_fail_the_list() {
 }
 
 #[test]
+fn message_kind_proposal_and_unknown() {
+    let mut proposal = message_json();
+    proposal["kind"] = json!("proposal");
+    assert_eq!(round_trip::<Message>(proposal).kind, MessageKind::Proposal);
+
+    let mut unknown = message_json();
+    unknown["kind"] = json!("membership_hint");
+    let message: Message = serde_json::from_value(unknown.clone()).unwrap();
+    assert_eq!(message.kind, MessageKind::Unknown);
+
+    // A message event of an unknown kind does not fail the event list.
+    let list: EventList = serde_json::from_value(json!({
+        "events": [event_json(1, "message", unknown), event_json(2, "message", message_json())],
+        "next_cursor": 2
+    }))
+    .unwrap();
+    assert!(
+        matches!(&list.events[0].data, EventData::Message(m) if m.kind == MessageKind::Unknown)
+    );
+    assert!(
+        matches!(&list.events[1].data, EventData::Message(m) if m.kind == MessageKind::Application)
+    );
+}
+
+#[test]
 fn malformed_known_event_is_an_error() {
     let err = serde_json::from_value::<Event>(event_json(1, "welcome", json!({"gid": GID})));
     assert!(err.is_err());

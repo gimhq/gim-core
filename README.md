@@ -59,9 +59,17 @@ stays offline. Scenarios, several clients in one process:
 - `tests/scenario.rs`, gim-ffi clients: identity creation, handle claim and
   sign-in after restart; direct chat (receipts, typing, reply, edit,
   reaction, delete, reconnect, restart); file and image (blob) send and fetch;
-  group add, remove and leave; linking a second device with the SAS, which
+  group add and remove; group leave (`group_leave`, see below); linking a second device with the SAS, which
   then reads and writes in an existing chat, and revoking it (its credential
   is rejected); restoring from the recovery code.
+- `group_leave` is skipped (it prints `group_leave skipped: needs gim-hub
+  H3-FX3 ...`) unless `GIM_HUB_FX3=1`: gim-hub `e11ad00` rejects the
+  PublicMessage self-Remove Proposal a leaving member sends ("mls_message is
+  not a Commit"); gim-hub H3-FX3 fixes it. Once the harness is pinned to a hub
+  with FX3, the flag goes away. Run it against such a hub with
+  `GIM_HUB_URL=... GIM_HUB_FX3=1 cargo test -p gim-integration-testing --test
+  scenario group_leave -- --include-ignored` (`scripts/integration-test.sh`
+  does not forward the flag).
 - `tests/faults.rs`, gim-sdk clients over the hub's HTTP API with faults
   injected at the transport (`src/sdk.rs`): a lost reply to an accepted
   Commit and to an application message (the re-post gets the hub's
