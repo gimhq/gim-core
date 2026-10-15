@@ -178,24 +178,25 @@ impl SignedHubRuntimeCert {
         Ok(Self { tbs, sig })
     }
 
-    /// Checks that the cert is issued by `hub_root`, the signature over the
-    /// received `tbs`, and that `not_before <= now < not_after`.
+    /// Checks the signature of `hub_root` over the received `tbs`, then the
+    /// body: version, `hub_root_pubkey` equal to `hub_root`, and
+    /// `not_before <= now < not_after`.
     pub fn verify(
         &self,
         hub_root: &HubRootPublicKey,
         now: u64,
     ) -> Result<HubRuntimeCert, IdentityError> {
-        let [_, hub_root_public_key, runtime_public_key, not_before, not_after] =
-            cbor::decode_body(&self.tbs)?;
-        if cbor::key(hub_root_public_key)? != *hub_root.as_bytes() {
-            return Err(IdentityError::HubKeyMismatch);
-        }
         verify(
             &hub_root.0 .0,
             HUB_RUNTIME_CERT_CONTEXT,
             &self.tbs,
             &self.sig,
         )?;
+        let [_, hub_root_public_key, runtime_public_key, not_before, not_after] =
+            cbor::decode_body(&self.tbs)?;
+        if cbor::key(hub_root_public_key)? != *hub_root.as_bytes() {
+            return Err(IdentityError::HubKeyMismatch);
+        }
         let runtime_public_key = HubRuntimePublicKey::from_bytes(&cbor::key(runtime_public_key)?)?;
         let not_before = cbor::uint(not_before)?;
         let not_after = cbor::uint(not_after)?;
@@ -319,10 +320,10 @@ impl UserHostingRecord {
         let user_id = user_root_public_key.user_id();
         let mut seen = HashSet::new();
         for entry in &hubs {
+            entry.verify(&user_id)?;
             if !seen.insert(*entry.hub_root_public_key.as_bytes()) {
                 return Err(IdentityError::DuplicateHub(entry.hub_id()));
             }
-            entry.verify(&user_id)?;
         }
         Ok(Self {
             user_id,
@@ -368,15 +369,19 @@ impl UserHostingRecord {
             .expect("a record has at least one hub")
     }
 
-    /// Whether `self` replaces `other`: same user and strictly higher seq.
-    /// Two different records with the same seq are a conflict.
+    /// Whether `self` (received) replaces `other` (stored), per the update
+    /// rules of `docs/identity.md`: `Ok(true)` for the same user with a
+    /// strictly higher seq; `Ok(false)` (unchanged, a no-op) for the same seq
+    /// and identical body bytes; [`IdentityError::SeqConflict`] for the same
+    /// seq and different bytes; [`IdentityError::StaleSeq`] for a lower seq;
+    /// [`IdentityError::UserIdMismatch`] for another user.
     pub fn supersedes(&self, other: &UserHostingRecord) -> Result<bool, IdentityError> {
         if self.user_id != other.user_id {
             return Err(IdentityError::UserIdMismatch);
         }
         match self.seq.cmp(&other.seq) {
             Ordering::Greater => Ok(true),
-            Ordering::Less => Ok(false),
+            Ordering::Less => Err(IdentityError::StaleSeq(self.seq)),
             Ordering::Equal if self.encode() == other.encode() => Ok(false),
             Ordering::Equal => Err(IdentityError::SeqConflict(self.seq)),
         }
@@ -424,15 +429,17 @@ impl SignedHostingRecord {
         Ok(Self { tbs, sig })
     }
 
-    /// Verifies the record: `user_id` derived from the embedded root key,
-    /// the user signature over the received `tbs`, the [`UserHostingRecord::new`]
-    /// checks, and `now < expires_at`. The caller compares
+    /// Verifies the record in the documented order: extract only the claimed
+    /// `user_id` and the embedded root key and check that the key derives
+    /// it, check the user signature over the received `tbs`, then validate
+    /// the body (version, [`UserHostingRecord::new`] checks,
+    /// `now < expires_at`). The caller compares
     /// [`UserHostingRecord::user_id`] with the user it looked up.
     pub fn verify(&self, now: u64) -> Result<UserHostingRecord, IdentityError> {
-        let [_, user_id, user_root_public_key, seq, expires_at, hubs] =
-            cbor::decode_body(&self.tbs)?;
-        let user_root_public_key = RootPublicKey::from_bytes(&cbor::key(user_root_public_key)?)?;
-        if cbor::text(user_id)? != user_root_public_key.user_id().as_str() {
+        let body = cbor::decode(&self.tbs)?;
+        let claimed = cbor::text(cbor::item(&body, 1)?)?;
+        let user_root_public_key = RootPublicKey::from_bytes(&cbor::key(cbor::item(&body, 2)?)?)?;
+        if claimed != user_root_public_key.user_id().as_str() {
             return Err(IdentityError::UserIdMismatch);
         }
         verify(
@@ -441,6 +448,7 @@ impl SignedHostingRecord {
             &self.tbs,
             &self.sig,
         )?;
+        let [_, _, _, seq, expires_at, hubs] = cbor::body(body)?;
         let seq = cbor::uint(seq)?;
         let expires_at = cbor::uint(expires_at)?;
         let hubs = cbor::list(hubs)?

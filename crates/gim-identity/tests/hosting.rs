@@ -148,7 +148,7 @@ fn runtime_cert_rejections() {
     ));
     assert!(matches!(
         signed.verify(&self::hub(1).public(), NOW),
-        Err(IdentityError::HubKeyMismatch)
+        Err(IdentityError::BadSignature)
     ));
 
     let (tbs, sig) = split(&signed.to_bytes());
@@ -316,7 +316,10 @@ fn supersedes() {
     let v1 = UserHostingRecord::new(root.public(), 1, NOW + DAY, vec![a.clone()]).unwrap();
     let v2 = UserHostingRecord::new(root.public(), 2, NOW + DAY, vec![b.clone()]).unwrap();
     assert!(v2.supersedes(&v1).unwrap());
-    assert!(!v1.supersedes(&v2).unwrap());
+    assert!(matches!(
+        v1.supersedes(&v2),
+        Err(IdentityError::StaleSeq(1))
+    ));
     assert!(!v1.supersedes(&v1.clone()).unwrap());
 
     let fork = UserHostingRecord::new(root.public(), 1, NOW + DAY, vec![b]).unwrap();
