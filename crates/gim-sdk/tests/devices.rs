@@ -280,8 +280,11 @@ async fn restore_from_recovery_revokes_the_lost_devices() {
     assert_ne!(restored.device(), lost);
     assert_eq!(restored.store.self_groups().unwrap().len(), 1);
     let devices = restored.client.devices().await.unwrap();
-    assert_eq!(devices.len(), 1);
-    assert!(devices[0].is_current);
+    assert_eq!(devices.len(), 2);
+    assert!(devices.iter().any(|d| d.is_current && !d.revoked));
+    assert!(devices
+        .iter()
+        .any(|d| d.device_id == lost.device_id && d.revoked));
     assert_eq!(
         transport.service().devices(&alice.user_id()).unwrap(),
         [restored.device()]

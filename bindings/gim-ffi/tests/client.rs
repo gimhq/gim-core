@@ -772,9 +772,11 @@ async fn restore_from_recovery_code() {
         .await
         .unwrap();
     assert_eq!(fresh.user_id(), Some(user_id.clone()));
+    // The lost device is listed as revoked.
     let devices = fresh.devices().await.unwrap();
-    assert_eq!(devices.len(), 1);
-    assert!(devices[0].is_current);
+    assert_eq!(devices.len(), 2);
+    assert!(devices.iter().any(|d| d.is_current && !d.revoked));
+    assert!(devices.iter().any(|d| !d.is_current && d.revoked));
     assert!(matches!(
         fresh.restore_from_recovery(user_id, code, true).await,
         Err(GimError::InvalidInput { .. })
