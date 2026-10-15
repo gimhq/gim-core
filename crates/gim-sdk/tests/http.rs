@@ -887,6 +887,62 @@ async fn download_blob_range_ignored_by_server() {
     ));
 }
 
+/// Origin-prefixed blob ids (`<hub_id>/b_<base64url>`) are opaque: the
+/// `/` reaches the hub as `%2F`, not as a path separator. A peer hub outage
+/// is retryable after `Retry-After`; a missing blob is not found.
+#[tokio::test]
+async fn download_blob_with_an_origin_prefixed_id() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "GET",
+        "/v2/blobs/hxxxx%2Fb_abc-_",
+        ResponseTemplate::new(200).set_body_bytes(vec![7u8, 8]),
+    )
+    .await;
+    mount(
+        &server,
+        "GET",
+        "/v2/blobs/hpeer%2Fb_down",
+        ResponseTemplate::new(503)
+            .insert_header("retry-after", "7")
+            .set_body_json(error_body("peer_unavailable")),
+    )
+    .await;
+    mount(
+        &server,
+        "GET",
+        "/v2/blobs/hxxxx%2Fb_gone",
+        ResponseTemplate::new(404).set_body_json(error_body("not_found")),
+    )
+    .await;
+    let http = transport(&server);
+    assert_eq!(
+        http.download_blob(&token(), "hxxxx/b_abc-_", None).await,
+        Ok(vec![7, 8])
+    );
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[0].url.path(), "/v2/blobs/hxxxx%2Fb_abc-_");
+
+    let err = http
+        .download_blob(&token(), "hpeer/b_down", None)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        TransportError::PeerUnavailable {
+            retry_after_secs: Some(7),
+            reason: "peer_unavailable: nope".into(),
+        }
+    );
+    assert_eq!(err.retry_after(), Some(Duration::from_secs(7)));
+    assert_eq!(
+        http.download_blob(&token(), "hxxxx/b_gone", Some(0..4))
+            .await,
+        Err(TransportError::NotFound("not_found: nope".into()))
+    );
+}
+
 #[tokio::test]
 async fn status_mapping() {
     let server = MockServer::start().await;

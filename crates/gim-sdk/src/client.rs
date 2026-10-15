@@ -27,8 +27,8 @@ use crate::send::TypingState;
 use crate::stream::ConnectionState;
 use crate::sync::SyncSettings;
 use crate::transport::{
-    AccessToken, ClaimedKeyPackage, CommitAccepted, KeyPackageClaim, OutgoingCommit, PostError,
-    Transport, TransportError,
+    AccessToken, ClaimedKeyPackage, CommitAccepted, OutgoingCommit, PostError, Transport,
+    TransportError,
 };
 use crate::{ClientError, Result, SecretStorage, SecretStorageError};
 
@@ -355,6 +355,28 @@ enum Resolved {
     Conflict,
 }
 
+/// The KeyPackages claimed for an add, and who could not be added now.
+pub(crate) struct Claim {
+    pub(crate) key_packages: Vec<ClaimedKeyPackage>,
+    /// Requested users whose hub was unavailable: added later.
+    pub(crate) unavailable: Vec<UserId>,
+    /// Requested users without a KeyPackage nor an unavailable hub: they do
+    /// not exist or have no device.
+    pub(crate) unresolvable: Vec<UserId>,
+    /// Number of distinct requested users other than this one.
+    requested: usize,
+}
+
+impl Claim {
+    /// `NotFound` if users were requested and none of them can be resolved.
+    fn check_resolvable(&self) -> Result<()> {
+        if self.requested == 0 || self.unresolvable.len() < self.requested {
+            return Ok(());
+        }
+        Err(BaseError::NotFound(format!("users {:?}", self.unresolvable)).into())
+    }
+}
+
 /// Whether the hub may have accepted a request that failed this way; such
 /// requests are resent unchanged. Peer hub failures (502/503) count: the
 /// owning hub may have sequenced the request before the failure.
@@ -481,7 +503,9 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Creates a direct chat with every device of `user_id` (and this user's
-    /// other devices), and announces the own display name in it.
+    /// other devices), and announces the own display name in it. Fails with
+    /// `NotFound` (and creates nothing) if `user_id` does not exist or has
+    /// no device; a user whose hub is unavailable is added later.
     pub async fn create_direct_chat(&self, user_id: &UserId) -> Result<GroupId> {
         self.create_chat(ChatKind::Direct, None, std::slice::from_ref(user_id))
             .await
@@ -489,7 +513,9 @@ impl<S: StateStore + 'static> Client<S> {
 
     /// Creates a group chat with every device of `users` (and this user's
     /// other devices). The name is shared with the members in a group info
-    /// message once they are added.
+    /// message once they are added. Users that do not exist or have no
+    /// device are skipped, each surfaced as a `Removed` membership change;
+    /// fails with `NotFound` (and creates nothing) if that is every user.
     pub async fn create_group_chat(
         &self,
         name: Option<String>,
@@ -501,7 +527,8 @@ impl<S: StateStore + 'static> Client<S> {
     /// Adds every device of `users` that is not a member yet, then shares
     /// the group name and avatar and the own display name with them (group
     /// info and profile messages: earlier ones are not readable for new
-    /// members).
+    /// members). Users that do not exist or have no device are skipped like
+    /// in [`Client::create_group_chat`]; `NotFound` if that is every user.
     pub async fn add_members(&self, group_id: &GroupId, users: &[UserId]) -> Result<()> {
         self.add_members_locked(group_id, users).await?;
         self.share_group_info(group_id).await?;
@@ -517,7 +544,10 @@ impl<S: StateStore + 'static> Client<S> {
         let _guard = self.inner.group_lock.lock().await;
         let members = self.chat_devices(group_id).await?;
         let claim = self.claim_key_packages(&session, users, &members).await?;
+        claim.check_resolvable()?;
         self.add_pending_invites(group_id, &claim.unavailable).await;
+        self.reject_invitees(&session, group_id, &claim.unresolvable)
+            .await?;
         if claim.key_packages.is_empty() {
             if !claim.unavailable.is_empty() {
                 return Ok(());
@@ -727,6 +757,7 @@ impl<S: StateStore + 'static> Client<S> {
         let session = session.clone();
         let _guard = self.inner.group_lock.lock().await;
         let claim = self.claim_key_packages(&session, users, &[]).await?;
+        claim.check_resolvable()?;
         // Always on the own hub, which then owns the group.
         let group_id = self
             .authed(|t| async move { self.inner.transport.create_group(&t, kind).await })
@@ -745,6 +776,8 @@ impl<S: StateStore + 'static> Client<S> {
         // chat with only those starts with this user alone.
         self.add_pending_invites(&group_id, &claim.unavailable)
             .await;
+        self.reject_invitees(&session, &group_id, &claim.unresolvable)
+            .await?;
         let added = !claim.key_packages.is_empty();
         if added {
             self.commit(&session, &group_id, CommitOp::Add(claim.key_packages))
@@ -1472,13 +1505,19 @@ impl<S: StateStore + 'static> Client<S> {
 
     /// Claims a KeyPackage of every active device of `users` and of this
     /// user's other devices, except this device and `exclude`. Also returns
-    /// the requested users (not this one) whose hub was unavailable.
+    /// the requested users (not this one) whose hub was unavailable, and
+    /// those nobody could resolve.
     pub(crate) async fn claim_key_packages(
         &self,
         session: &Session,
         users: &[UserId],
         exclude: &[DeviceRef],
-    ) -> Result<KeyPackageClaim> {
+    ) -> Result<Claim> {
+        let requested: BTreeSet<UserId> = users
+            .iter()
+            .filter(|u| **u != session.device.user_id)
+            .cloned()
+            .collect();
         let users: Vec<UserId> = users
             .iter()
             .chain([&session.device.user_id])
@@ -1500,13 +1539,18 @@ impl<S: StateStore + 'static> Client<S> {
         // Only requested users, one KeyPackage per device: the hub must not
         // pick who joins.
         let mut seen = BTreeSet::new();
+        let claimed_users: BTreeSet<UserId> = claimed
+            .key_packages
+            .iter()
+            .map(|k| k.device.user_id.clone())
+            .collect();
         let key_packages: Vec<ClaimedKeyPackage> = claimed
             .key_packages
             .into_iter()
             .filter(|k| users.contains(&k.device.user_id) && seen.insert(k.device.clone()))
             .filter(|k| k.device != session.device && !exclude.contains(&k.device))
             .collect();
-        let unavailable = claimed
+        let unavailable: Vec<UserId> = claimed
             .unavailable
             .into_iter()
             .filter(|u| *u != session.device.user_id && users.contains(u))
@@ -1514,9 +1558,18 @@ impl<S: StateStore + 'static> Client<S> {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        Ok(KeyPackageClaim {
+        // Neither a KeyPackage (before `exclude`: members are resolvable)
+        // nor an unavailable hub: the user does not exist or has no device.
+        let count = requested.len();
+        let unresolvable = requested
+            .into_iter()
+            .filter(|u| !claimed_users.contains(u) && !unavailable.contains(u))
+            .collect();
+        Ok(Claim {
             key_packages,
             unavailable,
+            unresolvable,
+            requested: count,
         })
     }
 

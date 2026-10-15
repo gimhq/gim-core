@@ -171,10 +171,10 @@ implementations fast and thread-safe.
 | `startSync()` / `stopSync()` | | |
 | `setNetworkReachable(reachable)` | | Synchronous, never throws. Becoming reachable reconnects and retries the outbox at once; becoming unreachable changes nothing by itself. |
 | `findUser(handle)` | `UserProfile?` | `null`/`nil` if no such user. |
-| `createDirectChat(userId)` | chat id | Returns the existing direct chat if there is one. |
-| `createGroupChat(name, memberUserIds)` | chat id | The name is shared with the members (and with members added later) in an encrypted group info message. |
+| `createDirectChat(userId)` | chat id | Returns the existing direct chat if there is one. `NotFound` (and no chat is created) if the user does not exist or has no device; a user whose hub is unavailable is invited later (see *Federation*). |
+| `createGroupChat(name, memberUserIds)` | chat id | The name is shared with the members (and with members added later) in an encrypted group info message. Invitees that do not exist or have no device are skipped, each reported as a `MembershipChanged(Removed)` change for that user (not stored); `NotFound` (and no chat is created) if that is every invitee. |
 | `chatMembers(chatId)` | `[UserProfile]` | Current members, one entry per user (not per device), including the signed-in user. Names come from the local user directory, filled by `findUser`, registration, and directory lookups the client makes for members of created or joined chats, added members and unknown senders; until a lookup succeeds a user shows as its user id. Resolved names arrive as `ChatListDiff`s and timeline `Set`s. No members listener in M1: re-query when a `ChatListDiff` touches that chat or a `TimelineItem.MembershipChange` arrives. |
-| `addMembers(chatId, userIds)`, `removeMember(chatId, userId)` | | |
+| `addMembers(chatId, userIds)`, `removeMember(chatId, userId)` | | `addMembers` skips users that do not exist or have no device like `createGroupChat`, and fails with `NotFound` (nothing committed) if that is every user. |
 | `leaveChat(chatId)` | | Submits a leave Proposal and returns once the hub accepted it; another member commits it, then the chat shows the own `Left` change. Until then (also across restarts) sends to the chat fail with `InvalidInput`. |
 | `setGroupInfo(chatId, name?, avatarFilePath?)` | | `null`/`nil` leaves a field unchanged; at least one must be set. The avatar is encrypted and uploaded before the call returns (MIME type from the file extension), then the change is applied locally and sent to the members. `InvalidInput` for direct chats. |
 | `sendText(chatId, body, replyTo?)` | message id | The message appears in the timeline immediately with `SendState.Pending`. |
@@ -185,7 +185,7 @@ implementations fast and thread-safe.
 | `markRead(chatId, upToMessageId)` | | Also sends a read receipt. M1 marks the whole chat read; `upToMessageId` is only validated. |
 | `setTyping(chatId, active)` | | Call with `true` on each keystroke (sent at most every 3 s) and `false` when typing stops. |
 | `stopTyping(chatId)` | | Same as `setTyping(chatId, false)`: call when the input is cleared, the message sent or the chat is left. Does nothing unless typing was reported. |
-| `fetchMedia(chatId, messageId, destPath)` | file path | Downloads and decrypts the attachment. |
+| `fetchMedia(chatId, messageId, destPath)` | file path | Downloads and decrypts the attachment. `NotFound` if the hub no longer has the blob; `RetryLater(503, …)` while the hub storing it is unavailable. |
 | `fetchThumbnail(chatId, messageId, destPath)` | file path? | `null`/`nil` if the media has no thumbnail. |
 | `chatList(listener)` | `TaskHandle` | |
 | `timeline(chatId)` | `Timeline` | |

@@ -639,6 +639,14 @@ fn paths_cover_openapi() {
     assert_eq!(routes, ours);
 }
 
+/// Blob ids are opaque: an origin-prefixed id (`<hub_id>/b_<base64url>`)
+/// stays one path segment, its `/` percent-encoded.
+#[test]
+fn blob_path_encodes_origin_prefixed_ids() {
+    assert_eq!(paths::blob("hxxxx/b_abc-_"), "/v2/blobs/hxxxx%2Fb_abc-_");
+    assert_eq!(paths::blob("b_abc-_"), "/v2/blobs/b_abc-_");
+}
+
 #[test]
 fn query_parameters_match() {
     let spec = spec();

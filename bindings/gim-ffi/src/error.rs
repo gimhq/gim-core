@@ -199,3 +199,29 @@ pub(crate) fn parse_id<T: TryFrom<String, Error = gim_common::GimCommonError>>(
         reason: format!("{what}: {e}"),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::GimError;
+    use gim_sdk::{ClientError, TransportError};
+
+    #[test]
+    fn unknown_users_and_unavailable_peers() {
+        let unknown = ClientError::Base(gim_base::BaseError::NotFound("users".into()));
+        assert!(matches!(GimError::from(unknown), GimError::NotFound { .. }));
+        let missing = ClientError::Transport(TransportError::NotFound("blob".into()));
+        assert!(matches!(GimError::from(missing), GimError::NotFound { .. }));
+        let peer = TransportError::PeerUnavailable {
+            retry_after_secs: Some(7),
+            reason: "peer_unavailable".into(),
+        };
+        assert!(matches!(
+            GimError::from(ClientError::Transport(peer)),
+            GimError::RetryLater {
+                status: 503,
+                retry_after_secs: 7,
+                ..
+            }
+        ));
+    }
+}
