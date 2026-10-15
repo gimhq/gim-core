@@ -576,14 +576,27 @@ impl Transport for HttpTransport {
         from_seq: u64,
         limit: u32,
     ) -> TransportResult<Vec<GroupMessage>> {
-        let query = v2::MessagesQuery {
-            from_seq: Some(from_seq.max(1)),
-            limit: Some(limit),
-        };
         let path = paths::group_messages(group_id.as_str());
-        let list: v2::MessageList =
-            Self::json(self.api(Method::GET, &path, Some(token)).query(&query)).await?;
-        list.messages.into_iter().map(convert::message).collect()
+        let mut from_seq = from_seq.max(1);
+        loop {
+            let query = v2::MessagesQuery {
+                from_seq: Some(from_seq),
+                limit: Some(limit),
+            };
+            let list: v2::MessageList =
+                Self::json(self.api(Method::GET, &path, Some(token)).query(&query)).await?;
+            let next = list.messages.last().map(|m| m.seq + 1);
+            let messages = list
+                .messages
+                .into_iter()
+                .filter_map(|m| convert::message(m).transpose())
+                .collect::<TransportResult<Vec<_>>>()?;
+            // A page of skipped kinds only is not the end of the history.
+            match next {
+                Some(next) if messages.is_empty() && next > from_seq => from_seq = next,
+                _ => return Ok(messages),
+            }
+        }
     }
 
     async fn upload_blob(&self, token: &AccessToken, file: &Path) -> TransportResult<String> {

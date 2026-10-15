@@ -371,7 +371,8 @@ pub trait Transport: Send + Sync {
     async fn ack_welcome(&self, token: &AccessToken, group_id: &GroupId) -> TransportResult<()>;
 
     /// Up to `limit` messages of the group with `seq >= from_seq`,
-    /// ascending.
+    /// ascending. Kinds the SDK does not process yet are left out; empty
+    /// only at the end of the history.
     async fn group_messages(
         &self,
         token: &AccessToken,

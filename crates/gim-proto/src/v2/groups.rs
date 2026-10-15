@@ -86,6 +86,12 @@ pub struct CommitResult {
 pub enum MessageKind {
     Commit,
     Application,
+    /// A standalone handshake Proposal (e.g. a member's self-Remove).
+    /// Announced by gim-hub H3-FX3; not yet in the vendored contract.
+    Proposal,
+    /// Any kind this client does not know yet.
+    #[serde(other)]
+    Unknown,
 }
 
 /// `Message`: one entry of a group's history.
@@ -98,7 +104,8 @@ pub struct Message {
     pub client_id: String,
     pub kind: MessageKind,
     pub epoch: u64,
-    /// MLSMessage: PublicMessage for Commits, PrivateMessage otherwise.
+    /// MLSMessage: PublicMessage for Commits and Proposals, PrivateMessage
+    /// otherwise.
     #[serde(with = "super::base64::bytes")]
     pub mls_message: Vec<u8>,
     /// Unix milliseconds.

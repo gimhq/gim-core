@@ -42,18 +42,26 @@ pub(super) fn member(device: &DeviceRef) -> v2::GroupMember {
     }
 }
 
-pub(super) fn message(message: v2::Message) -> Result<GroupMessage, TransportError> {
-    Ok(GroupMessage {
+/// `None` for kinds the SDK does not process yet (standalone Proposals and
+/// unknown kinds): they are skipped, and their seq is then confirmed as a
+/// hole by the gap backfill.
+pub(super) fn message(message: v2::Message) -> Result<Option<GroupMessage>, TransportError> {
+    let kind = match message.kind {
+        v2::MessageKind::Commit => MessageKind::Commit,
+        v2::MessageKind::Application => MessageKind::Application,
+        v2::MessageKind::Proposal | v2::MessageKind::Unknown => {
+            tracing::debug!(gid = %message.gid, seq = message.seq, kind = ?message.kind, "skipping message");
+            return Ok(None);
+        }
+    };
+    Ok(Some(GroupMessage {
         group_id: group_id(&message.gid)?,
         seq: message.seq,
         sender: device(&message.sender_user_id, &message.sender_device_id)?,
-        kind: match message.kind {
-            v2::MessageKind::Commit => MessageKind::Commit,
-            v2::MessageKind::Application => MessageKind::Application,
-        },
+        kind,
         payload: message.mls_message,
         client_id: Some(ClientId::new(message.client_id).map_err(|e| invalid("client id", e))?),
-    })
+    }))
 }
 
 /// A Welcome as gim-base takes it: a message at the seq of its Commit.
@@ -105,9 +113,11 @@ fn membership(
 pub(super) fn event(event: v2::Event) -> Vec<HubEvent> {
     let cursor = event.cursor;
     let converted = match event.data {
-        v2::EventData::Message(m) => {
-            message(m).map(|m| vec![HubEvent::Group(IncomingEvent::Message(m))])
-        }
+        v2::EventData::Message(m) => message(m).map(|m| {
+            m.map(|m| HubEvent::Group(IncomingEvent::Message(m)))
+                .into_iter()
+                .collect()
+        }),
         v2::EventData::MemberAdded(change) => membership(change, |group_id, device| {
             IncomingEvent::MemberAdded { group_id, device }
         }),
