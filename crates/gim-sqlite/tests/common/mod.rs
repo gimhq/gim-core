@@ -11,7 +11,7 @@ use gim_base::{BaseClient, StateReader, StateStore};
 use gim_common::{ClientId, DeviceRef, GroupId, MessageId};
 use gim_crypto::{CommitOutput, CryptoStore, MlsEngine};
 use gim_proto::envelope::Content;
-use gim_sqlite::SqliteStore;
+use gim_sqlite::{DbKey, SqliteStore};
 use gim_test::{Delivered, FakeDeliveryService, OutgoingMessage};
 
 pub const NOW: u64 = 1_790_000_000_000;
@@ -21,6 +21,11 @@ pub struct Device {
     pub client: BaseClient,
     pub engine: MlsEngine,
     pub store: SqliteStore,
+}
+
+/// The database key of file-backed test stores.
+pub fn key() -> DbKey {
+    DbKey::new([7; 32])
 }
 
 pub fn group(id: &str) -> GroupId {

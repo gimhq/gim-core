@@ -23,7 +23,7 @@ use crate::send::TypingState;
 use crate::stream::ConnectionState;
 use crate::sync::SyncSettings;
 use crate::transport::{AccessToken, OutgoingMessage, PostError, Transport, TransportError};
-use crate::{ClientError, Result, SecretStorage};
+use crate::{ClientError, Result, SecretStorage, SecretStorageError};
 
 /// One-time KeyPackages uploaded at registration and per replenish.
 pub const KEY_PACKAGE_BATCH: u32 = 100;
@@ -35,6 +35,8 @@ pub const COMMIT_POST_ATTEMPTS: u32 = 3;
 /// [`SecretStorage`] key of the serialized [`Session`].
 pub const SESSION_SECRET_KEY: &str = "gim.session";
 
+/// See [`ClientBuilder::DB_KEY_LEN`].
+const DATABASE_KEY_LEN: usize = 32;
 /// Buffered [`StateChange`]s per subscriber before it lags.
 const CHANGES_CAPACITY: usize = 1024;
 /// Buffered [`ConnectionState`]s per subscriber before it lags.
@@ -73,6 +75,65 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
             data_dir: None,
             sync_settings: SyncSettings::default(),
         }
+    }
+
+    /// [`SecretStorage`] key of the local database key.
+    pub const DB_KEY_SECRET_KEY: &'static str = "gim.db_key.v1";
+    /// Length of the local database key in bytes.
+    pub const DB_KEY_LEN: usize = DATABASE_KEY_LEN;
+
+    /// Like [`Self::new`], over a store opened with the database key from
+    /// `secrets`. Blocking: call it off the async runtime.
+    ///
+    /// Without a stored key a random one is created and stored first, and
+    /// `open_store(key, true)` must discard any existing database, which
+    /// that key cannot decrypt. `open_store` returns the store and whether
+    /// it wiped local state. A failing `secrets` fails the call: the store
+    /// is never opened without a key.
+    pub fn open<E>(
+        transport: Arc<dyn Transport>,
+        secrets: Arc<dyn SecretStorage>,
+        open_store: impl FnOnce(&[u8; DATABASE_KEY_LEN], bool) -> std::result::Result<(S, bool), E>,
+    ) -> Result<Self>
+    where
+        ClientError: From<E>,
+    {
+        let mut key = [0u8; DATABASE_KEY_LEN];
+        let new_key = match secrets.get(Self::DB_KEY_SECRET_KEY)? {
+            Some(mut stored) => {
+                let len = stored.len();
+                if len == key.len() {
+                    key.copy_from_slice(&stored);
+                }
+                stored.fill(0);
+                if len != key.len() {
+                    return Err(SecretStorageError::new(format!(
+                        "stored database key has {len} bytes, expected {}",
+                        Self::DB_KEY_LEN
+                    ))
+                    .into());
+                }
+                false
+            }
+            None => {
+                rustls::crypto::ring::default_provider()
+                    .secure_random
+                    .fill(&mut key)
+                    .map_err(|_| BaseError::Random("database key".into()))?;
+                if let Err(err) = secrets.set(Self::DB_KEY_SECRET_KEY, &key) {
+                    key.fill(0);
+                    return Err(err.into());
+                }
+                true
+            }
+        };
+        let opened = open_store(&key, new_key);
+        key.fill(0);
+        let (store, reset) = opened?;
+        if reset {
+            tracing::warn!("local database was reset; local state is lost");
+        }
+        Ok(Self::new(Arc::new(store), transport, secrets))
     }
 
     /// Timing of the sync loop; see [`SyncSettings`].
