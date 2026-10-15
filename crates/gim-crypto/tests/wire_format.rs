@@ -6,7 +6,8 @@ use std::sync::Arc;
 use gim_common::{DeviceRef, GroupId};
 use gim_crypto::{
     inspect_handshake, message_epoch, private_message_epoch, CryptoError, CryptoStore,
-    DeviceListCache, HandshakeKind, MemoryCryptoStore, MlsEngine, ProcessedMessage,
+    DeviceListCache, HandshakeKind, MemoryCryptoStore, MlsEngine, PendingProposal,
+    ProcessedMessage,
 };
 use gim_identity::{DeviceList, DeviceSigningKey, RootKey, SignedDeviceCert};
 use openmls::prelude::tls_codec::Deserialize as _;
@@ -307,7 +308,8 @@ fn hub_reads_epoch_and_membership_from_handshakes() {
     );
     assert_eq!(info.added, vec![dave.me.clone()]);
     assert!(info.removed_leaves.is_empty());
-    assert_eq!(info.referenced, 0);
+    assert!(info.references.is_empty());
+    assert_eq!(info.proposal_ref, None);
     alice
         .engine
         .clear_pending_commit(&alice.store, &group())
@@ -323,13 +325,15 @@ fn hub_reads_epoch_and_membership_from_handshakes() {
 }
 
 #[test]
-fn leaving_sends_a_self_remove_proposal_that_another_member_commits() {
+fn leaving_sends_a_self_remove_proposal_that_another_member_commits_by_reference() {
     let (alice, bob, carol) = trio();
     let proposal = carol.engine.leave_group(&carol.store, &group()).unwrap();
     assert_eq!(wire_format(&proposal), WireFormat::PublicMessage);
     let info = inspect_handshake(&proposal).unwrap();
     assert_eq!(info.kind, HandshakeKind::Proposal);
     assert_eq!((info.epoch, info.removed_leaves), (1, vec![2]));
+    let proposal_ref = info.proposal_ref.expect("a proposal has a reference");
+    assert_eq!(proposal_ref.len(), 32);
     for device in [&alice, &bob] {
         match device.process(&proposal).unwrap() {
             ProcessedMessage::Proposal { sender, removed } => {
@@ -338,25 +342,130 @@ fn leaving_sends_a_self_remove_proposal_that_another_member_commits() {
             }
             other => panic!("{other:?}"),
         }
+        assert_eq!(
+            device
+                .engine
+                .pending_proposals(&device.store, &group())
+                .unwrap(),
+            vec![PendingProposal {
+                sender: carol.me.clone(),
+                removed: Some(carol.me.clone()),
+            }]
+        );
     }
-    // The committer drops the stored proposal and removes Carol inline.
+    // Alice commits the stored proposal by reference: the hub resolves the
+    // reference to the proposal it sequenced.
     let out = alice
         .engine
-        .remove_members(&alice.store, &group(), std::slice::from_ref(&carol.me))
-        .unwrap();
-    assert_eq!(inspect_handshake(&out.commit).unwrap().referenced, 0);
+        .commit_pending_proposals(&alice.store, &group())
+        .unwrap()
+        .expect("a pending proposal");
+    assert_eq!((out.epoch, out.welcome.as_ref()), (1, None));
+    assert_eq!(out.removed, vec![carol.me.clone()]);
+    let info = inspect_handshake(&out.commit).unwrap();
+    assert_eq!(info.kind, HandshakeKind::Commit);
+    assert_eq!(info.references, vec![proposal_ref]);
+    assert!(info.removed_leaves.is_empty());
+    assert_eq!(
+        alice
+            .engine
+            .pending_commit_leavers(&alice.store, &group())
+            .unwrap(),
+        vec![carol.me.clone()]
+    );
     alice
         .engine
         .merge_pending_commit(&alice.store, &group())
         .unwrap();
+    assert!(alice
+        .engine
+        .pending_proposals(&alice.store, &group())
+        .unwrap()
+        .is_empty());
     match bob.process(&out.commit).unwrap() {
-        ProcessedMessage::Commit { removed, .. } => assert_eq!(removed, vec![carol.me.clone()]),
+        ProcessedMessage::Commit {
+            removed,
+            left,
+            self_removed,
+            ..
+        } => {
+            assert_eq!(removed, vec![carol.me.clone()]);
+            assert_eq!(left, vec![carol.me.clone()]);
+            assert!(!self_removed);
+        }
         other => panic!("{other:?}"),
     }
+    // The leaver applies the commit to its own proposal and drops the group.
+    match carol.process(&out.commit).unwrap() {
+        ProcessedMessage::Commit {
+            left, self_removed, ..
+        } => {
+            assert_eq!(left, vec![carol.me.clone()]);
+            assert!(self_removed);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(!carol.engine.has_group(&carol.store, &group()).unwrap());
     assert_eq!(
         sorted(alice.engine.group_members(&alice.store, &group()).unwrap()),
         sorted(vec![alice.me.clone(), bob.me.clone()])
     );
+}
+
+#[test]
+fn proposals_of_a_past_epoch_are_ignored() {
+    let (alice, bob, carol) = trio();
+    let proposal = carol.engine.leave_group(&carol.store, &group()).unwrap();
+    // Alice commits something else first: the proposal is stale.
+    let dave = Device::new(4);
+    for device in [&alice, &bob] {
+        device.learn(&[&dave]);
+    }
+    let out = alice
+        .engine
+        .add_members(&alice.store, &group(), &[dave.key_package()])
+        .unwrap();
+    alice
+        .engine
+        .merge_pending_commit(&alice.store, &group())
+        .unwrap();
+    bob.process(&out.commit).unwrap();
+    assert!(matches!(
+        bob.process(&proposal),
+        Err(CryptoError::InvalidInput { .. })
+    ));
+    assert!(bob
+        .engine
+        .pending_proposals(&bob.store, &group())
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        bob.engine
+            .commit_pending_proposals(&bob.store, &group())
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn proposals_of_a_revoked_device_are_rejected() {
+    let (alice, _bob, carol) = trio();
+    let proposal = carol.engine.leave_group(&carol.store, &group()).unwrap();
+    // Carol's device revoked in her latest list.
+    let revoked = carol.device_list().revoke(&carol.me.device_id).unwrap();
+    alice
+        .lists
+        .insert(&carol.me.user_id, &revoked.sign(&carol.root).unwrap())
+        .unwrap();
+    assert!(matches!(
+        alice.process(&proposal),
+        Err(CryptoError::InvalidCredential { .. })
+    ));
+    assert!(alice
+        .engine
+        .pending_proposals(&alice.store, &group())
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
