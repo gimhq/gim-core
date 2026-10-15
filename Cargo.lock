@@ -968,8 +968,17 @@ dependencies = [
 name = "gim-ffi"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "futures-util",
+ "gim-base",
  "gim-common",
  "gim-crypto",
+ "gim-ffi",
+ "gim-proto",
+ "gim-sdk",
+ "gim-sqlite",
+ "gim-ui",
+ "tempfile",
  "thiserror",
  "tokio",
  "uniffi",
@@ -1050,6 +1059,7 @@ dependencies = [
  "gim-common",
  "gim-proto",
  "gim-sdk",
+ "tempfile",
  "thiserror",
  "tokio",
 ]

@@ -40,3 +40,117 @@ impl From<uniffi::UnexpectedUniFFICallbackError> for GimError {
         Self::Internal { reason: e.reason }
     }
 }
+
+impl From<gim_sdk::ClientError> for GimError {
+    fn from(err: gim_sdk::ClientError) -> Self {
+        use gim_sdk::ClientError as E;
+        match err {
+            E::NotLoggedIn => Self::NotRegistered,
+            E::AlreadyLoggedIn | E::InvalidInput(_) => Self::InvalidInput {
+                reason: err.to_string(),
+            },
+            E::CommitConflict(_) => Self::Server {
+                status: 409,
+                reason: err.to_string(),
+            },
+            E::Transport(err) => err.into(),
+            E::Base(err) => err.into(),
+            E::Media(_) => Self::Crypto {
+                reason: err.to_string(),
+            },
+            E::InvalidSession(_) | E::SecretStorage(_) | E::Io(_) => Self::Storage {
+                reason: err.to_string(),
+            },
+            E::Task(_) => Self::Internal {
+                reason: err.to_string(),
+            },
+        }
+    }
+}
+
+impl From<gim_sdk::TransportError> for GimError {
+    fn from(err: gim_sdk::TransportError) -> Self {
+        use gim_sdk::TransportError as E;
+        let reason = err.to_string();
+        match err {
+            E::Network(_) => Self::Network { reason },
+            E::NotFound(_) => Self::NotFound { reason },
+            E::Unauthorized => Self::Server {
+                status: 401,
+                reason,
+            },
+            E::Conflict(_) => Self::Server {
+                status: 409,
+                reason,
+            },
+            E::Gone => Self::Server {
+                status: 410,
+                reason,
+            },
+            E::Server(_) => Self::Server {
+                status: 500,
+                reason,
+            },
+        }
+    }
+}
+
+impl From<gim_base::BaseError> for GimError {
+    fn from(err: gim_base::BaseError) -> Self {
+        use gim_base::BaseError as E;
+        let reason = err.to_string();
+        match err {
+            E::Store(_) => Self::Storage { reason },
+            E::Crypto(_) => Self::Crypto { reason },
+            E::NotFound(_) => Self::NotFound { reason },
+            E::InvalidState(_) => Self::InvalidInput { reason },
+            E::Proto(_) | E::Random(_) => Self::Internal { reason },
+        }
+    }
+}
+
+impl From<gim_base::StoreError> for GimError {
+    fn from(err: gim_base::StoreError) -> Self {
+        Self::Storage {
+            reason: err.to_string(),
+        }
+    }
+}
+
+impl From<gim_ui::UiError> for GimError {
+    fn from(err: gim_ui::UiError) -> Self {
+        match err {
+            gim_ui::UiError::Client(err) => err.into(),
+            gim_ui::UiError::Base(err) => err.into(),
+            gim_ui::UiError::Task(_) => Self::Internal {
+                reason: err.to_string(),
+            },
+        }
+    }
+}
+
+impl From<std::io::Error> for GimError {
+    fn from(err: std::io::Error) -> Self {
+        Self::Storage {
+            reason: err.to_string(),
+        }
+    }
+}
+
+impl From<tokio::task::JoinError> for GimError {
+    fn from(err: tokio::task::JoinError) -> Self {
+        Self::Internal {
+            reason: err.to_string(),
+        }
+    }
+}
+
+/// Parses an id argument; a malformed id is `InvalidInput`.
+pub(crate) fn parse_id<T: TryFrom<String, Error = gim_common::GimCommonError>>(
+    what: &str,
+    value: String,
+) -> Result<T, GimError> {
+    T::try_from(value).map_err(|e| GimError::InvalidInput {
+        reason: format!("{what}: {e}"),
+    })
+}
