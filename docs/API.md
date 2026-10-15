@@ -29,10 +29,16 @@ milliseconds (`u64`). Counts and indices are `u32`.
 
 1. **Create the client** once per process:
    `createClient(ClientConfig(serverUrl), hooks)`. `serverUrl` must be an `http://` or `https://`
-   URL with a host, otherwise `InvalidInput`. `hooks` implements `PlatformHooks` (below).
+   URL with a host, otherwise `InvalidInput`. `hooks` implements `PlatformHooks` (below). If
+   `localStateReset()` is `true`, an existing local database could not be opened (its key was
+   lost, or it is incompatible) and was discarded with the session and history: show onboarding
+   and tell the user that local history is gone. A keystore that cannot be read fails
+   `createClient` with the hook's error instead; retry once it is available (e.g. after the first
+   unlock).
 2. **Session**: `session()` returns the persisted `Session`, or `null`/`nil` on first launch. In
-   that case show onboarding and call `register(handle, displayName)`, which returns the new
-   `Session`. Most other calls fail with `NotRegistered` until a session exists.
+   that case show onboarding (see *Identity and devices*): create a new identity, link this device
+   to an existing one, or restore from the recovery code. Most other calls fail with
+   `NotRegistered` until a session exists. `Session.handle` is empty until `claimHandle`.
 3. **Sync**: call `startSync()` when the app comes to the foreground and `stopSync()` when it goes
    to the background. Sync reconnects on its own: after a failure it reports `Offline` and retries
    with exponential backoff (up to 60 s). Report reachability changes with
@@ -41,7 +47,35 @@ milliseconds (`u64`). Counts and indices are `u32`.
 4. **Listeners**: subscribe with `chatList(listener)`, `timeline(chatId).addListener(listener)`,
    `connectionState(listener)` and `typing(chatId, listener)`. Each returns a `TaskHandle`.
 5. **Sign out**: `signOut()` stops sync and deletes the session, the local database and the
-   keystore secrets. Create a new client afterwards.
+   keystore secrets (session, root key, device key, database key). Create a new client
+   afterwards.
+
+## Identity and devices
+
+A user is identified by its root key; each device has its own signing key certified in the
+user's signed DeviceList. Handles are optional directory entries pointing at a user id.
+
+- **New identity**: `createIdentity(displayName)` returns the recovery code. It is stored
+  nowhere: show it once and ask the user to write it down. Then optionally `claimHandle(handle)`.
+- **Link a new device** (the user has another signed-in device):
+  1. New device: `link = startLink(hubs)`, show `link.qrString()` as a QR code, call
+     `sas = waitLink(link)` (waits up to 10 minutes).
+  2. Old device: scan the QR code, `approval = approveLink(qrString)`, show `approval.sas()`.
+  3. The user compares the two six-digit codes (`"123 456"`) and confirms on **both** devices:
+     old device `confirmApproval(approval, accepted)`, new device `confirmLink(accepted)`.
+     On a mismatch, `confirmApproval(approval, false)` revokes the new device and
+     `confirmLink(false)` wipes it like `signOut()` (create a new client afterwards).
+
+  After both confirmed, the new device joins the user's chats as soon as it syncs.
+  A `LinkSession` accepts one bundle; start a new one after a failed `waitLink`.
+- **Restore** after losing every device: `restoreFromRecovery(userId, recoveryCode,
+  revokeOthers)` on a fresh client. Pass `revokeOthers = true`: keeping the old devices needs the
+  user's DeviceList cached locally, which a fresh install never has, so `false` fails with
+  `InvalidInput`. Chats are not rejoined automatically; other members (or another own device)
+  must add this device again.
+- **Devices**: `devices()` lists the user's devices, `userDevices(userId)` another user's, and
+  `revokeDevice(deviceId)` revokes another own device (it is removed from every chat and can no
+  longer sign in).
 
 ## Platform hooks
 
@@ -50,7 +84,7 @@ implementations fast and thread-safe.
 
 | Method | Contract |
 |---|---|
-| `secureStoreGet(key)` | Read a secret from Keychain / Android Keystore; `null`/`nil` if absent. |
+| `secureStoreGet(key)` | Read a secret from Keychain / Android Keystore; `null`/`nil` if absent. Throw `GimError` if the keystore cannot be read (e.g. locked): gim-core then fails the call rather than treating the secret as missing, so it never replaces the database key. |
 | `secureStoreSet(key, value)` | Write or replace a secret; throw `GimError` on failure. |
 | `secureStoreDelete(key)` | Delete a secret; a missing key is not an error. |
 | `dataDir()` | Absolute path of an app-private directory. The SQLite database and media cache live under it. Must be stable across launches. |
@@ -61,7 +95,21 @@ implementations fast and thread-safe.
 | Method | Returns | Notes |
 |---|---|---|
 | `session()` | `Session?` | |
-| `register(handle, displayName)` | `Session` | |
+| `userId()` | `String?` | Synchronous. `null`/`nil` without a session. |
+| `localStateReset()` | `Boolean` | Synchronous. Whether opening this client discarded an existing local database. |
+| `createIdentity(displayName)` | recovery code | Creates the user with this device as its first one and signs in. |
+| `restoreFromRecovery(userId, recoveryCode, revokeOthers)` | | See *Identity and devices*. `InvalidInput` for a malformed code, or `revokeOthers == false` without a cached DeviceList. |
+| `startLink(hubs)` | `LinkSession` | Synchronous. New device; `LinkSession.qrString()`. |
+| `waitLink(link)` | SAS | New device; signs in once the bundle arrives. |
+| `confirmLink(accepted)` | | New device; `false` wipes it like `signOut()`. |
+| `approveLink(qrString)` | `PendingApproval` | Old device; `PendingApproval.sas()`, `.deviceId()`. |
+| `confirmApproval(approval, accepted)` | | Old device; `true` adds the new device to all chats, `false` revokes it. |
+| `devices()` | `[DeviceInfo]` | Own devices, including revoked ones. |
+| `userDevices(userId)` | `[DeviceInfo]` | Another user's devices; empty for an unknown user. |
+| `revokeDevice(deviceId)` | | `InvalidInput` for the current device. |
+| `setDisplayName(name)` | | Synced to the user's other devices and announced to every joined chat. `InvalidInput` if empty. |
+| `claimHandle(handle)` | | `Server(409)` if taken. |
+| `releaseHandle()` | | `InvalidInput` if no handle is claimed. |
 | `signOut()` | | |
 | `startSync()` / `stopSync()` | | |
 | `setNetworkReachable(reachable)` | | Synchronous, never throws. Becoming reachable reconnects and retries the outbox at once; becoming unreachable changes nothing by itself. |
@@ -77,7 +125,8 @@ implementations fast and thread-safe.
 | `react(chatId, messageId, emoji)`, `unreact(chatId, messageId, emoji)` | | |
 | `retrySend(chatId, messageId)`, `cancelSend(chatId, messageId)` | | For messages in `SendState.Failed`. |
 | `markRead(chatId, upToMessageId)` | | Also sends a read receipt. M1 marks the whole chat read; `upToMessageId` is only validated. |
-| `setTyping(chatId, active)` | | |
+| `setTyping(chatId, active)` | | Call with `true` on each keystroke (sent at most every 3 s) and `false` when typing stops. |
+| `stopTyping(chatId)` | | Same as `setTyping(chatId, false)`: call when the input is cleared, the message sent or the chat is left. Does nothing unless typing was reported. |
 | `fetchMedia(chatId, messageId, destPath)` | file path | Downloads and decrypts the attachment. |
 | `fetchThumbnail(chatId, messageId, destPath)` | file path? | `null`/`nil` if the media has no thumbnail. |
 | `chatList(listener)` | `TaskHandle` | |
@@ -87,6 +136,9 @@ implementations fast and thread-safe.
 
 A message id is the client id chosen when the message is queued; it stays the same from local echo
 to delivery, so native code can key views by it.
+
+`DeviceInfo` is `deviceId`, `createdAtMs` (when the device was certified; 0 for revoked devices),
+`isCurrent` (this client's device) and `revoked`.
 
 `MediaRef` identifies an attachment (`chatId`, `messageId`, `mime`, `size`, `hasThumbnail`).
 Encryption keys and blob ids never leave Rust; pass the ids to `fetchMedia` / `fetchThumbnail`.
@@ -107,7 +159,9 @@ only, in seq order among the messages, at the time the change was applied on thi
 `paginateBackwards` pages through locally stored history first, then through the server history:
 messages this device cannot decrypt (sent before it joined, or already read once and removed
 locally) are skipped, and it returns `false` once nothing older is readable. `MessageItem.sendState` is set only for own
-messages: `Pending → Sent → Delivered → Read`, or `Failed(reason)`.
+messages: `Pending → Sent → Delivered → Read`, or `Failed(reason)`. `Delivered` and `Read` are
+group ticks: they need a receipt from **every** device of **every** other member, so one
+recipient device that has not reported keeps the message at `Sent` (or `Delivered`).
 
 ## Listeners and threading
 
@@ -149,12 +203,12 @@ The chat list is ordered most recently updated first; a timeline oldest first.
 | `GimError` | Meaning | Typical handling |
 |---|---|---|
 | `Network(reason)` | Server unreachable or connection lost. | Show offline state; retry later. |
-| `NotRegistered` | No session. | Go to onboarding. |
-| `InvalidInput(reason)` | Argument rejected locally. | Bug or validation message. |
+| `NotRegistered` | No session, signed out, or this device was revoked. | Go to onboarding. |
+| `InvalidInput(reason)` | Argument rejected locally, the call does not fit the state (e.g. `createIdentity` with a session), or the payload is too large for the hub. | Bug or validation message. |
 | `NotFound(reason)` | Unknown chat, message, user or media. | Refresh the screen. |
 | `Crypto(reason)` | MLS or media decryption failure. | Report; show placeholder. |
 | `Storage(reason)` | Local database or file system failure. | Report; may need disk space. |
-| `Server(status, reason)` | Non-success HTTP status from gim-server. | Show generic error. |
+| `Server(status, reason)` | Non-success HTTP status from the hub. | Show generic error. |
 | `Cancelled` | Cancelled by `stopSync`, `signOut` or `cancelSend`. | Ignore. |
 | `NotImplemented` | In the contract but not implemented in this build. | Development builds only. |
 | `Internal(reason)` | Bug, or an unexpected exception thrown by a platform hook. | Report. |

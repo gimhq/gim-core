@@ -4,9 +4,9 @@
 use gim_ui::VectorDiff;
 
 use crate::{
-    ChatKind, ChatListDiff, ChatSummary, MediaRef, MembershipChangeKind, MessageContent,
-    MessageItem, MessagePreview, ReactionGroup, ReplyPreview, SendState, TimelineDiff,
-    TimelineItem, UserProfile,
+    ChatKind, ChatListDiff, ChatSummary, DeviceInfo, MediaRef, MembershipChangeKind,
+    MessageContent, MessageItem, MessagePreview, ReactionGroup, ReplyPreview, SendState,
+    TimelineDiff, TimelineItem, UserProfile,
 };
 
 /// Maps a gim-ui diff onto an FFI diff enum with the same variants.
@@ -74,6 +74,17 @@ impl From<gim_base::model::UserInfo> for UserProfile {
             user_id: u.user_id.into(),
             handle: u.handle,
             display_name: u.display_name,
+        }
+    }
+}
+
+impl From<gim_sdk::DeviceInfo> for DeviceInfo {
+    fn from(d: gim_sdk::DeviceInfo) -> Self {
+        Self {
+            device_id: d.device_id.into(),
+            created_at_ms: d.created_at,
+            is_current: d.is_current,
+            revoked: d.revoked,
         }
     }
 }

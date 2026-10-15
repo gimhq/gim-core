@@ -6,8 +6,20 @@
 pub struct Session {
     pub user_id: String,
     pub device_id: String,
+    /// Empty until `claim_handle`.
     pub handle: String,
     pub display_name: String,
+}
+
+/// A device of a user, from the user's signed DeviceList.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct DeviceInfo {
+    pub device_id: String,
+    /// When the device was certified; 0 for revoked devices.
+    pub created_at_ms: u64,
+    /// This client's device.
+    pub is_current: bool,
+    pub revoked: bool,
 }
 
 /// Public profile of a user.
@@ -145,9 +157,9 @@ pub enum SendState {
     Pending,
     /// Accepted by the server.
     Sent,
-    /// Delivered to at least one recipient device.
+    /// Delivered to every device of every other member.
     Delivered,
-    /// Read by at least one recipient.
+    /// Read on every device of every other member.
     Read,
     /// Gave up; `retry_send` or `cancel_send`.
     Failed { reason: String },
