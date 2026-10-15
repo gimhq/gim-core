@@ -6,9 +6,11 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use tokio::task::JoinHandle;
+
 use gim_base::model::{
-    AfterCommit, ChatKind, DepartedMember, IncomingEvent, Membership, MessageKind, PendingCommit,
-    PendingWelcome, StateChange, UserInfo,
+    AfterCommit, ChatKind, DepartedMember, Membership, MessageKind, PendingCommit, PendingWelcome,
+    StateChange, UserInfo,
 };
 use gim_base::{new_message_id, BaseClient, BaseError, StateReader, StateStore, StoreTxn};
 use gim_common::{now_ms, ClientId, DeviceRef, GroupId, MessageId, UserId};
@@ -18,6 +20,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex, Notify};
 
 use crate::send::TypingState;
+use crate::stream::ConnectionState;
+use crate::sync::SyncSettings;
 use crate::transport::{AccessToken, OutgoingMessage, PostError, Transport, TransportError};
 use crate::{ClientError, Result, SecretStorage};
 
@@ -33,6 +37,8 @@ pub const SESSION_SECRET_KEY: &str = "gim.session";
 
 /// Buffered [`StateChange`]s per subscriber before it lags.
 const CHANGES_CAPACITY: usize = 1024;
+/// Buffered [`ConnectionState`]s per subscriber before it lags.
+const CONNECTION_CAPACITY: usize = 64;
 /// Delay before re-posting a commit after an unknown outcome, times the
 /// attempt number.
 const COMMIT_REPOST_DELAY: Duration = Duration::from_millis(100);
@@ -51,6 +57,7 @@ pub struct ClientBuilder<S> {
     transport: Arc<dyn Transport>,
     secrets: Arc<dyn SecretStorage>,
     data_dir: Option<PathBuf>,
+    sync_settings: SyncSettings,
 }
 
 impl<S: StateStore + 'static> ClientBuilder<S> {
@@ -64,7 +71,14 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
             transport,
             secrets,
             data_dir: None,
+            sync_settings: SyncSettings::default(),
         }
+    }
+
+    /// Timing of the sync loop; see [`SyncSettings`].
+    pub fn sync_settings(mut self, settings: SyncSettings) -> Self {
+        self.sync_settings = settings;
+        self
     }
 
     /// App-private directory; temporary media files (encrypted uploads,
@@ -100,6 +114,11 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
                 outbox_wake: Notify::new(),
                 force_flush: AtomicBool::new(false),
                 typing: Default::default(),
+                sync_settings: self.sync_settings,
+                sync_task: Default::default(),
+                sync_wake: Notify::new(),
+                connection: std::sync::Mutex::new(ConnectionState::Offline),
+                connection_changes: broadcast::channel(CONNECTION_CAPACITY).0,
             }),
         })
     }
@@ -167,6 +186,12 @@ pub(crate) struct Inner<S> {
     /// Set when the network came back: the next pass ignores backoff.
     pub(crate) force_flush: AtomicBool,
     pub(crate) typing: std::sync::Mutex<HashMap<GroupId, TypingState>>,
+    pub(crate) sync_settings: SyncSettings,
+    pub(crate) sync_task: std::sync::Mutex<Option<JoinHandle<Result<()>>>>,
+    /// Cuts the sync loop's reconnect wait short.
+    pub(crate) sync_wake: Notify,
+    pub(crate) connection: std::sync::Mutex<ConnectionState>,
+    pub(crate) connection_changes: broadcast::Sender<ConnectionState>,
 }
 
 #[derive(Clone)]
@@ -277,6 +302,7 @@ impl<S: StateStore + 'static> Client<S> {
                 session.device
             )));
         }
+        self.seed_device_directory(&session).await?;
         self.set_session(session.clone());
         self.clean_outgoing().await?;
         // Finish what the previous run left: re-post its pending commits
@@ -425,19 +451,6 @@ impl<S: StateStore + 'static> Client<S> {
     /// outbox sender. The returned id is also the `client_id`.
     pub async fn send(&self, group_id: &GroupId, content: Content) -> Result<MessageId> {
         self.send_with_reply(group_id, content, None).await
-    }
-
-    /// Fetches the pending events once (no waiting), applies them, persists
-    /// the cursor and replenishes KeyPackages if the server asked for it.
-    /// Returns the applied changes, which are also broadcast.
-    pub async fn sync_once(&self) -> Result<Vec<StateChange>> {
-        let session = self.require_session()?;
-        let _guard = self.inner.group_lock.lock().await;
-        let changes = self.sync_locked(&session).await?;
-        self.remove_departed(&session).await?;
-        // Delivered receipts may have been queued.
-        self.wake_outbox();
-        Ok(changes)
     }
 
     /// Generates and uploads [`KEY_PACKAGE_BATCH`] one-time KeyPackages.
@@ -649,7 +662,7 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Settles every pending commit; stops at the first error.
-    async fn resolve_pending_commits(&self, session: &Session) -> Result<()> {
+    pub(crate) async fn resolve_pending_commits(&self, session: &Session) -> Result<()> {
         let pending = self.run(|store, _| Ok(store.pending_commits()?)).await?;
         for commit in pending {
             self.resolve_pending_commit(session, &commit.group_id)
@@ -704,7 +717,7 @@ impl<S: StateStore + 'static> Client<S> {
     /// not race each other; the others keep the candidates until the
     /// removal commit reaches them. Candidates no longer in the tree, or of
     /// groups this device is not in, are dropped.
-    async fn remove_departed(&self, session: &Session) -> Result<()> {
+    pub(crate) async fn remove_departed(&self, session: &Session) -> Result<()> {
         let own = session.device.clone();
         let to_remove = self
             .run(move |store, engine| {
@@ -773,56 +786,9 @@ impl<S: StateStore + 'static> Client<S> {
         Ok(())
     }
 
-    async fn sync_locked(&self, session: &Session) -> Result<Vec<StateChange>> {
-        // An own commit must be merged before later commits are processed.
-        self.resolve_pending_commits(session).await?;
-        let cursor = self.run(|store, _| Ok(store.global_cursor()?)).await?;
-        let batch = self
-            .inner
-            .transport
-            .fetch_events(&session.token, cursor, Duration::ZERO)
-            .await?;
-        let joined: BTreeSet<GroupId> = batch
-            .events
-            .iter()
-            .filter_map(|event| match event {
-                IncomingEvent::Message(m)
-                    if m.kind == MessageKind::Welcome && m.sender != session.device =>
-                {
-                    Some(m.group_id.clone())
-                }
-                _ => None,
-            })
-            .collect();
-        let base = BaseClient::new(session.device.clone());
-        let events = batch.events;
-        let mut changes = self
-            .run(move |store, engine| {
-                let mut changes = Vec::new();
-                for event in events {
-                    changes.extend(base.apply(store, engine, event)?);
-                }
-                Ok(changes)
-            })
-            .await?;
-        for group_id in joined {
-            changes.extend(self.sync_chat_kind(session, group_id).await?);
-        }
-        if cursor != Some(batch.next_cursor) {
-            let next = batch.next_cursor;
-            self.run(move |store, _| store.transaction(|txn| Ok(txn.set_global_cursor(next)?)))
-                .await?;
-        }
-        self.emit(&changes);
-        if changes.contains(&StateChange::KeyPackagesLow) {
-            self.upload_key_packages(session).await?;
-        }
-        Ok(changes)
-    }
-
     /// Chats joined from a Welcome start as `Group`; takes the kind from the
     /// server.
-    async fn sync_chat_kind(
+    pub(crate) async fn sync_chat_kind(
         &self,
         session: &Session,
         group_id: GroupId,
@@ -853,7 +819,7 @@ impl<S: StateStore + 'static> Client<S> {
         .await
     }
 
-    async fn upload_key_packages(&self, session: &Session) -> Result<()> {
+    pub(crate) async fn upload_key_packages(&self, session: &Session) -> Result<()> {
         let key_packages = self
             .run(|store, engine| {
                 store.transaction(|txn| Ok(engine.generate_key_packages(&*txn, KEY_PACKAGE_BATCH)?))

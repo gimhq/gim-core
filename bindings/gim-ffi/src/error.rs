@@ -45,7 +45,7 @@ impl From<gim_sdk::ClientError> for GimError {
     fn from(err: gim_sdk::ClientError) -> Self {
         use gim_sdk::ClientError as E;
         match err {
-            E::NotLoggedIn => Self::NotRegistered,
+            E::NotLoggedIn | E::NotRegistered => Self::NotRegistered,
             E::AlreadyLoggedIn | E::InvalidInput(_) => Self::InvalidInput {
                 reason: err.to_string(),
             },
