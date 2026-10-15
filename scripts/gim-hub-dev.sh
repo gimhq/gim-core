@@ -123,7 +123,9 @@ start() {
             build
         fi
         echo "starting $name on $net" >&2
+        # Disposable: the hub's data lives in memory and goes with it.
         docker run -d --rm --label ai-agent=true --network "$net" --name "$name" \
+            --tmpfs /data:rw,uid=10001,gid=10001,mode=0700 \
             "$image" >/dev/null
     fi
 

@@ -124,11 +124,19 @@ impl Transport for FaultyHub {
         self.inner.fetch_link_bundle(link_id, wait).await
     }
 
-    async fn device_list(&self, t: &AccessToken, u: &UserId) -> TransportResult<Option<Vec<u8>>> {
+    async fn device_list(
+        &self,
+        t: Option<&AccessToken>,
+        u: &UserId,
+    ) -> TransportResult<Option<Vec<u8>>> {
         self.inner.device_list(t, u).await
     }
 
-    async fn user(&self, t: &AccessToken, u: &UserId) -> TransportResult<Option<UserRecord>> {
+    async fn user(
+        &self,
+        t: Option<&AccessToken>,
+        u: &UserId,
+    ) -> TransportResult<Option<UserRecord>> {
         self.inner.user(t, u).await
     }
 
