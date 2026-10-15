@@ -41,6 +41,13 @@ openmls_memory_storage = "=0.6.0"
 openmls_rust_crypto = "=0.6.0"
 openmls_sqlite_storage = "=0.3.0"
 openmls_traits = "=0.6.0"
+# rustls with the ring provider and webpki roots: no aws-lc/cmake/OpenSSL in
+# Android/iOS cross-compiles.
+reqwest = { version = "=0.12.28", default-features = false, features = [
+    "json",
+    "rustls-tls-webpki-roots",
+    "stream",
+] }
 rusqlite = { version = "=0.37.0", features = ["bundled"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_bytes = "=0.11.19"
@@ -50,8 +57,11 @@ subtle = "=2.6.1"
 tempfile = "=3.27.0"
 thiserror = "=2.0.21"
 tokio = "=1.53.1"
+tokio-util = { version = "=0.7.18", default-features = false, features = ["io"] }
+tracing = { version = "=0.1.44", default-features = false, features = ["std"] }
 uniffi = "=0.32.2"
 url = "=2.5.8"
+wiremock = "=0.6.5"
 
 [profile.release]
 lto = true
