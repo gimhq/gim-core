@@ -9,6 +9,7 @@ members = [
     "crates/gim-sdk",
     "crates/gim-ui",
     "bindings/gim-ffi",
+    "apps/gim-cli",
     "uniffi-bindgen",
     "testing/gim-test",
     "testing/gim-integration-testing",
@@ -41,6 +42,7 @@ axum = { version = "=0.8.9", default-features = false, features = [
 ] }
 base64 = "=0.22.1"
 ciborium = "=0.2.2"
+clap = { version = "=4.6.7", features = ["derive", "env"] }
 eyeball = "=0.8.8"
 eyeball-im = "=0.9.1"
 futures-core = "=0.3.34"
