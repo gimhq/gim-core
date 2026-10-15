@@ -5,11 +5,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use gim_base::model::{
-    ChatKind, ChatMember, Membership, MessageContent, MessageKind, OutboxKind, PendingMedia,
-    PreparedPayload, SendState,
+    AfterCommit, ChatKind, ChatMember, Membership, MessageContent, MessageKind, OutboxKind,
+    PendingCommit, PendingMedia, PendingWelcome, PreparedPayload, SendState,
 };
 use gim_base::StoreError;
-use gim_common::{ClientId, DeviceRef, MessageId, UserId};
+use gim_common::{ClientId, DeviceRef, GroupId, MessageId, UserId};
 use gim_proto::envelope::{self, MediaInfo, ReceiptKind, MEDIA_KEY_LEN};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -376,6 +376,78 @@ impl From<MessageKindRow> for MessageKind {
             MessageKindRow::Commit => Self::Commit,
             MessageKindRow::Welcome => Self::Welcome,
             MessageKindRow::Application => Self::Application,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PendingCommitData {
+    pub client_id: ClientId,
+    pub epoch: u64,
+    pub payload: serde_bytes::ByteBuf,
+    pub merged: bool,
+    pub then: AfterCommitRow,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AfterCommitRow {
+    Nothing,
+    Welcome {
+        client_id: ClientId,
+        epoch: u64,
+        payload: serde_bytes::ByteBuf,
+        recipients: Vec<DeviceRef>,
+    },
+    RemoveFromFanOut(Vec<DeviceRef>),
+}
+
+impl From<&PendingCommit> for PendingCommitData {
+    fn from(p: &PendingCommit) -> Self {
+        Self {
+            client_id: p.client_id.clone(),
+            epoch: p.epoch,
+            payload: serde_bytes::ByteBuf::from(p.payload.clone()),
+            merged: p.merged,
+            then: match &p.then {
+                AfterCommit::Nothing => AfterCommitRow::Nothing,
+                AfterCommit::Welcome(w) => AfterCommitRow::Welcome {
+                    client_id: w.client_id.clone(),
+                    epoch: w.epoch,
+                    payload: serde_bytes::ByteBuf::from(w.payload.clone()),
+                    recipients: w.recipients.clone(),
+                },
+                AfterCommit::RemoveFromFanOut(devices) => {
+                    AfterCommitRow::RemoveFromFanOut(devices.clone())
+                }
+            },
+        }
+    }
+}
+
+impl PendingCommitData {
+    pub(crate) fn into_model(self, group_id: GroupId) -> PendingCommit {
+        PendingCommit {
+            group_id,
+            client_id: self.client_id,
+            epoch: self.epoch,
+            payload: self.payload.into_vec(),
+            merged: self.merged,
+            then: match self.then {
+                AfterCommitRow::Nothing => AfterCommit::Nothing,
+                AfterCommitRow::Welcome {
+                    client_id,
+                    epoch,
+                    payload,
+                    recipients,
+                } => AfterCommit::Welcome(PendingWelcome {
+                    client_id,
+                    epoch,
+                    payload: payload.into_vec(),
+                    recipients,
+                }),
+                AfterCommitRow::RemoveFromFanOut(devices) => AfterCommit::RemoveFromFanOut(devices),
+            },
         }
     }
 }

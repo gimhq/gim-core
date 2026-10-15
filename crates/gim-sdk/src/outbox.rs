@@ -97,6 +97,7 @@ impl<S: StateStore + 'static> Client<S> {
         let id = entry.message_id.clone();
         let base = BaseClient::new(session.device.clone());
         if let OutboxKind::MediaUpload(pending) = entry.kind {
+            let local_path = pending.local_path.clone();
             let media = match self.upload_media(session, &id, pending).await {
                 Ok(media) => media,
                 Err(err) => return self.record_failure(&base, &id, err).await,
@@ -106,7 +107,10 @@ impl<S: StateStore + 'static> Client<S> {
                 .run(move |store, _| b.complete_media_upload(store, &mid, media))
                 .await
             {
-                Ok(changes) => self.emit(&changes),
+                Ok(changes) => {
+                    self.emit(&changes);
+                    self.remove_outgoing(&local_path).await;
+                }
                 // Cancelled while uploading.
                 Err(ClientError::Base(BaseError::NotFound(_))) => return Ok(true),
                 Err(err) => return Err(err),
@@ -197,15 +201,24 @@ impl<S: StateStore + 'static> Client<S> {
         Ok(())
     }
 
-    /// Drops an unsent message. A payload already posted may still be
-    /// delivered.
+    /// Drops an unsent message, and the copy of its file if it is a media
+    /// upload under [`Client::outgoing_dir`]. A payload already posted may
+    /// still be delivered.
     pub async fn cancel_send(&self, message_id: &MessageId) -> Result<()> {
         let session = self.require_session()?;
         // Not in the middle of posting it.
         let _guard = self.inner.group_lock.lock().await;
         let (id, base) = (message_id.clone(), BaseClient::new(session.device));
-        let changes = self.run(move |store, _| base.cancel(store, &id)).await?;
+        let (changes, kind) = self
+            .run(move |store, _| {
+                let kind = store.outbox_entry(&id)?.map(|entry| entry.kind);
+                Ok((base.cancel(store, &id)?, kind))
+            })
+            .await?;
         self.emit(&changes);
+        if let Some(OutboxKind::MediaUpload(pending)) = kind {
+            self.remove_outgoing(&pending.local_path).await;
+        }
         Ok(())
     }
 }
