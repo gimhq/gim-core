@@ -410,6 +410,11 @@ void uniffi_gim_core_fn_free_gimclient(uint64_t handle, RustCallStatus *_Nonnull
 uint64_t uniffi_gim_core_fn_method_gimclient_add_members(uint64_t ptr, RustBuffer chat_id, RustBuffer user_ids
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_APPROVE_LINK
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_APPROVE_LINK
+uint64_t uniffi_gim_core_fn_method_gimclient_approve_link(uint64_t ptr, RustBuffer qr_string
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_CANCEL_SEND
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_CANCEL_SEND
 uint64_t uniffi_gim_core_fn_method_gimclient_cancel_send(uint64_t ptr, RustBuffer chat_id, RustBuffer message_id
@@ -423,6 +428,21 @@ uint64_t uniffi_gim_core_fn_method_gimclient_chat_list(uint64_t ptr, uint64_t li
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_CHAT_MEMBERS
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_CHAT_MEMBERS
 uint64_t uniffi_gim_core_fn_method_gimclient_chat_members(uint64_t ptr, RustBuffer chat_id
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_CLAIM_HANDLE
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_CLAIM_HANDLE
+uint64_t uniffi_gim_core_fn_method_gimclient_claim_handle(uint64_t ptr, RustBuffer handle
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_CONFIRM_APPROVAL
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_CONFIRM_APPROVAL
+uint64_t uniffi_gim_core_fn_method_gimclient_confirm_approval(uint64_t ptr, uint64_t approval, int8_t accepted
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_CONFIRM_LINK
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_CONFIRM_LINK
+uint64_t uniffi_gim_core_fn_method_gimclient_confirm_link(uint64_t ptr, int8_t accepted
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_CONNECTION_STATE
@@ -450,6 +470,11 @@ uint64_t uniffi_gim_core_fn_method_gimclient_create_identity(uint64_t ptr, RustB
 uint64_t uniffi_gim_core_fn_method_gimclient_delete_message(uint64_t ptr, RustBuffer chat_id, RustBuffer message_id
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_DEVICES
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_DEVICES
+uint64_t uniffi_gim_core_fn_method_gimclient_devices(uint64_t ptr
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_EDIT_MESSAGE
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_EDIT_MESSAGE
 uint64_t uniffi_gim_core_fn_method_gimclient_edit_message(uint64_t ptr, RustBuffer chat_id, RustBuffer message_id, RustBuffer new_body
@@ -475,6 +500,11 @@ uint64_t uniffi_gim_core_fn_method_gimclient_find_user(uint64_t ptr, RustBuffer 
 uint64_t uniffi_gim_core_fn_method_gimclient_leave_chat(uint64_t ptr, RustBuffer chat_id
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_LOCAL_STATE_RESET
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_LOCAL_STATE_RESET
+int8_t uniffi_gim_core_fn_method_gimclient_local_state_reset(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_MARK_READ
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_MARK_READ
 uint64_t uniffi_gim_core_fn_method_gimclient_mark_read(uint64_t ptr, RustBuffer chat_id, RustBuffer up_to_message_id
@@ -485,14 +515,29 @@ uint64_t uniffi_gim_core_fn_method_gimclient_mark_read(uint64_t ptr, RustBuffer 
 uint64_t uniffi_gim_core_fn_method_gimclient_react(uint64_t ptr, RustBuffer chat_id, RustBuffer message_id, RustBuffer emoji
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_RELEASE_HANDLE
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_RELEASE_HANDLE
+uint64_t uniffi_gim_core_fn_method_gimclient_release_handle(uint64_t ptr
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_REMOVE_MEMBER
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_REMOVE_MEMBER
 uint64_t uniffi_gim_core_fn_method_gimclient_remove_member(uint64_t ptr, RustBuffer chat_id, RustBuffer user_id
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_RESTORE_FROM_RECOVERY
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_RESTORE_FROM_RECOVERY
+uint64_t uniffi_gim_core_fn_method_gimclient_restore_from_recovery(uint64_t ptr, RustBuffer user_id, RustBuffer recovery_code, int8_t revoke_others
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_RETRY_SEND
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_RETRY_SEND
 uint64_t uniffi_gim_core_fn_method_gimclient_retry_send(uint64_t ptr, RustBuffer chat_id, RustBuffer message_id
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_REVOKE_DEVICE
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_REVOKE_DEVICE
+uint64_t uniffi_gim_core_fn_method_gimclient_revoke_device(uint64_t ptr, RustBuffer device_id
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_SEND_MEDIA
@@ -508,6 +553,11 @@ uint64_t uniffi_gim_core_fn_method_gimclient_send_text(uint64_t ptr, RustBuffer 
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_SESSION
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_SESSION
 uint64_t uniffi_gim_core_fn_method_gimclient_session(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_SET_DISPLAY_NAME
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_SET_DISPLAY_NAME
+uint64_t uniffi_gim_core_fn_method_gimclient_set_display_name(uint64_t ptr, RustBuffer name
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_SET_GROUP_INFO
@@ -530,6 +580,11 @@ uint64_t uniffi_gim_core_fn_method_gimclient_set_typing(uint64_t ptr, RustBuffer
 uint64_t uniffi_gim_core_fn_method_gimclient_sign_out(uint64_t ptr
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_START_LINK
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_START_LINK
+uint64_t uniffi_gim_core_fn_method_gimclient_start_link(uint64_t ptr, RustBuffer hubs, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_START_SYNC
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_START_SYNC
 uint64_t uniffi_gim_core_fn_method_gimclient_start_sync(uint64_t ptr
@@ -538,6 +593,11 @@ uint64_t uniffi_gim_core_fn_method_gimclient_start_sync(uint64_t ptr
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_STOP_SYNC
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_STOP_SYNC
 uint64_t uniffi_gim_core_fn_method_gimclient_stop_sync(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_STOP_TYPING
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_STOP_TYPING
+uint64_t uniffi_gim_core_fn_method_gimclient_stop_typing(uint64_t ptr, RustBuffer chat_id
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_TIMELINE
@@ -553,6 +613,21 @@ uint64_t uniffi_gim_core_fn_method_gimclient_typing(uint64_t ptr, RustBuffer cha
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_UNREACT
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_UNREACT
 uint64_t uniffi_gim_core_fn_method_gimclient_unreact(uint64_t ptr, RustBuffer chat_id, RustBuffer message_id, RustBuffer emoji
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_USER_DEVICES
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_USER_DEVICES
+uint64_t uniffi_gim_core_fn_method_gimclient_user_devices(uint64_t ptr, RustBuffer user_id
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_USER_ID
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_USER_ID
+RustBuffer uniffi_gim_core_fn_method_gimclient_user_id(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_WAIT_LINK
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_WAIT_LINK
+uint64_t uniffi_gim_core_fn_method_gimclient_wait_link(uint64_t ptr, uint64_t link
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_CLONE_TYPINGLISTENER
@@ -613,6 +688,41 @@ RustBuffer uniffi_gim_core_fn_method_platformhooks_data_dir(uint64_t ptr, RustCa
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_PLATFORMHOOKS_IS_NETWORK_REACHABLE
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_PLATFORMHOOKS_IS_NETWORK_REACHABLE
 int8_t uniffi_gim_core_fn_method_platformhooks_is_network_reachable(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_CLONE_LINKSESSION
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_CLONE_LINKSESSION
+uint64_t uniffi_gim_core_fn_clone_linksession(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_FREE_LINKSESSION
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_FREE_LINKSESSION
+void uniffi_gim_core_fn_free_linksession(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_LINKSESSION_QR_STRING
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_LINKSESSION_QR_STRING
+RustBuffer uniffi_gim_core_fn_method_linksession_qr_string(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_CLONE_PENDINGAPPROVAL
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_CLONE_PENDINGAPPROVAL
+uint64_t uniffi_gim_core_fn_clone_pendingapproval(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_FREE_PENDINGAPPROVAL
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_FREE_PENDINGAPPROVAL
+void uniffi_gim_core_fn_free_pendingapproval(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_PENDINGAPPROVAL_DEVICE_ID
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_PENDINGAPPROVAL_DEVICE_ID
+RustBuffer uniffi_gim_core_fn_method_pendingapproval_device_id(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_PENDINGAPPROVAL_SAS
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_PENDINGAPPROVAL_SAS
+RustBuffer uniffi_gim_core_fn_method_pendingapproval_sas(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_CLONE_TASKHANDLE
@@ -993,6 +1103,12 @@ uint16_t uniffi_gim_core_checksum_method_gimclient_add_members(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_APPROVE_LINK
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_APPROVE_LINK
+uint16_t uniffi_gim_core_checksum_method_gimclient_approve_link(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_CANCEL_SEND
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_CANCEL_SEND
 uint16_t uniffi_gim_core_checksum_method_gimclient_cancel_send(void
@@ -1008,6 +1124,24 @@ uint16_t uniffi_gim_core_checksum_method_gimclient_chat_list(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_CHAT_MEMBERS
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_CHAT_MEMBERS
 uint16_t uniffi_gim_core_checksum_method_gimclient_chat_members(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_CLAIM_HANDLE
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_CLAIM_HANDLE
+uint16_t uniffi_gim_core_checksum_method_gimclient_claim_handle(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_CONFIRM_APPROVAL
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_CONFIRM_APPROVAL
+uint16_t uniffi_gim_core_checksum_method_gimclient_confirm_approval(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_CONFIRM_LINK
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_CONFIRM_LINK
+uint16_t uniffi_gim_core_checksum_method_gimclient_confirm_link(void
     
 );
 #endif
@@ -1041,6 +1175,12 @@ uint16_t uniffi_gim_core_checksum_method_gimclient_delete_message(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_DEVICES
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_DEVICES
+uint16_t uniffi_gim_core_checksum_method_gimclient_devices(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_EDIT_MESSAGE
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_EDIT_MESSAGE
 uint16_t uniffi_gim_core_checksum_method_gimclient_edit_message(void
@@ -1071,6 +1211,12 @@ uint16_t uniffi_gim_core_checksum_method_gimclient_leave_chat(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_LOCAL_STATE_RESET
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_LOCAL_STATE_RESET
+uint16_t uniffi_gim_core_checksum_method_gimclient_local_state_reset(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_MARK_READ
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_MARK_READ
 uint16_t uniffi_gim_core_checksum_method_gimclient_mark_read(void
@@ -1083,15 +1229,33 @@ uint16_t uniffi_gim_core_checksum_method_gimclient_react(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_RELEASE_HANDLE
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_RELEASE_HANDLE
+uint16_t uniffi_gim_core_checksum_method_gimclient_release_handle(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_REMOVE_MEMBER
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_REMOVE_MEMBER
 uint16_t uniffi_gim_core_checksum_method_gimclient_remove_member(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_RESTORE_FROM_RECOVERY
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_RESTORE_FROM_RECOVERY
+uint16_t uniffi_gim_core_checksum_method_gimclient_restore_from_recovery(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_RETRY_SEND
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_RETRY_SEND
 uint16_t uniffi_gim_core_checksum_method_gimclient_retry_send(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_REVOKE_DEVICE
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_REVOKE_DEVICE
+uint16_t uniffi_gim_core_checksum_method_gimclient_revoke_device(void
     
 );
 #endif
@@ -1110,6 +1274,12 @@ uint16_t uniffi_gim_core_checksum_method_gimclient_send_text(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_SESSION
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_SESSION
 uint16_t uniffi_gim_core_checksum_method_gimclient_session(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_SET_DISPLAY_NAME
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_SET_DISPLAY_NAME
+uint16_t uniffi_gim_core_checksum_method_gimclient_set_display_name(void
     
 );
 #endif
@@ -1137,6 +1307,12 @@ uint16_t uniffi_gim_core_checksum_method_gimclient_sign_out(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_START_LINK
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_START_LINK
+uint16_t uniffi_gim_core_checksum_method_gimclient_start_link(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_START_SYNC
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_START_SYNC
 uint16_t uniffi_gim_core_checksum_method_gimclient_start_sync(void
@@ -1146,6 +1322,12 @@ uint16_t uniffi_gim_core_checksum_method_gimclient_start_sync(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_STOP_SYNC
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_STOP_SYNC
 uint16_t uniffi_gim_core_checksum_method_gimclient_stop_sync(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_STOP_TYPING
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_STOP_TYPING
+uint16_t uniffi_gim_core_checksum_method_gimclient_stop_typing(void
     
 );
 #endif
@@ -1164,6 +1346,24 @@ uint16_t uniffi_gim_core_checksum_method_gimclient_typing(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_UNREACT
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_UNREACT
 uint16_t uniffi_gim_core_checksum_method_gimclient_unreact(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_USER_DEVICES
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_USER_DEVICES
+uint16_t uniffi_gim_core_checksum_method_gimclient_user_devices(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_USER_ID
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_USER_ID
+uint16_t uniffi_gim_core_checksum_method_gimclient_user_id(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_WAIT_LINK
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_WAIT_LINK
+uint16_t uniffi_gim_core_checksum_method_gimclient_wait_link(void
     
 );
 #endif
@@ -1200,6 +1400,24 @@ uint16_t uniffi_gim_core_checksum_method_platformhooks_data_dir(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_PLATFORMHOOKS_IS_NETWORK_REACHABLE
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_PLATFORMHOOKS_IS_NETWORK_REACHABLE
 uint16_t uniffi_gim_core_checksum_method_platformhooks_is_network_reachable(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_LINKSESSION_QR_STRING
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_LINKSESSION_QR_STRING
+uint16_t uniffi_gim_core_checksum_method_linksession_qr_string(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_PENDINGAPPROVAL_DEVICE_ID
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_PENDINGAPPROVAL_DEVICE_ID
+uint16_t uniffi_gim_core_checksum_method_pendingapproval_device_id(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_PENDINGAPPROVAL_SAS
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_PENDINGAPPROVAL_SAS
+uint16_t uniffi_gim_core_checksum_method_pendingapproval_sas(void
     
 );
 #endif

@@ -6,7 +6,9 @@ pub enum GimError {
     /// The server could not be reached or the connection broke.
     #[error("network error: {reason}")]
     Network { reason: String },
-    /// The call needs a session; call `register` first.
+    /// The call needs a session: create an identity, restore one from its
+    /// recovery code or link this device first. Also returned after
+    /// `sign_out` and once the hub reports this device as revoked.
     #[error("not registered")]
     NotRegistered,
     /// An argument was rejected before anything was sent.

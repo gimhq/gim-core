@@ -5,8 +5,11 @@ use crate::GimError;
 #[uniffi::export(with_foreign)]
 pub trait PlatformHooks: Send + Sync {
     /// Reads a secret from the platform keystore (Keychain / Android Keystore).
-    /// Returns `None` when the key does not exist.
-    fn secure_store_get(&self, key: String) -> Option<Vec<u8>>;
+    /// Returns `None` when the key does not exist. Throw when the keystore
+    /// cannot be read (e.g. locked before first unlock): gim-core then fails
+    /// the call instead of treating the secret as absent, so it never
+    /// replaces an existing database key.
+    fn secure_store_get(&self, key: String) -> Result<Option<Vec<u8>>, GimError>;
 
     /// Writes a secret to the platform keystore, replacing any existing value.
     fn secure_store_set(&self, key: String, value: Vec<u8>) -> Result<(), GimError>;
@@ -28,7 +31,9 @@ pub(crate) struct HookSecrets(pub(crate) std::sync::Arc<dyn PlatformHooks>);
 
 impl gim_sdk::SecretStorage for HookSecrets {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, gim_sdk::SecretStorageError> {
-        Ok(self.0.secure_store_get(key.to_string()))
+        self.0
+            .secure_store_get(key.to_string())
+            .map_err(gim_sdk::SecretStorageError::new)
     }
 
     fn set(&self, key: &str, value: &[u8]) -> Result<(), gim_sdk::SecretStorageError> {

@@ -7,6 +7,7 @@ mod client;
 mod convert;
 mod error;
 mod hooks;
+mod link;
 mod task_handle;
 mod timeline;
 mod types;
@@ -17,12 +18,13 @@ pub use client::create_client_with_fake_transport;
 pub use client::{create_client, ClientConfig, ConnectionStateListener, GimClient, TypingListener};
 pub use error::GimError;
 pub use hooks::PlatformHooks;
+pub use link::{LinkSession, PendingApproval};
 pub use task_handle::TaskHandle;
 pub use timeline::{Timeline, TimelineDiff, TimelineListener};
 pub use types::{
-    ChatKind, ChatSummary, ConnectionState, MediaRef, MembershipChangeKind, MessageContent,
-    MessageItem, MessagePreview, ReactionGroup, ReplyPreview, SendState, Session, TimelineItem,
-    UserProfile,
+    ChatKind, ChatSummary, ConnectionState, DeviceInfo, MediaRef, MembershipChangeKind,
+    MessageContent, MessageItem, MessagePreview, ReactionGroup, ReplyPreview, SendState, Session,
+    TimelineItem, UserProfile,
 };
 
 uniffi::setup_scaffolding!();
@@ -48,8 +50,8 @@ mod tests {
     struct Hooks(tempfile::TempDir);
 
     impl PlatformHooks for Hooks {
-        fn secure_store_get(&self, _key: String) -> Option<Vec<u8>> {
-            None
+        fn secure_store_get(&self, _key: String) -> Result<Option<Vec<u8>>, GimError> {
+            Ok(None)
         }
         fn secure_store_set(&self, _key: String, _value: Vec<u8>) -> Result<(), GimError> {
             Ok(())
