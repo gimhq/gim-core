@@ -5,7 +5,8 @@ use std::collections::BTreeSet;
 
 use gim_base::model::{
     Chat, DepartedMember, GroupCursor, GroupMessage, MediaCacheEntry, MembershipChangeKind,
-    MembershipEvent, Message, OutboxEntry, OutboxState, PendingCommit, PendingLeave, UserInfo,
+    MembershipEvent, Message, OutboxEntry, OutboxState, PendingCommit, PendingInvite, PendingLeave,
+    UserInfo,
 };
 use gim_base::{StateReader, StoreError};
 use gim_common::{DeviceRef, GroupId, MessageId, UserId};
@@ -396,6 +397,23 @@ impl StateReader for Reader<'_> {
         self.pending_leaves_where(
             "SELECT group_id, data FROM pending_leaves ORDER BY group_id",
             [],
+        )
+    }
+
+    fn pending_invites(&self) -> StoreResult<Vec<PendingInvite>> {
+        self.query(
+            "SELECT group_id, user_id, created_at_ms, next_retry_at_ms, attempts \
+             FROM pending_invites ORDER BY group_id, user_id",
+            [],
+            |row| {
+                Ok(PendingInvite {
+                    group_id: group_id(get(row, 0)?)?,
+                    user_id: user_id(get(row, 1)?)?,
+                    created_at_ms: get(row, 2)?,
+                    next_retry_at_ms: get(row, 3)?,
+                    attempts: get(row, 4)?,
+                })
+            },
         )
     }
 

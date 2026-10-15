@@ -282,6 +282,21 @@ pub struct PendingLeave {
     pub accepted: bool,
 }
 
+/// A user added to a chat whose hub was unreachable when their KeyPackages
+/// were claimed; the sync loop claims them again until the invite expires.
+/// One per (group, user).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingInvite {
+    pub group_id: GroupId,
+    pub user_id: UserId,
+    /// Unix milliseconds of the first claim; the invite expires a TTL later.
+    pub created_at_ms: u64,
+    /// Unix milliseconds of the next claim.
+    pub next_retry_at_ms: u64,
+    /// Claims after the first one.
+    pub attempts: u32,
+}
+
 /// A device that left a group (a self-remove proposal, or a hub-side
 /// `member_removed` without a commit) or was revoked in its user's
 /// DeviceList, and may still be in the MLS tree: a member has to remove it
