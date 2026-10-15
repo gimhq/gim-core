@@ -13,7 +13,8 @@ use gim_sdk::testing::FakeTransport;
 use gim_sdk::transport::{AccessToken, Transport};
 use gim_sdk::{ClientError, ConnectionState, HttpTransport, SyncSettings};
 use mock_server::{
-    fast_settings, next_state, reach_state, upserted_texts, wait_until, MockServer, Peer,
+    fast_settings, next_state, reach_state, recv_texts, upserted_texts, wait_until, MockServer,
+    Peer,
 };
 use serde_json::json;
 use wiremock::matchers::{method, path};
@@ -65,10 +66,13 @@ async fn reconnect_after_drop_resumes_from_cursor_without_duplicates() {
         "the Welcome is applied while catching up"
     );
 
-    // The stream drops mid-way; the rest comes after the reconnect.
+    // The stream drops mid-way; the rest comes after the reconnect. Arm the
+    // drop for the second connection only once the first is served.
+    server.streams_served(1).await;
     *server.controls.drop_stream_after.lock().unwrap() = Some(3);
     server.controls.kick.store(true, Ordering::SeqCst);
     reach_state(&mut states, Connected).await;
+    server.streams_served(2).await;
     let expected: Vec<String> = (1..=6).map(|i| format!("m{i}")).collect();
     for text in &expected {
         alice.send_text(&group_id, text).await;
@@ -78,12 +82,16 @@ async fn reconnect_after_drop_resumes_from_cursor_without_duplicates() {
     })
     .await;
     assert_eq!(bob.texts(&group_id), expected);
+    // Changes are broadcast after the store commit: wait for them.
     assert_eq!(
-        upserted_texts(&mut changes),
+        recv_texts(&mut changes, expected.len()).await,
         expected,
-        "each message applied once"
+        "messages applied in order"
     );
 
+    // The catch-up after the drop may deliver the rest before the third
+    // connection opens.
+    server.streams_served(3).await;
     let cursors = server.controls.stream_cursors.lock().unwrap().clone();
     assert!(cursors.len() >= 3, "{cursors:?}");
     assert!(cursors.iter().all(Option::is_some), "{cursors:?}");
@@ -94,6 +102,11 @@ async fn reconnect_after_drop_resumes_from_cursor_without_duplicates() {
     );
     bob.client.stop_sync().unwrap();
     assert_eq!(bob.client.connection_state(), Offline);
+    assert_eq!(
+        upserted_texts(&mut changes),
+        Vec::<String>::new(),
+        "each message applied once"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -131,15 +144,17 @@ async fn connection_states_and_token_rejection() {
         assert_eq!(next_state(&mut states).await, expected);
     }
 
+    server.streams_served(1).await;
     server.controls.kick.store(true, Ordering::SeqCst);
     for expected in [Offline, Connecting, Syncing, Connected] {
         assert_eq!(next_state(&mut states).await, expected);
     }
 
     // Close code 4401 stops the loop.
+    server.streams_served(2).await;
     server.controls.reject.store(true, Ordering::SeqCst);
     assert_eq!(next_state(&mut states).await, Offline);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_until("sync loop ended", || !bob.client.is_sync_running()).await;
     assert!(matches!(
         bob.client.stop_sync(),
         Err(ClientError::NotRegistered)
@@ -158,6 +173,7 @@ async fn reachability_cuts_the_reconnect_backoff_short() {
     let mut states = bob.client.subscribe_connection_state();
     bob.client.start_sync().unwrap();
     reach_state(&mut states, Connected).await;
+    server.streams_served(1).await;
     server.controls.kick.store(true, Ordering::SeqCst);
     reach_state(&mut states, Offline).await;
     bob.client.network_reachable();

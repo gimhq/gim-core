@@ -7,7 +7,7 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -53,6 +53,9 @@ pub struct Controls {
     pub reject: AtomicBool,
     /// `cursor` of every stream connection.
     pub stream_cursors: Mutex<Vec<Option<u64>>>,
+    /// Stream connections whose serving task has taken the per-connection
+    /// controls above; the client may report `Connected` before that.
+    pub streams_served: AtomicUsize,
     /// `(cursor, wait)` of every `GET /v1/events`.
     pub polls: Mutex<Vec<(Option<u64>, Option<u32>)>>,
     /// `(group, after_seq)` of every history request.
@@ -78,6 +81,16 @@ impl Drop for MockServer {
 }
 
 impl MockServer {
+    /// Waits until `count` stream connections are being served, so faults
+    /// armed next apply to the open connection or the next one.
+    pub async fn streams_served(&self, count: usize) {
+        let controls = self.controls.clone();
+        wait_until("stream connections served", move || {
+            controls.streams_served.load(Ordering::SeqCst) >= count
+        })
+        .await;
+    }
+
     pub async fn start(transport: FakeTransport) -> Self {
         let controls = Arc::new(Controls::default());
         let state = AppState {
@@ -416,6 +429,7 @@ async fn serve_stream(
         return close(&mut socket, dto::STREAM_CLOSE_CURSOR_EXPIRED).await;
     }
     let drop_after = controls.drop_stream_after.lock().unwrap().take();
+    controls.streams_served.fetch_add(1, Ordering::SeqCst);
     let mut sent = 0;
     loop {
         if controls.reject.load(Ordering::SeqCst) {
@@ -543,6 +557,26 @@ pub async fn next_state(rx: &mut broadcast::Receiver<ConnectionState>) -> Connec
 /// Skips states until `state` is reached.
 pub async fn reach_state(rx: &mut broadcast::Receiver<ConnectionState>, state: ConnectionState) {
     while next_state(rx).await != state {}
+}
+
+/// Texts of the next `count` messages upserted in `changes`, in order.
+pub async fn recv_texts(
+    changes: &mut broadcast::Receiver<StateChange>,
+    count: usize,
+) -> Vec<String> {
+    let mut texts = Vec::new();
+    while texts.len() < count {
+        let change = tokio::time::timeout(PATIENCE, changes.recv())
+            .await
+            .expect("timed out waiting for message changes")
+            .unwrap();
+        if let StateChange::MessageUpserted(m) = change {
+            if let MessageContent::Text { body } = m.content {
+                texts.push(body);
+            }
+        }
+    }
+    texts
 }
 
 /// Texts of the messages upserted in `changes` so far, in order.
