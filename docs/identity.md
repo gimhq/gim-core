@@ -127,6 +127,65 @@ id is in `revoked`.
 Recovery backups and device-link bundles are specified by the following
 sections in a later revision.
 
-### Recovery backup (TBD)
+### Recovery backup
+
+Test vectors: `crates/gim-identity/tests/vectors/recovery.json`.
+
+**Recovery code.** 24 bytes from the operating system CSPRNG. Displayed as
+Crockford base32 with the alphabet `0123456789ABCDEFGHJKMNPQRSTVWXYZ`,
+uppercase, most significant bit first: 192 bits give 39 characters, the last
+one carrying 2 data bits followed by 3 zero bits. The characters are grouped
+in blocks of four separated by `-` (the last block has three). A parser:
+
+- is case-insensitive and maps `I` and `L` to `1` and `O` to `0`;
+- ignores `-` and ASCII whitespace;
+- MUST reject any other character, a length other than 39 symbols, and
+  non-zero padding bits.
+
+Implementations MUST zeroize the code when done and MUST NOT log it.
+
+**Key derivation.** `key = Argon2id(password = code bytes (24), salt (16),
+m_kib, t, p, output length 32)` (RFC 9106, version `0x13`, no secret, no
+associated data).
+
+- Sealing MUST use `m_kib = 65536`, `t = 3`, `p = 1` and a fresh random
+  16-byte salt.
+- Opening MUST reject parameters below the floor `m_kib >= 19456`, `t >= 2`,
+  `p >= 1` before deriving, so a storage provider cannot downgrade the cost.
+  The `test-params` cargo feature of `gim-identity` lowers the floor and
+  exposes low-cost sealing for tests; production builds MUST NOT enable it.
+
+**Blob.**
+
+```
+RootKeyBackup = [
+  1,                            ; version
+  user_id: tstr,
+  kdf: [ m_kib: uint, t: uint, p: uint ],
+  salt: bstr .size 16,
+  nonce: bstr .size 12,
+  ciphertext: bstr,             ; AES-256-GCM ciphertext || 16-byte tag
+]
+Plaintext = [ 1, root_seed: bstr .size 32 ]
+AAD       = [ 1, user_id, [ m_kib, t, p ], salt ]   ; deterministic CBOR bytes
+```
+
+The AEAD is AES-256-GCM with the Argon2id output as key, a fresh random
+12-byte nonce, and the deterministic CBOR encoding of `AAD` as associated
+data. Because the whole blob MUST be deterministic CBOR, re-encoding the
+first four decoded elements reproduces exactly the transmitted header bytes;
+the opener computes `AAD` that way.
+
+Opening a blob with a recovery code for an expected `user_id`:
+
+1. The blob is deterministic CBOR, an array of six elements with version `1`.
+2. The blob's `user_id` equals the expected `user_id` (otherwise a
+   user-mismatch error).
+3. The KDF parameters meet the floor.
+4. AEAD decryption succeeds (otherwise a decryption error; a wrong code and a
+   tampered blob are indistinguishable).
+5. The plaintext is a `Plaintext` with version `1`.
+6. The user id derived from the root public key of `root_seed` equals the
+   expected `user_id`.
 
 ### Device link (TBD)
