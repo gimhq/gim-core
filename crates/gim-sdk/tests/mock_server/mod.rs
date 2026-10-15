@@ -117,6 +117,7 @@ fn error(status: StatusCode, code: &str) -> Response {
 }
 
 impl AppState {
+    #[allow(clippy::result_large_err)]
     fn authenticate(&self, headers: &HeaderMap) -> Result<DeviceRef, Response> {
         let unauthorized = || error(StatusCode::UNAUTHORIZED, "unauthorized");
         if self.controls.reject.load(Ordering::SeqCst) {
@@ -349,7 +350,8 @@ async fn events(
         return (StatusCode::GONE, Json(body)).into_response();
     }
     let limit = query.limit.unwrap_or(100) as usize;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(query.wait.unwrap_or(0).into());
+    let deadline =
+        tokio::time::Instant::now() + Duration::from_secs(query.wait.unwrap_or(0).into());
     loop {
         let (events, next_cursor) = state.visible(&device, cursor, limit);
         if !events.is_empty() || next_cursor != cursor || tokio::time::Instant::now() >= deadline {

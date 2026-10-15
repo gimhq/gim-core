@@ -60,7 +60,10 @@ async fn reconnect_after_drop_resumes_from_cursor_without_duplicates() {
     let mut states = bob.client.subscribe_connection_state();
     bob.client.start_sync().unwrap();
     reach_state(&mut states, Connected).await;
-    assert!(bob.has_chat(&group_id), "the Welcome is applied while catching up");
+    assert!(
+        bob.has_chat(&group_id),
+        "the Welcome is applied while catching up"
+    );
 
     // The stream drops mid-way; the rest comes after the reconnect.
     *server.controls.drop_stream_after.lock().unwrap() = Some(3);
@@ -70,15 +73,25 @@ async fn reconnect_after_drop_resumes_from_cursor_without_duplicates() {
     for text in &expected {
         alice.send_text(&group_id, text).await;
     }
-    wait_until("all messages", || bob.texts(&group_id).len() == expected.len()).await;
+    wait_until("all messages", || {
+        bob.texts(&group_id).len() == expected.len()
+    })
+    .await;
     assert_eq!(bob.texts(&group_id), expected);
-    assert_eq!(upserted_texts(&mut changes), expected, "each message applied once");
+    assert_eq!(
+        upserted_texts(&mut changes),
+        expected,
+        "each message applied once"
+    );
 
     let cursors = server.controls.stream_cursors.lock().unwrap().clone();
     assert!(cursors.len() >= 3, "{cursors:?}");
     assert!(cursors.iter().all(Option::is_some), "{cursors:?}");
     assert!(cursors.windows(2).all(|w| w[0] <= w[1]), "{cursors:?}");
-    assert!(cursors[2] > cursors[1], "resumed after the delivered events");
+    assert!(
+        cursors[2] > cursors[1],
+        "resumed after the delivered events"
+    );
     bob.client.stop_sync().await.unwrap();
     assert_eq!(bob.client.connection_state(), Offline);
 }
@@ -173,9 +186,10 @@ async fn seeded_directory_resolves_membership_events() {
     // The removed device is no longer listed, and this device is not `d_c`.
     Mock::given(method("GET"))
         .and(path("/v1/groups/g_1"))
-        .respond_with(ResponseTemplate::new(404).set_body_json(
-            json!({ "error": { "code": "not_found", "message": "gone" } }),
-        ))
+        .respond_with(
+            ResponseTemplate::new(404)
+                .set_body_json(json!({ "error": { "code": "not_found", "message": "gone" } })),
+        )
         .mount(&server)
         .await;
     Mock::given(method("GET"))

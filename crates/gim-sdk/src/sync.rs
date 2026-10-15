@@ -49,7 +49,9 @@ pub(crate) enum Fetched {
     Batch(EventBatch),
     /// The cursor is older than the server's retention; `head` is where to
     /// continue after resyncing.
-    Expired { head: u64 },
+    Expired {
+        head: u64,
+    },
 }
 
 impl Fetched {
@@ -235,7 +237,9 @@ impl<S: StateStore + 'static> Client<S> {
                     *stream_retry_at = None;
                     stream = Some(opened);
                 }
-                Err(TransportError::Unauthorized) => return Err(TransportError::Unauthorized.into()),
+                Err(TransportError::Unauthorized) => {
+                    return Err(TransportError::Unauthorized.into())
+                }
                 Ok(None) | Err(_) => {
                     tracing::debug!("event stream unavailable; long-polling");
                     *stream_retry_at = Some(Instant::now() + settings.stream_retry);

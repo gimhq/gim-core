@@ -95,7 +95,11 @@ async fn seq_gap_is_backfilled_before_later_events() {
     }
     s.bob.client.sync_once().await.unwrap();
     assert_eq!(s.bob.texts(&s.group_id), ["m1", "m2", "m3"]);
-    assert_eq!(upserted_texts(&mut changes), ["m1", "m2", "m3"], "applied in seq order");
+    assert_eq!(
+        upserted_texts(&mut changes),
+        ["m1", "m2", "m3"],
+        "applied in seq order"
+    );
     assert_eq!(s.history_requests(), [Some(first)]);
 
     // Nothing is missing any more.
@@ -125,13 +129,22 @@ async fn hole_of_a_welcome_to_another_device_is_confirmed_once() {
     s.alice.send_text(&s.group_id, "m2").await;
     s.bob.client.sync_once().await.unwrap();
     assert_eq!(s.bob.texts(&s.group_id), ["m1", "m2"]);
-    assert_eq!(s.history_requests().len(), 1, "the hole is not looked up again");
+    assert_eq!(
+        s.history_requests().len(),
+        1,
+        "the hole is not looked up again"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn expired_cursor_backfills_joined_chats_and_continues_from_head() {
     let s = setup().await;
-    let after = s.bob.store.group_cursor(&s.group_id).unwrap().contiguous_seq;
+    let after = s
+        .bob
+        .store
+        .group_cursor(&s.group_id)
+        .unwrap()
+        .contiguous_seq;
     s.alice.send_text(&s.group_id, "m1").await;
     s.alice.send_text(&s.group_id, "m2").await;
     s.server
