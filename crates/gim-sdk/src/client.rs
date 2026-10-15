@@ -21,6 +21,7 @@ use gim_proto::envelope::Content;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex, Notify};
 
+use crate::identity::merge_directory_user;
 use crate::send::TypingState;
 use crate::stream::ConnectionState;
 use crate::sync::SyncSettings;
@@ -208,6 +209,7 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
                 connection: std::sync::Mutex::new(ConnectionState::Offline),
                 connection_changes: broadcast::channel(CONNECTION_CAPACITY).0,
                 resolved_users: Default::default(),
+                link_pending: AtomicBool::new(false),
             }),
         })
     }
@@ -289,10 +291,12 @@ pub(crate) struct Inner<S> {
     /// Users found in the user directory cache or unknown to the hub's
     /// directory; not looked up again.
     pub(crate) resolved_users: std::sync::Mutex<HashSet<UserId>>,
+    /// A linked identity waits for [`Client::confirm_link`].
+    pub(crate) link_pending: AtomicBool,
 }
 
 #[derive(Clone)]
-enum CommitOp {
+pub(crate) enum CommitOp {
     Add(Vec<ClaimedKeyPackage>),
     Remove(Vec<DeviceRef>),
 }
@@ -402,7 +406,7 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Creates a direct chat with every device of `user_id` (and this user's
-    /// other devices).
+    /// other devices), and announces the own display name in it.
     pub async fn create_direct_chat(&self, user_id: &UserId) -> Result<GroupId> {
         self.create_chat(ChatKind::Direct, None, std::slice::from_ref(user_id))
             .await
@@ -420,11 +424,13 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Adds every device of `users` that is not a member yet, then shares
-    /// the group name and avatar with them (a group info message: earlier
-    /// ones are not readable for new members).
+    /// the group name and avatar and the own display name with them (group
+    /// info and profile messages: earlier ones are not readable for new
+    /// members).
     pub async fn add_members(&self, group_id: &GroupId, users: &[UserId]) -> Result<()> {
         self.add_members_locked(group_id, users).await?;
         self.share_group_info(group_id).await?;
+        self.announce_profile(group_id).await;
         let session = self.require_session()?;
         self.resolve_users(&session, users.iter().cloned().collect())
             .await;
@@ -530,6 +536,9 @@ impl<S: StateStore + 'static> Client<S> {
         if added && kind == ChatKind::Group {
             self.share_group_info(&group_id).await?;
         }
+        if added {
+            self.announce_profile(&group_id).await;
+        }
         self.resolve_users(&session, users.iter().cloned().collect())
             .await;
         Ok(group_id)
@@ -564,7 +573,7 @@ impl<S: StateStore + 'static> Client<S> {
 
     /// Sends the group chat's current name and avatar as a group info
     /// message, if it has either. Direct chats have none to share.
-    async fn share_group_info(&self, group_id: &GroupId) -> Result<()> {
+    pub(crate) async fn share_group_info(&self, group_id: &GroupId) -> Result<()> {
         let gid = group_id.clone();
         let chat = self.run(move |store, _| Ok(store.chat(&gid)?)).await?;
         let Some(chat) = chat.filter(|c| c.kind == ChatKind::Group) else {
@@ -649,9 +658,14 @@ impl<S: StateStore + 'static> Client<S> {
             let changes = self
                 .run(move |store, _| {
                     store.transaction(|txn| {
-                        for user in &found {
-                            txn.upsert_user(user)?;
+                        let mut merged = Vec::with_capacity(found.len());
+                        for user in found {
+                            let user =
+                                merge_directory_user(txn.user(&user.user_id)?.as_ref(), user);
+                            txn.upsert_user(&user)?;
+                            merged.push(user);
                         }
+                        let found = merged;
                         let mut changes = Vec::new();
                         for mut chat in txn.chats()? {
                             let mut renamed = false;
@@ -690,7 +704,12 @@ impl<S: StateStore + 'static> Client<S> {
     /// If the outcome stays unknown (network errors), the commit is kept
     /// pending and re-submitted (same bytes, which the hub recognizes)
     /// before the next sync, commit or send of the group.
-    async fn commit(&self, session: &Session, group_id: &GroupId, op: CommitOp) -> Result<bool> {
+    pub(crate) async fn commit(
+        &self,
+        session: &Session,
+        group_id: &GroupId,
+        op: CommitOp,
+    ) -> Result<bool> {
         if let CommitOp::Add(key_packages) = &op {
             // Credentials are checked against the users' current lists.
             let devices = key_packages.iter().map(|k| k.device.clone());
@@ -1012,7 +1031,7 @@ impl<S: StateStore + 'static> Client<S> {
 
     /// Claims a KeyPackage of every active device of `users` and of this
     /// user's other devices, except this device and `exclude`.
-    async fn claim_key_packages(
+    pub(crate) async fn claim_key_packages(
         &self,
         session: &Session,
         users: &[UserId],
@@ -1031,8 +1050,12 @@ impl<S: StateStore + 'static> Client<S> {
                 async move { self.inner.transport.claim_key_packages(&t, &users).await }
             })
             .await?;
+        // Only requested users, one KeyPackage per device: the hub must not
+        // pick who joins.
+        let mut seen = BTreeSet::new();
         Ok(claimed
             .into_iter()
+            .filter(|k| users.contains(&k.device.user_id) && seen.insert(k.device.clone()))
             .filter(|k| k.device != session.device && !exclude.contains(&k.device))
             .collect())
     }
@@ -1079,11 +1102,40 @@ impl<S: StateStore + 'static> Client<S> {
             .map_err(Into::into)
     }
 
+    /// Broadcasts `changes`, except those of the self groups.
     pub(crate) fn emit(&self, changes: &[StateChange]) {
-        for change in changes {
-            // No subscriber is fine.
-            let _ = self.inner.changes.send(change.clone());
+        if changes.is_empty() {
+            return;
         }
+        for change in self.visible(changes.to_vec()) {
+            // No subscriber is fine.
+            let _ = self.inner.changes.send(change);
+        }
+    }
+
+    /// `changes` without those of the self groups, which no chat list or
+    /// timeline shows.
+    pub(crate) fn visible(&self, mut changes: Vec<StateChange>) -> Vec<StateChange> {
+        let hidden = match self.inner.store.self_groups() {
+            Ok(hidden) => hidden,
+            Err(err) => {
+                tracing::warn!(error = %err, "cannot read the self groups");
+                return changes;
+            }
+        };
+        changes.retain(|change| {
+            let group_id = match change {
+                StateChange::ChatUpserted(chat) => &chat.group_id,
+                StateChange::ChatRemoved(group_id)
+                | StateChange::MessageRemoved { group_id, .. }
+                | StateChange::Typing { group_id, .. } => group_id,
+                StateChange::MessageUpserted(message) => &message.group_id,
+                StateChange::MembershipChanged(event) => &event.group_id,
+                StateChange::KeyPackagesLow => return true,
+            };
+            !hidden.contains(group_id)
+        });
+        changes
     }
 
     pub(crate) fn require_session(&self) -> Result<Session> {

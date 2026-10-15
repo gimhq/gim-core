@@ -1,0 +1,358 @@
+//! Adding a device to a user: the QR link flow (new and old device sides)
+//! and the restore from the recovery code after losing every device.
+//!
+//! Linking (`docs/identity.md`, "Device link"):
+//!
+//! 1. New device: [`Client::start_link`] shows [`LinkSession::qr_string`].
+//! 2. Old device: [`Client::approve_link`] scans it, certifies the new
+//!    device in a new DeviceList, uploads the list, seals the root key, the
+//!    certificate and the list to the offer, posts the bundle through the
+//!    hub and shows the SAS.
+//! 3. New device: [`Client::wait_link`] long-polls for the bundle, opens it,
+//!    stores the root and device keys, signs in, uploads KeyPackages and
+//!    shows the SAS.
+//! 4. The user compares the SAS on both screens and confirms on both:
+//!    [`Client::confirm_link`] on the new device (a mismatch wipes it) and
+//!    [`Client::confirm_approval`] on the old one, which adds the new device
+//!    to the self group and to every joined chat (a mismatch revokes it).
+//!
+//! The bundle never carries a self-group Welcome: a Welcome needs a
+//! KeyPackage of the new device, which can only exist once the device holds
+//! its certificate, i.e. after it opened the bundle. The new device joins
+//! the self group from the Welcome the hub delivers after step 4.
+
+use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use gim_base::model::UserInfo;
+use gim_base::StateStore;
+use gim_common::{now_ms, DeviceRef, UserId};
+use gim_identity::link::{open_link_bundle, seal_link_bundle, LinkBundle, LinkOffer, LinkSecret};
+use gim_identity::recovery::{open_root_key_backup, RecoveryCode};
+use gim_identity::{DeviceList, DeviceSigningKey, SignedDeviceCert};
+use tokio::time::Instant;
+use zeroize::Zeroizing;
+
+use crate::client::{DEVICE_KEY_SECRET_KEY, ROOT_KEY_SECRET_KEY};
+use crate::identity::{random_seed, Enrollment};
+use crate::transport::TransportError;
+use crate::{Client, ClientError, Result};
+
+pub use gim_identity::link::Sas;
+
+/// How long the hub keeps a posted link bundle (its maximum).
+pub const LINK_BUNDLE_LIFETIME: Duration = Duration::from_secs(600);
+/// How long [`Client::wait_link`] waits for the bundle.
+pub const LINK_TIMEOUT: Duration = Duration::from_secs(600);
+/// `wait` of one link-bundle long-poll (the hub's maximum).
+const LINK_POLL_WAIT: Duration = Duration::from_secs(30);
+/// Shortest interval between two link-bundle polls that found nothing.
+const MIN_LINK_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// A link offer of a new device: show [`Self::qr_string`] as a QR code and
+/// call [`Client::wait_link`]. Holds the device key and the offer's X25519
+/// secret; a session accepts a single bundle.
+pub struct LinkSession {
+    pub qr_string: String,
+    offer: LinkOffer,
+    secret: LinkSecret,
+    device_seed: Zeroizing<[u8; 32]>,
+    used: AtomicBool,
+}
+
+impl fmt::Debug for LinkSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LinkSession")
+            .field("qr_string", &self.qr_string)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The opened link on the new device: show the SAS, then call
+/// [`Client::confirm_link`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkResult {
+    pub sas: Sas,
+}
+
+/// A link approved on the old device: show the SAS, then call
+/// [`Client::confirm_approval`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingApproval {
+    pub sas: Sas,
+    /// The new device, certified in the user's DeviceList.
+    pub device: DeviceRef,
+}
+
+/// The `link_id` the hub relays the bundle under: the offer's 16 random
+/// bytes in lowercase hex.
+fn link_id(offer: &LinkOffer) -> String {
+    offer
+        .link_id()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+impl<S: StateStore + 'static> Client<S> {
+    /// New device: creates this device's signing key and a link offer
+    /// naming `hubs` (where the old device may post the bundle).
+    pub fn start_link(&self, hubs: Vec<String>) -> Result<LinkSession> {
+        if self.session().is_some() {
+            return Err(ClientError::AlreadyLoggedIn);
+        }
+        let device_seed = random_seed()?;
+        let device = DeviceSigningKey::from_seed(&device_seed).public();
+        let (offer, secret) = LinkOffer::new(device, hubs).map_err(ClientError::identity)?;
+        Ok(LinkSession {
+            qr_string: offer.to_qr_string(),
+            offer,
+            secret,
+            device_seed,
+            used: AtomicBool::new(false),
+        })
+    }
+
+    /// New device: long-polls the hub for the bundle (up to
+    /// [`LINK_TIMEOUT`]), opens and verifies it, stores the user's root key
+    /// and this device's key, signs in and uploads KeyPackages. Returns the
+    /// SAS to compare with the old device's; confirm it with
+    /// [`Client::confirm_link`]. A bundle that does not open or verify is
+    /// rejected and nothing is stored; the session cannot be reused then.
+    pub async fn wait_link(&self, link: &LinkSession) -> Result<LinkResult> {
+        if self.session().is_some() {
+            return Err(ClientError::AlreadyLoggedIn);
+        }
+        if link.used.swap(true, Ordering::SeqCst) {
+            return Err(ClientError::InvalidInput(
+                "the link session was used; start a new one".into(),
+            ));
+        }
+        let link_id = link_id(&link.offer);
+        let deadline = Instant::now() + LINK_TIMEOUT;
+        let sealed = loop {
+            let started = Instant::now();
+            let fetched = self
+                .inner
+                .transport
+                .fetch_link_bundle(&link_id, LINK_POLL_WAIT)
+                .await?;
+            if let Some(sealed) = fetched {
+                break sealed;
+            }
+            if Instant::now() >= deadline {
+                return Err(ClientError::InvalidInput("no link bundle arrived".into()));
+            }
+            tokio::time::sleep_until(started + MIN_LINK_POLL_INTERVAL).await;
+        };
+        let (opened, sas) =
+            open_link_bundle(&link.offer, &link.secret, &sealed).map_err(ClientError::identity)?;
+        if opened.self_group_welcome.is_some() {
+            tracing::debug!("ignoring the link bundle's self-group Welcome");
+        }
+        let root = opened.root;
+        // Ed25519 signatures are deterministic: re-signing reproduces the
+        // certificate and list the old device signed.
+        let cert = SignedDeviceCert::issue(
+            &root,
+            &opened.cert.device_public_key,
+            opened.cert.created_at,
+            opened.cert.seq,
+        );
+        let device_list = opened
+            .device_list
+            .sign(&root)
+            .map_err(ClientError::identity)?;
+        let user_id = opened.cert.user_id;
+        self.enroll(Enrollment {
+            root_seed: root.to_seed(),
+            device_seed: link.device_seed.clone(),
+            cert,
+            device_list,
+            backup: None,
+            me: UserInfo {
+                user_id,
+                handle: String::new(),
+                display_name: String::new(),
+            },
+        })
+        .await?;
+        self.inner.link_pending.store(true, Ordering::SeqCst);
+        Ok(LinkResult { sas })
+    }
+
+    /// New device: the user compared the SAS. On a mismatch the bundle came
+    /// from someone else: the keys and the session are deleted (discard the
+    /// local database too) and the link is aborted.
+    pub async fn confirm_link(&self, sas_ok: bool) -> Result<()> {
+        if !self.inner.link_pending.swap(false, Ordering::SeqCst) {
+            return Err(ClientError::InvalidInput("no link to confirm".into()));
+        }
+        if !sas_ok {
+            tracing::warn!("link SAS mismatch; wiping the linked identity");
+            self.clear_session()?;
+            self.inner.secrets.delete(ROOT_KEY_SECRET_KEY)?;
+            self.inner.secrets.delete(DEVICE_KEY_SECRET_KEY)?;
+        }
+        Ok(())
+    }
+
+    /// Old device: certifies the device of the scanned offer in a new
+    /// DeviceList (seq + 1), uploads it, and posts the sealed bundle (root
+    /// key, certificate, list) through the hub. Returns the SAS to compare
+    /// with the new device's; confirm it with [`Client::confirm_approval`].
+    pub async fn approve_link(&self, qr_string: &str) -> Result<PendingApproval> {
+        let session = self.require_session()?;
+        let root = self.root_key()?;
+        let offer = LinkOffer::from_qr_string(qr_string).map_err(ClientError::identity)?;
+        let device_key = *offer.device_public_key();
+        let device = DeviceRef::new(session.device.user_id.clone(), device_key.device_id());
+        let current = self.own_device_list(&session).await?;
+        if current.contains(&device.device_id) || current.is_revoked(&device.device_id) {
+            return Err(ClientError::InvalidInput(format!(
+                "device {} is already listed",
+                device.device_id
+            )));
+        }
+        let seq = current.seq() + 1;
+        let cert = SignedDeviceCert::issue(&root, &device_key, now_ms(), seq);
+        let list = current
+            .add_cert(cert.clone())
+            .and_then(|list| list.sign(&root))
+            .map_err(ClientError::identity)?;
+        self.publish_own_device_list(&list).await?;
+        let bundle = LinkBundle::new(&root, &cert, &list, None);
+        let (sealed, sas) = seal_link_bundle(&offer, &bundle).map_err(ClientError::identity)?;
+        let link_id = link_id(&offer);
+        self.authed(|t| {
+            let (link_id, sealed) = (link_id.clone(), sealed.clone());
+            async move {
+                self.inner
+                    .transport
+                    .post_link_bundle(&t, &link_id, sealed, LINK_BUNDLE_LIFETIME)
+                    .await
+            }
+        })
+        .await?;
+        Ok(PendingApproval { sas, device })
+    }
+
+    /// Old device: the user compared the SAS. On a match the new device is
+    /// added to the self group (with the DeviceList and the profile) and to
+    /// every joined chat; it must have finished [`Client::wait_link`]. On a
+    /// mismatch the device is revoked.
+    pub async fn confirm_approval(&self, approval: &PendingApproval, sas_ok: bool) -> Result<()> {
+        if sas_ok {
+            self.add_own_device(&approval.device).await
+        } else {
+            tracing::warn!(device = %approval.device, "link SAS mismatch; revoking the device");
+            self.revoke_device(&approval.device.device_id).await
+        }
+    }
+
+    /// Restores the user from the recovery code after losing every device:
+    /// opens the user's recovery backup, and makes this (fresh) client a new
+    /// device of the user, signed in with KeyPackages and a new self group.
+    ///
+    /// The previous devices are revoked with `revoke_others`. The user's
+    /// current DeviceList cannot be read before signing in, so unless this
+    /// client still caches it, the new list holds only this device: the
+    /// previous devices are dropped (inactive on the hub, rejected and
+    /// removed by peers like revoked ones) rather than listed as revoked,
+    /// and keeping them (`revoke_others == false`) fails with
+    /// [`ClientError::InvalidInput`].
+    ///
+    /// Chats are not rejoined automatically: their members (or another own
+    /// device) have to add this device again.
+    pub async fn restore_from_recovery(
+        &self,
+        user_id: &UserId,
+        code: &RecoveryCode,
+        revoke_others: bool,
+    ) -> Result<()> {
+        if self.session().is_some() {
+            return Err(ClientError::AlreadyLoggedIn);
+        }
+        let backup = self
+            .inner
+            .transport
+            .recovery_backup(user_id)
+            .await?
+            .ok_or_else(|| ClientError::InvalidInput(format!("no recovery backup of {user_id}")))?;
+        let (code, uid) = (code.clone(), user_id.clone());
+        // Argon2id with up to 256 MiB: off the async runtime.
+        let root = tokio::task::spawn_blocking(move || open_root_key_backup(&backup, &code, &uid))
+            .await
+            .map_err(|e| ClientError::Task(e.to_string()))?
+            .map_err(ClientError::identity)?;
+        let device_seed = random_seed()?;
+        let device = DeviceSigningKey::from_seed(&device_seed).public();
+
+        let mut enrolled = None;
+        if let Some(known) = self.inner.device_lists.get(user_id) {
+            let seq = known.seq() + 1;
+            let cert = SignedDeviceCert::issue(&root, &device, now_ms(), seq);
+            let list = if revoke_others {
+                let revoked = known
+                    .revoked()
+                    .iter()
+                    .cloned()
+                    .chain(known.certs().map(|c| c.device_id.clone()))
+                    .collect();
+                DeviceList::new(root.public(), seq, vec![cert.clone()], revoked)
+            } else {
+                known.add_cert(cert.clone())
+            }
+            .and_then(|list| list.sign(&root))
+            .map_err(ClientError::identity)?;
+            match self
+                .inner
+                .transport
+                .put_device_list(user_id, list.to_bytes())
+                .await
+            {
+                Ok(()) => enrolled = Some((cert, list)),
+                // The hub has a newer list than the cached one.
+                Err(TransportError::Conflict(reason)) if revoke_others => {
+                    tracing::info!(%reason, "cached device list is stale");
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+        let (cert, device_list) = match enrolled {
+            Some(enrolled) => enrolled,
+            None if revoke_others => {
+                // Above any list seq handed out by counting.
+                let seq = now_ms().max(1);
+                let cert = SignedDeviceCert::issue(&root, &device, now_ms(), seq);
+                let list = DeviceList::new(root.public(), seq, vec![cert.clone()], vec![])
+                    .and_then(|list| list.sign(&root))
+                    .map_err(ClientError::identity)?;
+                (cert, list)
+            }
+            None => {
+                return Err(ClientError::InvalidInput(
+                    "keeping the other devices needs the current device list, which cannot be \
+                     read before signing in"
+                        .into(),
+                ))
+            }
+        };
+        self.enroll(Enrollment {
+            root_seed: root.to_seed(),
+            device_seed,
+            cert,
+            device_list,
+            backup: None,
+            me: UserInfo {
+                user_id: user_id.clone(),
+                handle: String::new(),
+                display_name: String::new(),
+            },
+        })
+        .await?;
+        self.create_self_group().await?;
+        Ok(())
+    }
+}

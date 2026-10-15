@@ -30,7 +30,9 @@
 //! - each device has an event log with a hub-wide monotonic cursor
 //!   ([`FakeDeliveryService::events`]), and every group keeps its message
 //!   history by `seq` ([`FakeDeliveryService::messages`]);
-//! - blobs are stored opaque and downloadable by byte range.
+//! - blobs are stored opaque and downloadable by byte range;
+//! - link bundles are relayed opaque by `link_id` and deleted on the first
+//!   fetch (no expiry).
 //!
 //! MLS messages and identity objects are opaque bytes: callers verify
 //! DeviceLists and auth responses and parse the MLS framing (gim-crypto),
@@ -180,6 +182,8 @@ pub enum DeliveryError {
     StaleDeviceList,
     #[error("409 handle {0} is taken")]
     HandleTaken(String),
+    #[error("409 link id {0} is in use")]
+    LinkIdTaken(String),
     #[error("400 validation_failed: {0}")]
     ValidationFailed(String),
     #[error("unknown group {0}")]
@@ -250,6 +254,7 @@ struct State {
     inboxes: HashMap<DeviceRef, Inbox>,
     pending_welcomes: HashMap<DeviceRef, Vec<Welcome>>,
     blobs: HashMap<String, Vec<u8>>,
+    link_bundles: HashMap<String, Vec<u8>>,
     /// Last assigned event cursor.
     head: u64,
     /// Counter for hub-assigned ids.
@@ -403,16 +408,6 @@ impl FakeDeliveryService {
             .is_some_and(|issued| &issued == device)
     }
 
-    /// The issued, unredeemed challenge whose bytes `signed` embeds (an
-    /// encoded AuthResponse carries its challenge verbatim).
-    pub fn issued_challenge_in(&self, signed: &[u8]) -> Option<Vec<u8>> {
-        self.lock()
-            .challenges
-            .keys()
-            .find(|c| !c.is_empty() && signed.windows(c.len()).any(|w| w == c.as_slice()))
-            .cloned()
-    }
-
     /// A new bearer token for a device active in its user's list.
     pub fn create_session(&self, device: &DeviceRef) -> Result<String, DeliveryError> {
         let mut state = self.lock();
@@ -479,6 +474,21 @@ impl FakeDeliveryService {
             .users
             .get(user_id)
             .and_then(|u| u.recovery_backup.clone())
+    }
+
+    /// Stores a sealed link bundle under `link_id` until it is fetched.
+    pub fn post_link_bundle(&self, link_id: &str, sealed: Vec<u8>) -> Result<(), DeliveryError> {
+        let mut state = self.lock();
+        if state.link_bundles.contains_key(link_id) {
+            return Err(DeliveryError::LinkIdTaken(link_id.to_string()));
+        }
+        state.link_bundles.insert(link_id.to_string(), sealed);
+        Ok(())
+    }
+
+    /// Fetches and deletes the link bundle of `link_id`.
+    pub fn take_link_bundle(&self, link_id: &str) -> Option<Vec<u8>> {
+        self.lock().link_bundles.remove(link_id)
     }
 
     /// Appends one-time KeyPackages, or replaces the last-resort one with

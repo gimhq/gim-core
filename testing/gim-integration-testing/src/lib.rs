@@ -73,8 +73,8 @@ impl MemoryHooks {
 }
 
 impl PlatformHooks for MemoryHooks {
-    fn secure_store_get(&self, key: String) -> Option<Vec<u8>> {
-        self.secrets.lock().unwrap().get(&key).cloned()
+    fn secure_store_get(&self, key: String) -> Result<Option<Vec<u8>>, GimError> {
+        Ok(self.secrets.lock().unwrap().get(&key).cloned())
     }
     fn secure_store_set(&self, key: String, value: Vec<u8>) -> Result<(), GimError> {
         self.secrets.lock().unwrap().insert(key, value);

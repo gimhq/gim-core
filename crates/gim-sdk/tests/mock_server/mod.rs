@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -55,6 +55,9 @@ pub struct Controls {
     pub reject: AtomicBool,
     /// `cursor` of every stream connection.
     pub stream_cursors: Mutex<Vec<Option<u64>>>,
+    /// Raw query string and `Authorization` header of every stream
+    /// upgrade request.
+    pub stream_requests: Mutex<Vec<(Option<String>, Option<String>)>>,
     /// Stream connections whose serving task has taken the per-connection
     /// controls above; the client may report `Connected` before that.
     pub streams_served: AtomicUsize,
@@ -807,6 +810,7 @@ async fn stream(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<v2::StreamQuery>,
+    RawQuery(raw_query): RawQuery,
     upgrade: WebSocketUpgrade,
 ) -> Response {
     if state.controls.stream_disabled.load(Ordering::SeqCst) {
@@ -818,13 +822,18 @@ async fn stream(
         .lock()
         .unwrap()
         .push(query.cursor);
-    // A Bearer header or `?token=`, like the hub.
-    let token = state
-        .token(&headers)
-        .ok()
-        .map(|t| t.as_str().to_string())
-        .or(query.token)
-        .filter(|_| !state.controls.reject.load(Ordering::SeqCst));
+    let authorization = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    state
+        .controls
+        .stream_requests
+        .lock()
+        .unwrap()
+        .push((raw_query, authorization));
+    // Only the Bearer header: the SDK keeps the token out of the URL.
+    let token = state.token(&headers).ok().map(|t| t.as_str().to_string());
     let cursor = query.cursor.unwrap_or(0);
     upgrade.on_upgrade(move |socket| serve_stream(state, token, cursor, socket))
 }

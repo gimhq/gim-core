@@ -15,7 +15,7 @@ async fn typing_expires_and_ignores_own_devices() {
     let transport = FakeTransport::new();
     let alice = Device::register(&transport, "alice", "Alice").await;
     let bob = Device::register(&transport, "bob", "Bob").await;
-    let bob_tablet = Device::register(&transport, "bob", "Bob").await;
+    let bob_tablet = Device::link(&transport, &bob).await;
     let g = alice
         .client
         .create_group_chat(None, &[bob.user_id()])

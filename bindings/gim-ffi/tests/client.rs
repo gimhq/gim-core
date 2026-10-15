@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -19,6 +20,8 @@ use tempfile::TempDir;
 struct MemoryHooks {
     dir: TempDir,
     secrets: Mutex<HashMap<String, Vec<u8>>>,
+    /// Reads fail, like a keystore locked before the first unlock.
+    locked: AtomicBool,
 }
 
 impl MemoryHooks {
@@ -26,6 +29,7 @@ impl MemoryHooks {
         Arc::new(Self {
             dir: tempfile::tempdir().unwrap(),
             secrets: Mutex::default(),
+            locked: AtomicBool::new(false),
         })
     }
 
@@ -35,8 +39,13 @@ impl MemoryHooks {
 }
 
 impl PlatformHooks for MemoryHooks {
-    fn secure_store_get(&self, key: String) -> Option<Vec<u8>> {
-        self.secrets.lock().unwrap().get(&key).cloned()
+    fn secure_store_get(&self, key: String) -> Result<Option<Vec<u8>>, GimError> {
+        if self.locked.load(Ordering::SeqCst) {
+            return Err(GimError::Storage {
+                reason: "keystore locked".to_string(),
+            });
+        }
+        Ok(self.secrets.lock().unwrap().get(&key).cloned())
     }
     fn secure_store_set(&self, key: String, value: Vec<u8>) -> Result<(), GimError> {
         self.secrets.lock().unwrap().insert(key, value);
@@ -173,10 +182,9 @@ impl User {
         assert!(!code.is_empty());
         let session = client.session().await.unwrap().unwrap();
         assert_eq!(session.display_name, name);
-        // Handles are claimed through the directory; the FFI does not
-        // expose it yet.
-        let user_id = gim_common::UserId::new(session.user_id.clone()).unwrap();
-        transport.service().claim_handle(&user_id, handle).unwrap();
+        assert_eq!(session.handle, "");
+        assert_eq!(client.user_id(), Some(session.user_id.clone()));
+        client.claim_handle(handle.to_string()).await.unwrap();
         Self {
             client,
             hooks,
@@ -351,6 +359,10 @@ async fn direct_chat_text_receipts_typing_and_restart() {
         .wait("alice typing", |users| {
             users == std::slice::from_ref(&alice.user_id)
         })
+        .await;
+    alice.client.stop_typing(chat.clone()).await.unwrap();
+    typing
+        .wait("alice stopped typing", |users| users.is_empty())
         .await;
 
     // A reply from Bob, then Alice restarts from her data directory.
@@ -599,4 +611,216 @@ async fn sign_out_deletes_local_state() {
 
     let fresh = open(&transport, &alice.hooks).await;
     assert_eq!(fresh.session().await.unwrap(), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handles_and_display_name() {
+    let transport = FakeTransport::new();
+    let alice = User::register(&transport, "alice", "Alice").await;
+    let bob = User::register(&transport, "bob", "Bob").await;
+    let session = alice.client.session().await.unwrap().unwrap();
+    assert_eq!(session.handle, "alice");
+
+    alice
+        .client
+        .set_display_name("Alice B.".to_string())
+        .await
+        .unwrap();
+    let session = alice.client.session().await.unwrap().unwrap();
+    assert_eq!(session.display_name, "Alice B.");
+    assert!(matches!(
+        alice.client.set_display_name(String::new()).await,
+        Err(GimError::InvalidInput { .. })
+    ));
+
+    alice.client.release_handle().await.unwrap();
+    assert_eq!(alice.client.session().await.unwrap().unwrap().handle, "");
+    assert_eq!(bob.client.find_user("alice".to_string()).await, Ok(None));
+    assert!(matches!(
+        alice.client.release_handle().await,
+        Err(GimError::InvalidInput { .. })
+    ));
+    alice
+        .client
+        .claim_handle("skipper".to_string())
+        .await
+        .unwrap();
+    let found = bob
+        .client
+        .find_user("skipper".to_string())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.user_id, alice.user_id);
+    assert!(matches!(
+        bob.client.claim_handle("skipper".to_string()).await,
+        Err(GimError::Server { status: 409, .. })
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn link_device_and_manage_devices() {
+    let transport = FakeTransport::new();
+    let alice = User::register(&transport, "alice", "Alice").await;
+    let bob = User::register(&transport, "bob", "Bob").await;
+
+    let tablet_hooks = MemoryHooks::new();
+    let tablet = open(&transport, &tablet_hooks).await;
+    assert_eq!(tablet.user_id(), None);
+    let link = tablet.start_link(vec!["hub.example".to_string()]).unwrap();
+    assert!(!link.qr_string().is_empty());
+    let approval = alice.client.approve_link(link.qr_string()).await.unwrap();
+    let sas = tablet.wait_link(link.clone()).await.unwrap();
+    assert_eq!(sas, approval.sas());
+    assert_eq!(sas.len(), 7);
+    // A link session accepts a single bundle.
+    assert!(matches!(
+        tablet.wait_link(link).await,
+        Err(GimError::InvalidInput { .. })
+    ));
+    tablet.confirm_link(true).await.unwrap();
+    alice
+        .client
+        .confirm_approval(approval.clone(), true)
+        .await
+        .unwrap();
+    assert_eq!(tablet.user_id(), Some(alice.user_id.clone()));
+    let tablet_device = tablet.session().await.unwrap().unwrap().device_id;
+    assert_eq!(approval.device_id(), tablet_device);
+
+    let devices = alice.client.devices().await.unwrap();
+    assert_eq!(devices.len(), 2);
+    assert!(devices.iter().all(|d| !d.revoked && d.created_at_ms > 0));
+    let current: Vec<_> = devices.iter().filter(|d| d.is_current).collect();
+    assert_eq!(current.len(), 1);
+    assert_ne!(current[0].device_id, tablet_device);
+    let seen_by_bob = bob
+        .client
+        .user_devices(alice.user_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(seen_by_bob.len(), 2);
+    assert!(seen_by_bob.iter().all(|d| !d.is_current));
+
+    assert!(matches!(
+        alice
+            .client
+            .revoke_device(current[0].device_id.clone())
+            .await,
+        Err(GimError::InvalidInput { .. })
+    ));
+    alice
+        .client
+        .revoke_device(tablet_device.clone())
+        .await
+        .unwrap();
+    let devices = alice.client.devices().await.unwrap();
+    let revoked = devices
+        .iter()
+        .find(|d| d.device_id == tablet_device)
+        .unwrap();
+    assert!(revoked.revoked);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejected_link_wipes_the_new_device() {
+    let transport = FakeTransport::new();
+    let alice = User::register(&transport, "alice", "Alice").await;
+    let hooks = MemoryHooks::new();
+    let phone = open(&transport, &hooks).await;
+    let link = phone.start_link(vec!["hub.example".to_string()]).unwrap();
+    let approval = alice.client.approve_link(link.qr_string()).await.unwrap();
+    phone.wait_link(link).await.unwrap();
+    phone.confirm_link(false).await.unwrap();
+    assert_eq!(phone.session().await, Err(GimError::NotRegistered));
+    assert!(hooks.secrets.lock().unwrap().is_empty());
+    assert!(!hooks.path("gim.sqlite3").exists());
+
+    alice
+        .client
+        .confirm_approval(approval.clone(), false)
+        .await
+        .unwrap();
+    let devices = alice.client.devices().await.unwrap();
+    assert!(devices
+        .iter()
+        .any(|d| d.device_id == approval.device_id() && d.revoked));
+    assert!(matches!(
+        alice.client.confirm_link(true).await,
+        Err(GimError::InvalidInput { .. })
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restore_from_recovery_code() {
+    let transport = FakeTransport::new();
+    let hooks = MemoryHooks::new();
+    let lost = open(&transport, &hooks).await;
+    let code = lost.create_identity("Alice".to_string()).await.unwrap();
+    let user_id = lost.user_id().unwrap();
+    drop(lost);
+
+    let fresh = open(&transport, &MemoryHooks::new()).await;
+    assert!(matches!(
+        fresh
+            .restore_from_recovery(user_id.clone(), "not a code".to_string(), true)
+            .await,
+        Err(GimError::InvalidInput { .. })
+    ));
+    // Keeping the old devices needs a cached DeviceList.
+    assert!(matches!(
+        fresh
+            .restore_from_recovery(user_id.clone(), code.clone(), false)
+            .await,
+        Err(GimError::InvalidInput { .. })
+    ));
+    fresh
+        .restore_from_recovery(user_id.clone(), code.clone(), true)
+        .await
+        .unwrap();
+    assert_eq!(fresh.user_id(), Some(user_id.clone()));
+    let devices = fresh.devices().await.unwrap();
+    assert_eq!(devices.len(), 1);
+    assert!(devices[0].is_current);
+    assert!(matches!(
+        fresh.restore_from_recovery(user_id, code, true).await,
+        Err(GimError::InvalidInput { .. })
+    ));
+}
+
+#[tokio::test]
+async fn locked_keystore_fails_without_replacing_the_database_key() {
+    let transport = FakeTransport::new();
+    let hooks = MemoryHooks::new();
+    let client = open(&transport, &hooks).await;
+    assert!(!client.local_state_reset());
+    drop(client);
+    let keys = hooks.secrets.lock().unwrap().clone();
+
+    hooks.locked.store(true, Ordering::SeqCst);
+    let config = ClientConfig {
+        server_url: "https://gim.example.org".to_string(),
+    };
+    let result = create_client_with_fake_transport(config, hooks.clone(), transport.clone()).await;
+    assert!(matches!(result, Err(GimError::Storage { .. })));
+    assert_eq!(*hooks.secrets.lock().unwrap(), keys);
+
+    hooks.locked.store(false, Ordering::SeqCst);
+    let reopened = open(&transport, &hooks).await;
+    assert!(!reopened.local_state_reset());
+}
+
+#[tokio::test]
+async fn lost_database_key_reports_a_local_state_reset() {
+    let transport = FakeTransport::new();
+    let hooks = MemoryHooks::new();
+    let client = open(&transport, &hooks).await;
+    client.create_identity("Alice".to_string()).await.unwrap();
+    drop(client);
+
+    // The keystore lost the database key, e.g. after a device restore.
+    hooks.secrets.lock().unwrap().remove("gim.db_key.v1");
+    let reopened = open(&transport, &hooks).await;
+    assert!(reopened.local_state_reset());
+    assert_eq!(reopened.session().await.unwrap(), None);
 }

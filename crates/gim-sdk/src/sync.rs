@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use futures_util::FutureExt;
 use gim_base::model::{
-    Chat, ChatMember, GroupMessage, IncomingEvent, Membership, MessageKind, StateChange,
+    Chat, ChatMember, GroupMessage, IncomingEvent, Membership, MembershipChangeKind, MessageKind,
+    StateChange,
 };
 use gim_base::{BaseClient, BaseError, StateReader, StateStore, StoreTxn};
 use gim_common::{now_ms, DeviceRef, GroupId, UserId};
@@ -148,11 +149,13 @@ impl<S: StateStore + 'static> Client<S> {
 
     /// Fetches the pending events once (no waiting), applies them, persists
     /// the cursor and replenishes KeyPackages if the hub asked for it.
-    /// Returns the applied changes, which are also broadcast.
+    /// Returns the applied changes, which are also broadcast (both without
+    /// the self groups' changes).
     pub async fn sync_once(&self) -> Result<Vec<StateChange>> {
         let session = self.require_session()?;
         let fetched = self.fetch(&session, Duration::ZERO).await?;
-        self.apply_fetched(&session, fetched).await
+        let changes = self.apply_fetched(&session, fetched).await?;
+        Ok(self.visible(changes))
     }
 
     pub(crate) fn wake_sync(&self) {
@@ -313,7 +316,8 @@ impl<S: StateStore + 'static> Client<S> {
 
     /// Applies fetched events under the group lock, then commits the
     /// removal of departed devices, wakes the outbox (delivered receipts
-    /// may have been queued) and resolves the profiles of new members and
+    /// may have been queued), announces the own display name to the chats
+    /// this device joined and resolves the profiles of new members and
     /// senders.
     pub(crate) async fn apply_fetched(
         &self,
@@ -325,6 +329,22 @@ impl<S: StateStore + 'static> Client<S> {
         self.remove_departed(session).await?;
         drop(guard);
         self.wake_outbox();
+        let own = &session.device.user_id;
+        let joined: BTreeSet<GroupId> = self
+            .visible(changes.clone())
+            .into_iter()
+            .filter_map(|change| match change {
+                StateChange::MembershipChanged(event)
+                    if &event.user_id == own && event.kind == MembershipChangeKind::Added =>
+                {
+                    Some(event.group_id)
+                }
+                _ => None,
+            })
+            .collect();
+        for group_id in &joined {
+            self.announce_profile(group_id).await;
+        }
         let users = changes
             .iter()
             .flat_map(|change| match change {
@@ -378,7 +398,15 @@ impl<S: StateStore + 'static> Client<S> {
         let mut changes = self.join_pending_welcomes(session).await?;
         let revoked = self.refresh_known_device_lists(session).await?;
         self.record_revoked(session, revoked).await?;
-        let chats = self.run(|store, _| Ok(store.chats()?)).await?;
+        let chats = self
+            .run(|store, _| {
+                let mut chats = store.chats()?;
+                for group_id in store.self_groups()? {
+                    chats.extend(store.chat(&group_id)?);
+                }
+                Ok(chats)
+            })
+            .await?;
         let mut joined = BTreeSet::new();
         let mut events = Vec::new();
         for chat in chats {
@@ -636,6 +664,7 @@ impl<S: StateStore + 'static> Client<S> {
             })
             .collect();
         let mut changes = self.apply_events_fetching_lists(session, events).await?;
+        self.load_own_device_list(session).await?;
         for group_id in &joined {
             changes.extend(self.sync_chat_kind(session, group_id.clone()).await?);
         }
@@ -652,6 +681,33 @@ impl<S: StateStore + 'static> Client<S> {
             self.upload_key_packages(session).await?;
         }
         Ok(changes)
+    }
+
+    /// Loads the own DeviceList kept by gim-base (from a `self.device_list`
+    /// of another own device) into the cache, if it is newer.
+    async fn load_own_device_list(&self, session: &Session) -> Result<()> {
+        let own = session.device.user_id.clone();
+        let user_id = own.clone();
+        let stored = self
+            .run(move |store, _| {
+                Ok(store
+                    .device_lists()?
+                    .into_iter()
+                    .find(|(u, _)| *u == user_id)
+                    .map(|(_, bytes)| bytes))
+            })
+            .await?;
+        let Some(bytes) = stored else {
+            return Ok(());
+        };
+        match self.accept_device_list(&own, &bytes).await {
+            Ok(revoked) => self.record_revoked(session, revoked).await,
+            Err(ClientError::Identity(reason)) => {
+                tracing::warn!(%reason, "ignoring the stored own device list");
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// Applies `events` in order. Pre-fetching lists is the normal path; as

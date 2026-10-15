@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use gim_base::model::{ChatKind, PendingMedia};
+use gim_base::model::{ChatKind, PendingMedia, StateChange};
 use gim_base::{new_message_id, BaseClient, BaseError, StateStore};
 use gim_common::{now_ms, GroupId, MessageId};
 use gim_crypto::encrypt_envelope;
@@ -150,8 +150,8 @@ impl<S: StateStore + 'static> Client<S> {
         self.reaction(group_id, target, emoji.into(), true).await
     }
 
-    /// Marks the chat read and sends a read receipt for the other users'
-    /// new messages.
+    /// Marks the chat read, sends a read receipt for the other users' new
+    /// messages and shares the read position with the other own devices.
     pub async fn mark_read(&self, group_id: &GroupId) -> Result<()> {
         let session = self.require_session()?;
         let (gid, base) = (group_id.clone(), BaseClient::new(session.device));
@@ -161,6 +161,15 @@ impl<S: StateStore + 'static> Client<S> {
         self.emit(&changes);
         if receipt.is_some() {
             self.flush_outbox().await?;
+        }
+        let read_seq = changes.iter().find_map(|change| match change {
+            StateChange::ChatUpserted(chat) if &chat.group_id == group_id => {
+                Some(chat.last_read_seq)
+            }
+            _ => None,
+        });
+        if let Some(seq) = read_seq.filter(|seq| *seq > 0) {
+            self.share_read_marker(group_id, seq).await;
         }
         Ok(())
     }

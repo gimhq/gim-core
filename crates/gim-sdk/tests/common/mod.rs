@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use gim_base::model::{ChatKind, GroupMessage, Message, MessageKind, StateChange};
 use gim_base::{MemoryStore, StateReader};
 use gim_common::{ClientId, DeviceRef, GroupId, MessageId, UserId};
-use gim_sdk::testing::{FakeTransport, MemorySecretStorage, TestLinking};
+use gim_sdk::testing::{FakeTransport, MemorySecretStorage};
 use gim_sdk::transport::{
     AccessToken, Challenge, ClaimedKeyPackage, CommitAccepted, EventBatch, GroupInfo,
     KeyPackageCount, OutgoingCommit, PostError, SessionError, SessionToken, Transport,
@@ -111,6 +111,30 @@ impl Transport for FlakyTransport {
         backup: Vec<u8>,
     ) -> TransportResult<()> {
         self.inner.put_recovery_backup(t, u, backup).await
+    }
+
+    async fn recovery_backup(&self, u: &UserId) -> TransportResult<Option<Vec<u8>>> {
+        self.inner.recovery_backup(u).await
+    }
+
+    async fn post_link_bundle(
+        &self,
+        t: &AccessToken,
+        link_id: &str,
+        sealed_bundle: Vec<u8>,
+        expires_in: Duration,
+    ) -> TransportResult<()> {
+        self.inner
+            .post_link_bundle(t, link_id, sealed_bundle, expires_in)
+            .await
+    }
+
+    async fn fetch_link_bundle(
+        &self,
+        link_id: &str,
+        wait: Duration,
+    ) -> TransportResult<Option<Vec<u8>>> {
+        self.inner.fetch_link_bundle(link_id, wait).await
     }
 
     async fn device_list(&self, t: &AccessToken, u: &UserId) -> TransportResult<Option<Vec<u8>>> {
@@ -274,10 +298,6 @@ impl Transport for FlakyTransport {
             bytes[0] ^= 1;
         }
         Ok(bytes)
-    }
-
-    fn test_linking(&self) -> Option<&TestLinking> {
-        self.inner.test_linking()
     }
 }
 

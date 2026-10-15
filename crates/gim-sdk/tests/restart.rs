@@ -197,7 +197,7 @@ async fn store_reset_signs_out_instead_of_failing() {
     let alice = node.open();
     assert!(!alice.restore_session().await.unwrap());
     assert_eq!(node.secrets.get(SESSION_SECRET_KEY).unwrap(), None);
-    alice.register("alice", "alice").await.unwrap();
+    alice.create_identity("alice").await.unwrap();
     node.restart(alice).await;
 }
 

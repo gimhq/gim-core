@@ -590,6 +590,77 @@ Adds a new device to a user who already has a device. Implemented in
 4. Both devices display the SAS; the user confirms they match before either
    device treats the link as complete.
 
+#### Device link flow
+
+How gim-core (`gim-sdk`, exposed by gim-ffi) runs the flow against a hub.
+The bundle carries the root key seed, the new device's certificate and the
+DeviceList certifying it, and **no self-group Welcome**: a Welcome needs a
+KeyPackage of the new device, and the new device can only publish
+KeyPackages once it holds its certificate, i.e. after it opened the bundle.
+gim-core always seals `self_group_welcome = null` and ignores a non-null
+one. The new device joins the self group and the chats from Welcomes the
+old device sends after the SAS was confirmed.
+
+```
+New device (N)                     Hub                         Old device (O)
+--------------                     ---                         --------------
+start_link: device key, offer
+show QR (LinkOffer) ----------------------- scan ----------------------->
+                                                               approve_link:
+                                                                 cert(seq+1), DeviceList
+                                       <-- PUT /v2/users/{u}/device-list
+                                       <-- POST /v2/link-bundles {link_id, sealed}
+                                                               show SAS
+wait_link:
+  GET /v2/link-bundles/{link_id}?wait=30 -->  (deleted on first fetch)
+  open + verify bundle, store root
+  and device keys, sign in, upload
+  KeyPackages
+show SAS
+                   user compares both SAS and confirms on BOTH devices
+confirm_link(true)                                             confirm_approval(true):
+                                                                 add N to the self group
+                                                                 and to every joined chat
+                                       <-- commits + Welcomes for N
+sync: join the self group and chats
+  from the Welcomes  <---------------- Welcomes
+```
+
+Who does what:
+
+1. **N** `start_link(hubs)`: creates its device signing key and a
+   `LinkOffer` and shows it as a QR code. It must not have a session.
+2. **O** `approve_link(qr)`: issues a `SignedDeviceCert` for N, publishes a
+   DeviceList (seq + 1) certifying it, seals the bundle to the offer, posts
+   it through the hub (lifetime 600 s) and shows the SAS. N is now a listed
+   device but in no MLS group.
+3. **N** `wait_link`: long-polls the hub for the bundle (up to 10 minutes),
+   opens and verifies it, stores the root and device keys, signs in and
+   uploads KeyPackages, then shows the SAS.
+4. The user compares the two SAS values and confirms on both devices.
+5. **O** `confirm_approval(true)`: adds N to the self group (sharing the
+   DeviceList and profile) and to every joined chat. N must have finished
+   step 3, otherwise it has no KeyPackages to claim.
+6. **N** `confirm_link(true)`: completes the link; on its next sync it joins
+   the self group and the chats from the Welcomes the hub delivers.
+
+Failure and reject paths:
+
+- **SAS mismatch on N** (`confirm_link(false)`): the bundle may come from
+  someone else. N deletes the session, the root and device keys and its
+  local database, and must start over with a new offer.
+- **SAS mismatch on O** (`confirm_approval(false)`): O revokes N in a new
+  DeviceList; the hub drops N's sessions and peers reject its credential.
+- The user must reject on both devices; rejecting on one only is not
+  enough (an unrevoked N keeps a valid certificate, an unwiped N keeps the
+  keys).
+- **No bundle** within 10 minutes, or a bundle that does not open or verify:
+  `wait_link` fails and stores nothing. A `LinkSession` accepts a single
+  bundle; start a new one. If O already approved, the listed but unused N
+  should be revoked from O (`revoke_device`).
+- The bundle is fetched once: the hub deletes it on the first fetch and
+  after its lifetime.
+
 #### LinkOffer
 
 ```

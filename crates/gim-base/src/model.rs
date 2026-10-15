@@ -63,7 +63,8 @@ impl Chat {
 }
 
 /// Send state of a message sent by this user:
-/// `Pending → Sent → Delivered → Read`, or `Pending → Failed`.
+/// `Pending → Sent → Delivered → Read`, or `Pending → Failed`. `Delivered`
+/// and `Read` need a receipt from every device of every other member.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SendState {
     Pending,
