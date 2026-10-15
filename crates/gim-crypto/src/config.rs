@@ -2,7 +2,7 @@
 
 use openmls::prelude::{
     Capabilities, Ciphersuite, CredentialType, ExtensionType, MlsGroupCreateConfig,
-    MlsGroupJoinConfig, SenderRatchetConfiguration, PURE_CIPHERTEXT_WIRE_FORMAT_POLICY,
+    MlsGroupJoinConfig, SenderRatchetConfiguration, MIXED_PLAINTEXT_WIRE_FORMAT_POLICY,
 };
 
 use crate::GIM_CREDENTIAL_TYPE;
@@ -42,11 +42,12 @@ pub(crate) fn leaf_capabilities(gim_credential: bool) -> Capabilities {
 /// Group configuration used when creating a group.
 ///
 /// - Welcomes carry the ratchet tree, so they are self-contained.
-/// - Wire format is pure ciphertext for both application and handshake
-///   messages: commits and proposals are encrypted too, so the delivery
-///   service learns nothing about membership changes from the payload. A
-///   removed member can still decrypt the commit removing it because that
-///   commit is encrypted under the epoch it was a member of.
+/// - Wire format: handshake messages (commits, proposals) are sent as
+///   PublicMessage so the hub can derive membership events from them;
+///   application messages are always PrivateMessage. Incoming, OpenMLS
+///   accepts both framings and rejects PublicMessage application messages;
+///   [`crate::MlsEngine::process_message`] rejects PrivateMessage handshake
+///   messages.
 pub(crate) fn group_create_config(capabilities: Capabilities) -> MlsGroupCreateConfig {
     MlsGroupCreateConfig::builder()
         .ciphersuite(CIPHERSUITE)
@@ -58,7 +59,7 @@ pub(crate) fn group_create_config(capabilities: Capabilities) -> MlsGroupCreateC
         ))
         .max_past_epochs(MAX_PAST_EPOCHS)
         .padding_size(PADDING_SIZE)
-        .wire_format_policy(PURE_CIPHERTEXT_WIRE_FORMAT_POLICY)
+        .wire_format_policy(MIXED_PLAINTEXT_WIRE_FORMAT_POLICY)
         .build()
 }
 
