@@ -35,6 +35,7 @@ use tokio::time::Instant;
 use zeroize::Zeroizing;
 
 use crate::client::{DEVICE_KEY_SECRET_KEY, ROOT_KEY_SECRET_KEY};
+use crate::hosting::Publish;
 use crate::identity::{random_seed, Enrollment};
 use crate::transport::TransportError;
 use crate::{Client, ClientError, Result};
@@ -120,6 +121,8 @@ impl<S: StateStore + 'static> Client<S> {
     /// SAS to compare with the old device's; confirm it with
     /// [`Client::confirm_link`]. A bundle that does not open or verify is
     /// rejected and nothing is stored; the session cannot be reused then.
+    /// Publishes the user's hosting record only if the hub has no valid one
+    /// or it is due for renewal (failures are only logged).
     pub async fn wait_link(&self, link: &LinkSession) -> Result<LinkResult> {
         if self.session().is_some() {
             return Err(ClientError::AlreadyLoggedIn);
@@ -178,6 +181,9 @@ impl<S: StateStore + 'static> Client<S> {
             },
         })
         .await?;
+        // The other devices keep the user's record; publish only if it is
+        // missing or due.
+        self.publish_hosting_record_logged(Publish::IfDue).await;
         self.inner.link_pending.store(true, Ordering::SeqCst);
         Ok(LinkResult { sas })
     }
@@ -262,7 +268,8 @@ impl<S: StateStore + 'static> Client<S> {
     /// device moves to the revoked set, otherwise they all stay listed. If a
     /// newer list lands concurrently (409), the list is read and rebuilt
     /// once more. Fails with [`TransportError::NotFound`] if the hub has no
-    /// DeviceList of the user.
+    /// DeviceList of the user. Publishes a new hosting record (seq + 1);
+    /// a failure there is only logged (the sync loop retries).
     ///
     /// Chats are not rejoined automatically: their members (or another own
     /// device) have to add this device again.
@@ -338,6 +345,7 @@ impl<S: StateStore + 'static> Client<S> {
             },
         })
         .await?;
+        self.publish_hosting_record_logged(Publish::Now).await;
         self.create_self_group().await?;
         Ok(())
     }

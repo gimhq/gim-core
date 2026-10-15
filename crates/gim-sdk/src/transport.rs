@@ -114,6 +114,31 @@ pub struct CommitAccepted {
     pub duplicate: bool,
 }
 
+/// A hub's signed consent to host the calling user: result of
+/// [`Transport::create_hosting_entry`]. Unverified; the client checks it
+/// before putting it into its hosting record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostingEntryGrant {
+    pub hub_id: String,
+    /// The hub's 32-byte Ed25519 root public key.
+    pub hub_root_public_key: Vec<u8>,
+    pub priority: u8,
+    /// gim-identity HostingEntry.
+    pub entry: Vec<u8>,
+}
+
+/// A user's hosting record as a hub stores it. Unverified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredHostingRecord {
+    /// gim-identity SignedHostingRecord.
+    pub record: Vec<u8>,
+    pub seq: u64,
+    /// Unix milliseconds, exclusive.
+    pub expires_at_ms: u64,
+    /// Whether the record lists the answering hub (for its local users).
+    pub hosted: bool,
+}
+
 /// One event of the device's event stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HubEvent {
@@ -124,6 +149,14 @@ pub enum HubEvent {
     DeviceListUpdated {
         user_id: UserId,
         device_list: Vec<u8>,
+    },
+    /// The user's hosting record on the hub expires soon: publish a renewed
+    /// one.
+    HostingRecordExpiring {
+        user_id: UserId,
+        /// Unix milliseconds.
+        expires_at_ms: u64,
+        seq: u64,
     },
 }
 
@@ -169,6 +202,10 @@ pub enum TransportError {
         retry_after_secs: u64,
         reason: String,
     },
+    /// 403 `hosting_record_required`: a federated request of a user
+    /// without a valid hosting record listing the hub.
+    #[error("hosting record required: {0}")]
+    HostingRecordRequired(String),
 }
 
 /// Error of [`Transport::create_session`].
@@ -380,6 +417,42 @@ pub trait Transport: Send + Sync {
         from_seq: u64,
         limit: u32,
     ) -> TransportResult<Vec<GroupMessage>>;
+
+    /// The calling user's hosting entry signed by this hub. Transports
+    /// without hosting records answer [`TransportError::NotFound`].
+    async fn create_hosting_entry(
+        &self,
+        _token: &AccessToken,
+        user_id: &UserId,
+        _priority: u8,
+    ) -> TransportResult<HostingEntryGrant> {
+        Err(TransportError::NotFound(format!(
+            "no hosting entry for {user_id}: hosting records are not supported"
+        )))
+    }
+
+    /// Stores the user's signed hosting record (no token: it is
+    /// self-certifying). [`TransportError::Conflict`] (409
+    /// `stale_hosting_record`) if the hub stores a record with a higher
+    /// seq, or another one with the same seq.
+    async fn put_hosting_record(
+        &self,
+        user_id: &UserId,
+        _record: Vec<u8>,
+    ) -> TransportResult<StoredHostingRecord> {
+        Err(TransportError::NotFound(format!(
+            "no hosting record for {user_id}: hosting records are not supported"
+        )))
+    }
+
+    /// The user's current hosting record; `None` if there is none or it
+    /// expired. A public read like [`Transport::device_list`].
+    async fn hosting_record(
+        &self,
+        _user_id: &UserId,
+    ) -> TransportResult<Option<StoredHostingRecord>> {
+        Ok(None)
+    }
 
     /// Uploads the already-encrypted blob in `file`; returns its id.
     async fn upload_blob(&self, token: &AccessToken, file: &Path) -> TransportResult<String>;
