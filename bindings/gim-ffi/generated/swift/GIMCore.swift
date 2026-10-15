@@ -1058,6 +1058,14 @@ public protocol GimClientProtocol: AnyObject, Sendable {
      */
     func createGroupChat(name: String, memberUserIds: [String]) async throws  -> String
     
+    /**
+     * Creates a new identity with this device as its first one: uploads
+     * its signed DeviceList, recovery backup and KeyPackages to the hub,
+     * signs in and persists the session. Returns the recovery code, which
+     * is not stored and must be shown to the user once.
+     */
+    func createIdentity(displayName: String) async throws  -> String
+    
     func deleteMessage(chatId: String, messageId: String) async throws 
     
     func editMessage(chatId: String, messageId: String, newBody: String) async throws 
@@ -1087,12 +1095,6 @@ public protocol GimClientProtocol: AnyObject, Sendable {
     func markRead(chatId: String, upToMessageId: String) async throws 
     
     func react(chatId: String, messageId: String, emoji: String) async throws 
-    
-    /**
-     * Creates the account and this device on the server and persists the
-     * session.
-     */
-    func register(handle: String, displayName: String) async throws  -> Session
     
     func removeMember(chatId: String, userId: String) async throws 
     
@@ -1348,6 +1350,28 @@ open func createGroupChat(name: String, memberUserIds: [String])async throws  ->
         )
 }
     
+    /**
+     * Creates a new identity with this device as its first one: uploads
+     * its signed DeviceList, recovery backup and KeyPackages to the hub,
+     * signs in and persists the session. Returns the recovery code, which
+     * is not stored and must be shown to the user once.
+     */
+open func createIdentity(displayName: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_gim_core_fn_method_gimclient_create_identity(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(displayName)
+                )
+            },
+            pollFunc: ffi_gim_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_gim_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_gim_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeGimError_lift
+        )
+}
+    
 open func deleteMessage(chatId: String, messageId: String)async throws   {
     return
         try  await uniffiRustCallAsync(
@@ -1486,26 +1510,6 @@ open func react(chatId: String, messageId: String, emoji: String)async throws   
             completeFunc: ffi_gim_core_rust_future_complete_void,
             freeFunc: ffi_gim_core_rust_future_free_void,
             liftFunc: { $0 },
-            errorHandler: FfiConverterTypeGimError_lift
-        )
-}
-    
-    /**
-     * Creates the account and this device on the server and persists the
-     * session.
-     */
-open func register(handle: String, displayName: String)async throws  -> Session  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_gim_core_fn_method_gimclient_register(
-                        self.uniffiCloneHandle(),FfiConverterString.lower(handle),FfiConverterString.lower(displayName)
-                )
-            },
-            pollFunc: ffi_gim_core_rust_future_poll_rust_buffer,
-            completeFunc: ffi_gim_core_rust_future_complete_rust_buffer,
-            freeFunc: ffi_gim_core_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterTypeSession_lift,
             errorHandler: FfiConverterTypeGimError_lift
         )
 }
@@ -3019,7 +3023,7 @@ public func FfiConverterTypeChatSummary_lower(_ value: ChatSummary) -> RustBuffe
 
 public struct ClientConfig: Equatable, Hashable {
     /**
-     * Base URL of gim-server, `http://` or `https://`.
+     * Base URL of the hub, `http://` or `https://`.
      */
     public var serverUrl: String
 
@@ -3027,7 +3031,7 @@ public struct ClientConfig: Equatable, Hashable {
     // declare one manually.
     public init(
         /**
-         * Base URL of gim-server, `http://` or `https://`.
+         * Base URL of the hub, `http://` or `https://`.
          */serverUrl: String) {
         self.serverUrl = serverUrl
     }
@@ -3911,7 +3915,7 @@ enum GimError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
     case Storage(reason: String
     )
     /**
-     * gim-server answered with a non-success HTTP status.
+     * The hub answered with a non-success HTTP status.
      */
     case Server(status: UInt16, reason: String
     )
@@ -5122,6 +5126,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_gim_core_checksum_method_gimclient_create_group_chat() != 10041) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_gim_core_checksum_method_gimclient_create_identity() != 62810) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_gim_core_checksum_method_gimclient_delete_message() != 40750) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -5144,9 +5151,6 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_gimclient_react() != 11948) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_gim_core_checksum_method_gimclient_register() != 52011) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_gimclient_remove_member() != 31958) {
