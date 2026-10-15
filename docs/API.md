@@ -83,6 +83,13 @@ user's signed DeviceList. Handles are optional directory entries pointing at a u
   (they can no longer sign in and peers remove them), `false` keeps them all active. A list that
   lands concurrently is read and rebuilt once. Chats are not rejoined automatically; other members
   (or another own device) must add this device again.
+- **Hosting record** (federation): gim-core keeps the user's hosting record, signed with the root
+  key, on the hub without any app call. `createIdentity` and `restoreFromRecovery` publish one,
+  `waitLink` only if the hub has no valid one; while sync runs it is renewed (7-day lifetime,
+  renewed with less than 3 days left: at `startSync`, daily, and when the hub announces the expiry).
+  Publication failures never fail these calls and are retried by sync. A federated request the
+  hub rejects with 403 `hosting_record_required` publishes the record and is retried once; only if
+  that fails does the call fail with `Server(403, …)`.
 - **Devices**: `devices()` lists the user's devices, `userDevices(userId)` another user's, and
   `revokeDevice(deviceId)` revokes another own device (it is removed from every chat and can no
   longer sign in).

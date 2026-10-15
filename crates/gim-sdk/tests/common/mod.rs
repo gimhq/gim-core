@@ -6,7 +6,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -14,11 +14,12 @@ use async_trait::async_trait;
 use gim_base::model::{ChatKind, GroupMessage, Message, MessageKind, StateChange};
 use gim_base::{MemoryStore, StateReader};
 use gim_common::{ClientId, DeviceRef, GroupId, MessageId, UserId};
+use gim_identity::{HostingEntry, HubRootKey, RootKey};
 use gim_sdk::testing::{FakeTransport, MemorySecretStorage};
 use gim_sdk::transport::{
     AccessToken, Challenge, ClaimedKeyPackage, CommitAccepted, EventBatch, GroupInfo,
-    KeyPackageCount, OutgoingCommit, PostError, SessionError, SessionToken, Transport,
-    TransportError, TransportResult, UserRecord,
+    HostingEntryGrant, HubEvent, KeyPackageCount, OutgoingCommit, PostError, SessionError,
+    SessionToken, StoredHostingRecord, Transport, TransportError, TransportResult, UserRecord,
 };
 use gim_sdk::{Client, ClientBuilder, SecretStorage};
 use tempfile::TempDir;
@@ -33,8 +34,28 @@ pub struct PostFault {
     pub lose_reply: bool,
 }
 
+/// How a malicious hub tampers with the hosting entries it hands out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryTamper {
+    /// The entry is the hub's, signed for another user.
+    ForeignUser,
+    /// The response names another `hub_id` than the entry's key derives.
+    WrongHubId,
+    /// The entry is another hub's; the response names this hub's key.
+    WrongKey,
+}
+
 #[derive(Debug, Default)]
 pub struct Faults {
+    /// Hosting entries are tampered with this way.
+    pub tamper_entries: Mutex<Option<EntryTamper>>,
+    /// Hosting records that land on the hub right before the next
+    /// `put_hosting_record` calls, one per call (another device's upload).
+    pub concurrent_hosting: Mutex<VecDeque<(UserId, Vec<u8>)>>,
+    /// `put_hosting_record` calls.
+    pub hosting_puts: AtomicUsize,
+    /// Events appended to the next `fetch_events` result.
+    pub injected_events: Mutex<Vec<HubEvent>>,
     pub posts: Mutex<VecDeque<PostFault>>,
     /// Ranged downloads allowed before they fail; `None`: unlimited.
     pub downloads_left: Mutex<Option<u32>>,
@@ -261,7 +282,51 @@ impl Transport for FlakyTransport {
         cursor: Option<u64>,
         wait: Duration,
     ) -> TransportResult<EventBatch> {
-        self.inner.fetch_events(t, cursor, wait).await
+        let mut batch = self.inner.fetch_events(t, cursor, wait).await?;
+        batch
+            .events
+            .append(&mut self.faults.injected_events.lock().unwrap());
+        Ok(batch)
+    }
+
+    async fn create_hosting_entry(
+        &self,
+        t: &AccessToken,
+        u: &UserId,
+        priority: u8,
+    ) -> TransportResult<HostingEntryGrant> {
+        let mut grant = self.inner.create_hosting_entry(t, u, priority).await?;
+        let other_hub = HubRootKey::from_seed(&[0x77; 32]);
+        match *self.faults.tamper_entries.lock().unwrap() {
+            None => {}
+            Some(EntryTamper::ForeignUser) => {
+                let other_user = RootKey::from_seed(&[0x78; 32]).public().user_id();
+                grant.entry =
+                    HostingEntry::sign(self.inner.hub_root_key(), &other_user, priority).to_bytes();
+            }
+            Some(EntryTamper::WrongHubId) => grant.hub_id = other_hub.public().hub_id(),
+            Some(EntryTamper::WrongKey) => {
+                grant.entry = HostingEntry::sign(&other_hub, u, priority).to_bytes();
+            }
+        }
+        Ok(grant)
+    }
+
+    async fn put_hosting_record(
+        &self,
+        u: &UserId,
+        record: Vec<u8>,
+    ) -> TransportResult<StoredHostingRecord> {
+        self.faults.hosting_puts.fetch_add(1, Ordering::SeqCst);
+        let concurrent = self.faults.concurrent_hosting.lock().unwrap().pop_front();
+        if let Some((user_id, concurrent)) = concurrent {
+            self.inner.put_hosting_record(&user_id, concurrent).await?;
+        }
+        self.inner.put_hosting_record(u, record).await
+    }
+
+    async fn hosting_record(&self, u: &UserId) -> TransportResult<Option<StoredHostingRecord>> {
+        self.inner.hosting_record(u).await
     }
 
     async fn pending_welcomes(

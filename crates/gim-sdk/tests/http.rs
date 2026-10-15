@@ -7,8 +7,8 @@ use gim_base::model::{ChatKind, IncomingEvent, MessageKind};
 use gim_common::{ClientId, DeviceRef, GroupId, UserId};
 use gim_identity::{DeviceSigningKey, RootKey};
 use gim_sdk::transport::{
-    AccessToken, ClaimedKeyPackage, CommitAccepted, HubEvent, OutgoingCommit, PostError,
-    SessionError, Transport, TransportError,
+    AccessToken, ClaimedKeyPackage, CommitAccepted, HostingEntryGrant, HubEvent, OutgoingCommit,
+    PostError, SessionError, StoredHostingRecord, Transport, TransportError,
 };
 use gim_sdk::{HttpConfig, HttpTransport};
 use serde_json::{json, Value};
@@ -509,8 +509,10 @@ async fn fetch_events_long_poll() {
             // Not a gim-identity user id: skipped.
             { "cursor": 17, "created_at": 1, "type": "device_list.updated",
               "data": { "user_id": "u_b", "device_list": "AQI=" } },
+            { "cursor": 18, "created_at": 1, "type": "hosting_record.expiring",
+              "data": { "user_id": uid(1), "expires_at": 1_700_000_000_000_i64, "seq": 3 } },
         ],
-        "next_cursor": 17,
+        "next_cursor": 18,
     });
     Mock::given(method("GET"))
         .and(path("/v2/events"))
@@ -524,8 +526,8 @@ async fn fetch_events_long_poll() {
         .fetch_events(&token(), Some(10), Duration::from_secs(25))
         .await
         .unwrap();
-    assert_eq!(batch.next_cursor, 17);
-    assert_eq!(batch.events.len(), 5);
+    assert_eq!(batch.next_cursor, 18);
+    assert_eq!(batch.events.len(), 6);
     let HubEvent::Group(IncomingEvent::Message(message)) = &batch.events[0] else {
         panic!("expected a message: {:?}", batch.events[0]);
     };
@@ -557,6 +559,14 @@ async fn fetch_events_long_poll() {
         HubEvent::DeviceListUpdated {
             user_id: user(2),
             device_list: vec![1, 2]
+        }
+    );
+    assert_eq!(
+        batch.events[5],
+        HubEvent::HostingRecordExpiring {
+            user_id: user(1),
+            expires_at_ms: 1_700_000_000_000,
+            seq: 3
         }
     );
 }
@@ -803,6 +813,8 @@ async fn status_mapping() {
         (500, "internal"),
         (503, "unavailable"),
         (400, "bad_request"),
+        (403, "hosting_record_required"),
+        (402, "forbidden"),
     ];
     for (status, code) in cases {
         Mock::given(method("GET"))
@@ -839,6 +851,96 @@ async fn status_mapping() {
         Err(TransportError::Server("unavailable: nope".into()))
     );
     assert!(matches!(info(400).await, Err(TransportError::Server(m)) if m.contains("400")));
+    assert_eq!(
+        info(403).await,
+        Err(TransportError::HostingRecordRequired(
+            "hosting_record_required: nope".into()
+        ))
+    );
+    assert!(matches!(info(402).await, Err(TransportError::Server(m)) if m.contains("402")));
+}
+
+#[tokio::test]
+async fn hosting_entry_and_record() {
+    let server = MockServer::start().await;
+    let entry_route = format!("/v2/users/{}/hosting-entry", uid(1));
+    Mock::given(method("POST"))
+        .and(path(entry_route.as_str()))
+        .and(header("authorization", BEARER))
+        .and(body_json(json!({ "priority": 0 })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "hub_id": "h1", "hub_root_pubkey": "AQI=", "priority": 0, "entry": "AwQ=",
+        })))
+        .mount(&server)
+        .await;
+    let record_route = format!("/v2/users/{}/hosting-record", uid(1));
+    let record = |seq: u64| {
+        json!({
+            "user_id": uid(1), "hosting_record": "BQY=", "seq": seq,
+            "expires_at": 1_700_000_000_000_i64, "hosted": true,
+        })
+    };
+    Mock::given(method("PUT"))
+        .and(path(record_route.as_str()))
+        .and(body_json(json!({ "hosting_record": "BQY=" })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(record(2)))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path(record_route.as_str()))
+        .and(body_json(json!({ "hosting_record": "AA==" })))
+        .respond_with(ResponseTemplate::new(409).set_body_json(error_body("stale_hosting_record")))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(record_route.as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(record(2)))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/users/{}/hosting-record", uid(2))))
+        .respond_with(ResponseTemplate::new(404).set_body_json(error_body("not_found")))
+        .mount(&server)
+        .await;
+
+    let http = transport(&server);
+    let grant = http
+        .create_hosting_entry(&token(), &user(1), 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        grant,
+        HostingEntryGrant {
+            hub_id: "h1".into(),
+            hub_root_public_key: vec![1, 2],
+            priority: 0,
+            entry: vec![3, 4],
+        }
+    );
+    let stored = StoredHostingRecord {
+        record: vec![5, 6],
+        seq: 2,
+        expires_at_ms: 1_700_000_000_000,
+        hosted: true,
+    };
+    assert_eq!(
+        http.put_hosting_record(&user(1), vec![5, 6]).await,
+        Ok(stored.clone())
+    );
+    assert_eq!(
+        http.put_hosting_record(&user(1), vec![0]).await,
+        Err(TransportError::Conflict(
+            "stale_hosting_record: nope".into()
+        ))
+    );
+    assert_eq!(http.hosting_record(&user(1)).await, Ok(Some(stored)));
+    assert_eq!(http.hosting_record(&user(2)).await, Ok(None));
+
+    // Record uploads and reads carry no token.
+    let requests = server.received_requests().await.unwrap();
+    for request in requests.iter().filter(|r| r.url.path() == record_route) {
+        assert!(!request.headers.contains_key("authorization"));
+    }
 }
 
 #[tokio::test]
