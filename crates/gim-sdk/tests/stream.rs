@@ -92,7 +92,7 @@ async fn reconnect_after_drop_resumes_from_cursor_without_duplicates() {
         cursors[2] > cursors[1],
         "resumed after the delivered events"
     );
-    bob.client.stop_sync().await.unwrap();
+    bob.client.stop_sync().unwrap();
     assert_eq!(bob.client.connection_state(), Offline);
 }
 
@@ -118,7 +118,7 @@ async fn falls_back_to_long_poll_without_stream() {
     let polls = server.controls.polls.lock().unwrap().clone();
     assert!(polls.iter().any(|(_, wait)| *wait == Some(1)), "{polls:?}");
     assert!(server.controls.stream_cursors.lock().unwrap().is_empty());
-    bob.client.stop_sync().await.unwrap();
+    bob.client.stop_sync().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -141,7 +141,7 @@ async fn connection_states_and_token_rejection() {
     assert_eq!(next_state(&mut states).await, Offline);
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(matches!(
-        bob.client.stop_sync().await,
+        bob.client.stop_sync(),
         Err(ClientError::NotRegistered)
     ));
     assert_eq!(bob.client.connection_state(), Offline);
@@ -164,7 +164,7 @@ async fn reachability_cuts_the_reconnect_backoff_short() {
     tokio::time::timeout(Duration::from_secs(5), reach_state(&mut states, Connected))
         .await
         .expect("reconnected without waiting for the backoff");
-    bob.client.stop_sync().await.unwrap();
+    bob.client.stop_sync().unwrap();
 }
 
 #[tokio::test]
