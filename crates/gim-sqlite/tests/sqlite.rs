@@ -7,9 +7,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use common::{group, setup, text, Device, NOW};
 use gim_base::model::{
-    Chat, ChatKind, ChatMember, GroupCursor, GroupMessage, MediaCacheEntry, Membership, Message,
-    MessageContent, MessageKind, OutboxEntry, OutboxKind, OutboxState, PendingMedia,
-    PreparedPayload, SendState, UserInfo,
+    AfterCommit, Chat, ChatKind, ChatMember, DepartedMember, GroupCursor, GroupMessage,
+    MediaCacheEntry, Membership, Message, MessageContent, MessageKind, OutboxEntry, OutboxKind,
+    OutboxState, PendingCommit, PendingMedia, PendingWelcome, PreparedPayload, SendState, UserInfo,
 };
 use gim_base::{
     BaseError, MemoryStore, StateReader, StateStore, StoreError, StoreTxn, WriteTarget,
@@ -170,6 +170,8 @@ fn reads_match_memory_store() {
     memory.transaction(|txn| Ok(write_rows(txn)?)).unwrap();
     sqlite.transaction(|txn| Ok(write_rows(txn)?)).unwrap();
     assert_same_reads(&memory, &sqlite);
+    assert_eq!(sqlite.pending_commits().unwrap().len(), 3);
+    assert_eq!(sqlite.departed_members().unwrap().len(), 3);
     memory.transaction(|txn| Ok(update_rows(txn)?)).unwrap();
     sqlite.transaction(|txn| Ok(update_rows(txn)?)).unwrap();
     assert_same_reads(&memory, &sqlite);
@@ -367,6 +369,40 @@ fn write_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
         handle: "alice".into(),
         display_name: "Alice".into(),
     })?;
+
+    let commit = |g: &str, then| PendingCommit {
+        group_id: group(g),
+        client_id: ClientId::new(format!("commit-{g}")).unwrap(),
+        epoch: 4,
+        payload: vec![4, 2],
+        merged: false,
+        then,
+    };
+    txn.upsert_pending_commit(&commit(
+        "crew",
+        AfterCommit::Welcome(PendingWelcome {
+            client_id: ClientId::new("welcome-crew").unwrap(),
+            epoch: 5,
+            payload: vec![5],
+            recipients: vec![device("carol", "laptop"), device("dave", "phone")],
+        }),
+    ))?;
+    txn.upsert_pending_commit(&commit(
+        "dm",
+        AfterCommit::RemoveFromFanOut(vec![device("bob", "tablet")]),
+    ))?;
+    txn.upsert_pending_commit(&commit("anchor", AfterCommit::Nothing))?;
+    for (g, user, dev) in [
+        ("crew", "dave", "phone"),
+        ("crew", "carol", "laptop"),
+        ("dm", "bob", "tablet"),
+        ("crew", "carol", "laptop"),
+    ] {
+        txn.add_departed_member(&DepartedMember {
+            group_id: group(g),
+            device: device(user, dev),
+        })?;
+    }
     Ok(())
 }
 
@@ -391,6 +427,14 @@ fn update_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
         user_id: UserId::new("alice").unwrap(),
         handle: "alice".into(),
         display_name: "Alice M.".into(),
+    })?;
+    let mut merged = txn.pending_commit(&group("crew"))?.unwrap();
+    merged.merged = true;
+    txn.upsert_pending_commit(&merged)?;
+    txn.remove_pending_commit(&group("anchor"))?;
+    txn.remove_departed_member(&DepartedMember {
+        group_id: group("crew"),
+        device: device("dave", "phone"),
     })?;
     Ok(())
 }
@@ -426,7 +470,19 @@ fn assert_same_reads(expected: &impl StateReader, actual: &impl StateReader) {
             actual.parked_messages(&g).unwrap(),
             expected.parked_messages(&g).unwrap()
         );
+        assert_eq!(
+            actual.pending_commit(&g).unwrap(),
+            expected.pending_commit(&g).unwrap()
+        );
     }
+    assert_eq!(
+        actual.pending_commits().unwrap(),
+        expected.pending_commits().unwrap()
+    );
+    assert_eq!(
+        actual.departed_members().unwrap(),
+        expected.departed_members().unwrap()
+    );
     for message_id in ["m1", "m2", "m4", "u1", "u3", "d1", "none"].map(id) {
         assert_eq!(
             actual.message(&message_id).unwrap(),
