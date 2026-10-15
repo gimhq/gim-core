@@ -6,7 +6,7 @@
 
 use std::ops::Range;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,10 +17,10 @@ use gim_common::{ClientId, DeviceRef, GroupId, UserId};
 use gim_sdk::testing::MemorySecretStorage;
 use gim_sdk::transport::{
     AccessToken, Challenge, ClaimedKeyPackage, CommitAccepted, EventBatch, EventStream, GroupInfo,
-    HostingEntryGrant, KeyPackageCount, OutgoingCommit, PostError, SessionError, SessionToken,
-    StoredHostingRecord, Transport, TransportError, TransportResult, UserRecord,
+    HostingEntryGrant, KeyPackageClaim, KeyPackageCount, OutgoingCommit, PostError, SessionError,
+    SessionToken, StoredHostingRecord, Transport, TransportError, TransportResult, UserRecord,
 };
-use gim_sdk::{Client, ClientBuilder, HttpTransport, SecretStorage};
+use gim_sdk::{Client, ClientBuilder, HttpTransport, SecretStorage, SyncSettings};
 use tempfile::TempDir;
 use url::Url;
 
@@ -40,6 +40,30 @@ pub struct Faults {
     /// Every application message post the hub accepted: its `client_id`
     /// and the `seq` the hub returned, in order.
     pub message_posts: Mutex<Vec<(ClientId, u64)>>,
+    /// The MLS message of the last application message post the hub
+    /// accepted.
+    pub last_message: Mutex<Option<Vec<u8>>>,
+    /// Commits the hub answered with 409 `stale_epoch`.
+    pub stale_commits: AtomicU32,
+    /// Every 502/503 peer hub failure of a commit or message post, in
+    /// order.
+    pub peer_failures: Mutex<Vec<TransportError>>,
+    /// Every user a KeyPackage claim reported `unavailable`, in order.
+    pub unavailable_claims: Mutex<Vec<UserId>>,
+}
+
+impl Faults {
+    fn record<T>(&self, result: &Result<T, PostError>) {
+        match result {
+            Err(PostError::StaleEpoch { .. }) => {
+                self.stale_commits.fetch_add(1, Ordering::SeqCst);
+            }
+            Err(PostError::Transport(err)) if err.is_peer_failure() => {
+                self.peer_failures.lock().unwrap().push(err.clone());
+            }
+            _ => {}
+        }
+    }
 }
 
 fn lost_reply() -> TransportError {
@@ -179,6 +203,20 @@ impl Transport for FaultyHub {
         self.inner.claim_key_packages(t, users).await
     }
 
+    async fn claim_key_packages_federated(
+        &self,
+        t: &AccessToken,
+        users: &[UserId],
+    ) -> TransportResult<KeyPackageClaim> {
+        let claim = self.inner.claim_key_packages_federated(t, users).await?;
+        self.faults
+            .unavailable_claims
+            .lock()
+            .unwrap()
+            .extend(claim.unavailable.iter().cloned());
+        Ok(claim)
+    }
+
     async fn create_group(&self, t: &AccessToken, kind: ChatKind) -> TransportResult<GroupId> {
         self.inner.create_group(t, kind).await
     }
@@ -197,7 +235,9 @@ impl Transport for FaultyHub {
         g: &GroupId,
         commit: OutgoingCommit,
     ) -> Result<CommitAccepted, PostError> {
-        let accepted = self.inner.submit_commit(t, g, commit).await?;
+        let result = self.inner.submit_commit(t, g, commit).await;
+        self.faults.record(&result);
+        let accepted = result?;
         self.faults.commit_results.lock().unwrap().push(accepted);
         if self.faults.lose_commit_reply.swap(false, Ordering::SeqCst) {
             return Err(lost_reply().into());
@@ -212,10 +252,13 @@ impl Transport for FaultyHub {
         client_id: ClientId,
         mls_message: Vec<u8>,
     ) -> Result<u64, PostError> {
-        let seq = self
+        let result = self
             .inner
-            .post_message(t, g, client_id.clone(), mls_message)
-            .await?;
+            .post_message(t, g, client_id.clone(), mls_message.clone())
+            .await;
+        self.faults.record(&result);
+        let seq = result?;
+        *self.faults.last_message.lock().unwrap() = Some(mls_message);
         self.faults
             .message_posts
             .lock()
@@ -306,7 +349,8 @@ impl Transport for FaultyHub {
 }
 
 /// A gim-sdk client with an in-memory store on its own [`FaultyHub`],
-/// driven by explicit [`Self::sync`] calls (no sync loop).
+/// driven by explicit [`Self::sync`] calls (no sync loop). Pending invites
+/// are due again after one second (see [`Client::retry_pending_invites`]).
 pub struct SdkDevice {
     pub client: Client<MemoryStore>,
     pub store: Arc<MemoryStore>,
@@ -326,6 +370,10 @@ impl SdkDevice {
             Arc::new(MemorySecretStorage::new()) as Arc<dyn SecretStorage>,
         )
         .data_dir(data_dir.path())
+        .sync_settings(SyncSettings {
+            invite_retry: Duration::from_secs(1),
+            ..SyncSettings::default()
+        })
         .build()
         .unwrap();
         client.create_identity(display_name).await.unwrap();

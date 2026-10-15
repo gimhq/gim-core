@@ -82,7 +82,8 @@ enum Command {
     /// List chats.
     #[command(subcommand)]
     Chats(ChatsCommand),
-    /// Open (or create) the direct chat with a user; prints the chat id.
+    /// Open (or create) the direct chat with a user (handle, or user id for
+    /// users of other hubs); prints the chat id.
     Dm { handle: String },
     /// Manage group chats.
     #[command(subcommand)]

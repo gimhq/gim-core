@@ -132,7 +132,7 @@ fn check_args(args: &WaitForArgs) -> Result<()> {
 
 async fn resolve(ctx: &Ctx, handle: Option<&str>) -> Result<Option<UserId>> {
     Ok(match handle {
-        Some(handle) => Some(ctx.resolve_user(handle).await?.user_id),
+        Some(handle) => Some(ctx.resolve_user(handle).await?),
         None => None,
     })
 }

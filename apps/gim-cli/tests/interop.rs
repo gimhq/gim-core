@@ -3,6 +3,10 @@
 //! `GIM_HUB_URL` (see `testing/gim-cli-interop.sh`). Without it the test
 //! prints a notice and passes, so the default `cargo test` stays offline.
 //!
+//! With `GIM_HUB_URL_B` also set (`GIM_FEDERATION=1
+//! testing/gim-cli-interop.sh`), a second test runs profiles on two hubs of
+//! a federation, naming each other by user id (handles are per hub).
+//!
 //! Black box: only the CLI's `--json` output and exit codes are checked.
 //! Profiles synchronise with `gim wait-for` only, never with sleeps.
 
@@ -76,13 +80,15 @@ fn parse(args: &[&str], out: &Output) -> Value {
 /// One profile, in its own temp dir.
 struct Gim {
     handle: String,
+    user_id: String,
     dir: TempDir,
 }
 
 impl Gim {
     fn register(server: &str, name: &str) -> Self {
-        let gim = Self {
+        let mut gim = Self {
             handle: unique_handle(name),
+            user_id: String::new(),
             dir: TempDir::new().unwrap(),
         };
         let handle = gim.handle.clone();
@@ -92,6 +98,7 @@ impl Gim {
             out["recovery_code"].as_str().is_some_and(|c| !c.is_empty()),
             "{out}"
         );
+        gim.user_id = out["user_id"].as_str().expect("user_id").to_string();
         gim
     }
 
@@ -210,6 +217,71 @@ fn cli_to_cli_interop() {
     listen(&bob, &carol);
     wait_for_new_chat(&server, &alice);
     exit_codes(&alice);
+}
+
+#[test]
+fn cli_to_cli_interop_across_hubs() {
+    let (Some(hub_a), Ok(hub_b)) = (
+        server_url("cli_to_cli_interop_across_hubs"),
+        std::env::var("GIM_HUB_URL_B"),
+    ) else {
+        eprintln!("skipping cli_to_cli_interop_across_hubs: GIM_HUB_URL_B is not set");
+        return;
+    };
+    let alice = Gim::register(&hub_a, "alice");
+    let bob = Gim::register(&hub_b, "bob");
+    let carol = Gim::register(&hub_b, "carol");
+    assert_eq!(bob.ok(&["whoami"])["server"], hub_b.as_str());
+
+    // A DM owned by hub a: text both ways and an image.
+    let chat = chat_of(&alice.ok(&["dm", &bob.user_id]));
+    let hello = alice.send(&chat, "Leaving Split at 06:00");
+    let got = bob.wait_for(&chat, &["--text", "Leaving Split", "--from", &alice.user_id]);
+    assert_eq!(got["id"], hello.as_str(), "{got}");
+    assert_eq!(got["sender"]["user_id"], alice.user_id.as_str(), "{got}");
+    let reply = bob.send(&chat, "See you in Hvar");
+    let got = alice.wait_for(&chat, &["--text", "See you in Hvar", "--from", &bob.user_id]);
+    assert_eq!(got["id"], reply.as_str(), "{got}");
+    let png = alice.dir.path().join("bay.png");
+    std::fs::write(&png, PNG).unwrap();
+    let image = id_of(&alice.ok(&[
+        "send-image",
+        &chat,
+        path_str(&png),
+        "--caption",
+        "Stiniva bay",
+    ]));
+    let got = bob.wait_for(&chat, &["--text", "Stiniva bay", "--from", &alice.user_id]);
+    assert_eq!(got["id"], image.as_str(), "{got}");
+    assert_eq!(got["media"]["mime"], "image/png", "{got}");
+
+    // A group owned by hub b with a member on hub a: add, both ways, remove.
+    let crew = chat_of(&bob.ok(&["group", "create", "Crew Adriatic", &alice.user_id]));
+    bob.ok(&["group", "add", &crew, &carol.handle]);
+    let welcome = bob.send(&crew, "Welcome aboard");
+    for gim in [&alice, &carol] {
+        let got = gim.wait_for(&crew, &["--text", "Welcome aboard", "--from", &bob.user_id]);
+        assert_eq!(got["id"], welcome.as_str(), "{got}");
+    }
+    let hi = alice.send(&crew, "Alice here, ready to sail");
+    for gim in [&bob, &carol] {
+        let got = gim.wait_for(&crew, &["--text", "Alice here", "--from", &alice.user_id]);
+        assert_eq!(got["id"], hi.as_str(), "{got}");
+    }
+    bob.ok(&["group", "remove", &crew, &alice.user_id]);
+    bob.send(&crew, "Secret course to Corfu");
+    carol.wait_for(&crew, &["--text", "Secret course", "--from", &bob.user_id]);
+    alice.fail(
+        &[
+            "wait-for",
+            &crew,
+            "--text",
+            "Secret course",
+            "--timeout",
+            "3",
+        ],
+        EXIT_TIMEOUT,
+    );
 }
 
 /// Text, reply, reaction, edit, delete, read receipt and image in a DM.
