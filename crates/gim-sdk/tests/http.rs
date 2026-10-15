@@ -7,8 +7,8 @@ use gim_base::model::{ChatKind, IncomingEvent, MessageKind};
 use gim_common::{ClientId, DeviceRef, GroupId, UserId};
 use gim_identity::{DeviceSigningKey, RootKey};
 use gim_sdk::transport::{
-    AccessToken, ClaimedKeyPackage, CommitAccepted, HubEvent, OutgoingCommit, PostError, Transport,
-    TransportError,
+    AccessToken, ClaimedKeyPackage, CommitAccepted, HubEvent, OutgoingCommit, PostError,
+    SessionError, Transport, TransportError,
 };
 use gim_sdk::{HttpConfig, HttpTransport};
 use serde_json::{json, Value};
@@ -150,12 +150,21 @@ async fn sign_in_requests() {
         )
         .mount(&server)
         .await;
-    Mock::given(method("POST"))
-        .and(path("/v2/auth/session"))
-        .and(body_json(json!({ "response": "Bg==" })))
-        .respond_with(ResponseTemplate::new(403).set_body_json(error_body("forbidden")))
-        .mount(&server)
-        .await;
+    // 401 codes: AQ== invalid_challenge, Ag== invalid_signature, Aw==
+    // device_not_active, BA== validation_failed (400).
+    for (body, status, code) in [
+        ("AQ==", 401, "invalid_challenge"),
+        ("Ag==", 401, "invalid_signature"),
+        ("Aw==", 401, "device_not_active"),
+        ("BA==", 400, "validation_failed"),
+    ] {
+        Mock::given(method("POST"))
+            .and(path("/v2/auth/session"))
+            .and(body_json(json!({ "response": body })))
+            .respond_with(ResponseTemplate::new(status).set_body_json(error_body(code)))
+            .mount(&server)
+            .await;
+    }
     let http = transport(&server);
     let challenge = http.auth_challenge(&device(1)).await.unwrap();
     assert_eq!(challenge.challenge, vec![1, 2, 3]);
@@ -163,11 +172,22 @@ async fn sign_in_requests() {
     let session = http.create_session(vec![4, 5]).await.unwrap();
     assert_eq!(session.token, token());
     assert_eq!(session.expires_at_ms, 5000);
-    // A rejected response is a rejected sign-in.
     assert_eq!(
-        http.create_session(vec![6]).await,
-        Err(TransportError::Unauthorized)
+        http.create_session(vec![1]).await,
+        Err(SessionError::InvalidChallenge)
     );
+    assert_eq!(
+        http.create_session(vec![2]).await,
+        Err(SessionError::Rejected("invalid_signature".into()))
+    );
+    assert_eq!(
+        http.create_session(vec![3]).await,
+        Err(SessionError::Rejected("device_not_active".into()))
+    );
+    assert!(matches!(
+        http.create_session(vec![4]).await,
+        Err(SessionError::Transport(TransportError::Server(m))) if m.contains("400")
+    ));
 }
 
 #[tokio::test]
@@ -438,6 +458,11 @@ async fn post_message_conflicts() {
         .respond_with(ResponseTemplate::new(403).set_body_json(error_body("forbidden")))
         .mount(&server)
         .await;
+    Mock::given(method("POST"))
+        .and(path("/v2/groups/g_4/messages"))
+        .respond_with(ResponseTemplate::new(413).set_body_json(error_body("payload_too_large")))
+        .mount(&server)
+        .await;
     let http = transport(&server);
     let post = |g: &'static str| {
         let http = &http;
@@ -457,6 +482,10 @@ async fn post_message_conflicts() {
     assert!(matches!(
         post("g_3").await,
         Err(PostError::Transport(TransportError::Server(_)))
+    ));
+    assert!(matches!(
+        post("g_4").await,
+        Err(PostError::Transport(TransportError::TooLarge(_)))
     ));
 }
 

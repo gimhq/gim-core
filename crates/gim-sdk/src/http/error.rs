@@ -16,6 +16,7 @@ pub(super) fn from_status(status: StatusCode, body: &[u8]) -> TransportError {
         StatusCode::UNAUTHORIZED => TransportError::Unauthorized,
         StatusCode::NOT_FOUND => TransportError::NotFound(message),
         StatusCode::CONFLICT => TransportError::Conflict(message),
+        StatusCode::PAYLOAD_TOO_LARGE => TransportError::TooLarge(message),
         StatusCode::GONE => match serde_json::from_slice::<CursorExpiredError>(body) {
             Ok(expired) => TransportError::Gone {
                 cursor: expired.cursor,

@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use gim_common::{DeviceRef, GroupId};
 use gim_crypto::{
-    inspect_handshake, message_epoch, CryptoError, CryptoStore, DeviceListCache, HandshakeKind,
-    MemoryCryptoStore, MlsEngine, ProcessedMessage,
+    inspect_handshake, message_epoch, private_message_epoch, CryptoError, CryptoStore,
+    DeviceListCache, HandshakeKind, MemoryCryptoStore, MlsEngine, ProcessedMessage,
 };
 use gim_identity::{DeviceList, DeviceSigningKey, RootKey, SignedDeviceCert};
 use openmls::prelude::tls_codec::Deserialize as _;
@@ -288,6 +288,7 @@ fn hub_reads_epoch_and_membership_from_handshakes() {
     let (alice, bob, carol) = trio();
     let app = bob.engine.encrypt(&bob.store, &group(), b"hi").unwrap();
     assert_eq!(message_epoch(&app).unwrap(), 1);
+    assert_eq!(private_message_epoch(&app).unwrap(), 1);
     assert!(inspect_handshake(&app).is_err());
 
     let dave = Device::new(4);
@@ -296,6 +297,8 @@ fn hub_reads_epoch_and_membership_from_handshakes() {
         .engine
         .add_members(&alice.store, &group(), &[dave.key_package()])
         .unwrap();
+    // Handshakes are not accepted as application messages.
+    assert!(private_message_epoch(&out.commit).is_err());
     let info = inspect_handshake(&out.commit).unwrap();
     assert_eq!(info.group_id, group().as_str().as_bytes());
     assert_eq!(
@@ -354,4 +357,21 @@ fn leaving_sends_a_self_remove_proposal_that_another_member_commits() {
         sorted(alice.engine.group_members(&alice.store, &group()).unwrap()),
         sorted(vec![alice.me.clone(), bob.me.clone()])
     );
+}
+
+#[test]
+fn hub_validates_uploaded_key_packages() {
+    let (alice, bob) = (Device::new(1), Device::new(2));
+    let key_package = bob.key_package();
+    // Fail closed without the uploader's DeviceList.
+    assert!(matches!(
+        alice.engine.key_package_device(&key_package),
+        Err(CryptoError::DeviceListUnknown { user_id }) if user_id == bob.me.user_id
+    ));
+    alice.learn(&[&bob]);
+    assert_eq!(
+        alice.engine.key_package_device(&key_package).unwrap(),
+        bob.me
+    );
+    assert!(alice.engine.key_package_device(b"junk").is_err());
 }

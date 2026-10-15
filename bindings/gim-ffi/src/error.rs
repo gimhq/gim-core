@@ -45,7 +45,7 @@ impl From<gim_sdk::ClientError> for GimError {
     fn from(err: gim_sdk::ClientError) -> Self {
         use gim_sdk::ClientError as E;
         match err {
-            E::NotLoggedIn | E::NotRegistered => Self::NotRegistered,
+            E::NotLoggedIn | E::NotRegistered | E::DeviceNotActive(_) => Self::NotRegistered,
             E::AlreadyLoggedIn | E::InvalidInput(_) => Self::InvalidInput {
                 reason: err.to_string(),
             },
@@ -91,6 +91,8 @@ impl From<gim_sdk::TransportError> for GimError {
                 status: 500,
                 reason,
             },
+            E::TooLarge(_) => Self::InvalidInput { reason },
+            E::DeviceNotActive(_) => Self::NotRegistered,
         }
     }
 }

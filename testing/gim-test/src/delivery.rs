@@ -36,7 +36,7 @@
 //! DeviceLists and auth responses and parse the MLS framing (gim-crypto),
 //! and pass the results in.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ops::Range;
 use std::sync::{Mutex, MutexGuard};
 
@@ -243,7 +243,8 @@ struct State {
     users: HashMap<UserId, UserState>,
     handles: BTreeMap<String, UserId>,
     tokens: HashMap<String, DeviceRef>,
-    challenges: HashSet<Vec<u8>>,
+    /// Issued, unredeemed challenges and their devices.
+    challenges: HashMap<Vec<u8>, DeviceRef>,
     key_packages: HashMap<DeviceRef, KeyPackages>,
     groups: HashMap<GroupId, Group>,
     inboxes: HashMap<DeviceRef, Inbox>,
@@ -388,14 +389,28 @@ impl FakeDeliveryService {
         Ok(())
     }
 
-    /// Records an issued challenge; it can be redeemed once.
-    pub fn issue_challenge(&self, challenge: Vec<u8>) {
-        self.lock().challenges.insert(challenge);
+    /// Records a challenge issued to `device`; it can be redeemed once.
+    pub fn issue_challenge(&self, challenge: Vec<u8>, device: &DeviceRef) {
+        self.lock().challenges.insert(challenge, device.clone());
     }
 
-    /// Consumes an issued challenge; `false` if unknown or used.
-    pub fn redeem_challenge(&self, challenge: &[u8]) -> bool {
-        self.lock().challenges.remove(challenge)
+    /// Consumes an issued challenge; `false` if unknown, used, or issued to
+    /// another device.
+    pub fn redeem_challenge(&self, challenge: &[u8], device: &DeviceRef) -> bool {
+        self.lock()
+            .challenges
+            .remove(challenge)
+            .is_some_and(|issued| &issued == device)
+    }
+
+    /// The issued, unredeemed challenge whose bytes `signed` embeds (an
+    /// encoded AuthResponse carries its challenge verbatim).
+    pub fn issued_challenge_in(&self, signed: &[u8]) -> Option<Vec<u8>> {
+        self.lock()
+            .challenges
+            .keys()
+            .find(|c| !c.is_empty() && signed.windows(c.len()).any(|w| w == c.as_slice()))
+            .cloned()
     }
 
     /// A new bearer token for a device active in its user's list.
@@ -542,7 +557,10 @@ impl FakeDeliveryService {
         creator: &DeviceRef,
     ) -> Result<GroupId, DeliveryError> {
         let id = self.lock().next_id();
-        let group_id = GroupId::new(format!("{}/g{id:024}", self.hub_id)).expect("valid group id");
+        // `<hub_id>/<random_128>` like the hub, with a counter for the
+        // 16 random bytes.
+        let random = base32_lower(&u128::from(id).to_be_bytes());
+        let group_id = GroupId::new(format!("{}/{random}", self.hub_id)).expect("valid group id");
         self.create(&group_id, kind, creator)?;
         Ok(group_id)
     }
@@ -979,6 +997,25 @@ impl State {
     }
 }
 
+/// Lowercase unpadded RFC 4648 base32.
+fn base32_lower(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut out = String::new();
+    let (mut buffer, mut bits) = (0u32, 0);
+    for &byte in bytes {
+        buffer = (buffer << 8) | u32::from(byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(char::from(ALPHABET[(buffer >> bits) as usize & 31]));
+        }
+    }
+    if bits > 0 {
+        out.push(char::from(ALPHABET[(buffer << (5 - bits)) as usize & 31]));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1027,7 +1064,14 @@ mod tests {
         let a = user(&ds, "a", &["d1"]).remove(0);
         let b = user(&ds, "b", &["d1", "d2"]);
         let g = ds.create_group_with(GroupKind::Group, &a).unwrap();
-        assert!(g.as_str().starts_with(&format!("{}/", ds.hub_id())));
+        let random = g
+            .as_str()
+            .strip_prefix(&format!("{}/", ds.hub_id()))
+            .unwrap();
+        assert_eq!(random.len(), 26);
+        assert!(random
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b)));
 
         let added = ds.submit_commit(&g, &a, add("c1", 0, &b)).unwrap();
         assert_eq!((added.seq, added.epoch, added.duplicate), (1, 1, false));
@@ -1161,9 +1205,12 @@ mod tests {
         ds.release_handle(&user_id, "alice");
         assert_eq!(ds.find_handle("alice"), None);
 
-        ds.issue_challenge(b"c".to_vec());
-        assert!(ds.redeem_challenge(b"c"));
-        assert!(!ds.redeem_challenge(b"c"));
+        ds.issue_challenge(b"c".to_vec(), &a[0]);
+        assert!(ds.redeem_challenge(b"c", &a[0]));
+        assert!(!ds.redeem_challenge(b"c", &a[0]));
+        ds.issue_challenge(b"d".to_vec(), &a[0]);
+        assert!(!ds.redeem_challenge(b"d", &a[1]));
+        assert!(!ds.redeem_challenge(b"d", &a[0]));
     }
 
     #[test]

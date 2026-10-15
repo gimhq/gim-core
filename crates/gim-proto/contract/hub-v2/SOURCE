@@ -1,7 +1,7 @@
 gim-hub API v2 contract, vendored verbatim (byte-identical copies).
 
 Repository: gimhq/gim-hub (local checkout: /srv/gimhq/im-client/hub)
-Commit:     7ec774b (hub main at vendoring time)
+Commit:     7cb68ad (hub main at vendoring time)
 Vendored:   2026-10-15
 
 Files (hub path -> this directory):
@@ -9,12 +9,6 @@ Files (hub path -> this directory):
   docs/api-v2.md      -> api-v2.md
   docs/s2s.md         -> s2s.md
   proto/s2s.proto     -> s2s.proto
-
-Known drift: the sign-in contract update (AuthChallenge
-{challenge, expires_at, hub_id}; CreateSessionRequest {response}) is not yet
-on hub main at this commit. gim_proto::v2 already implements the updated
-shapes; tests/dto_v2.rs accepts either shape for those two schemas. Remove
-that allowance once a hub commit with the update is vendored.
 
 Refresh:
   H=/srv/gimhq/im-client/hub; C=<hub commit>

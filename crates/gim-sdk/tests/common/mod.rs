@@ -3,7 +3,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -17,8 +17,8 @@ use gim_common::{ClientId, DeviceRef, GroupId, MessageId, UserId};
 use gim_sdk::testing::{FakeTransport, MemorySecretStorage, TestLinking};
 use gim_sdk::transport::{
     AccessToken, Challenge, ClaimedKeyPackage, CommitAccepted, EventBatch, GroupInfo,
-    KeyPackageCount, OutgoingCommit, PostError, SessionToken, Transport, TransportError,
-    TransportResult, UserRecord,
+    KeyPackageCount, OutgoingCommit, PostError, SessionError, SessionToken, Transport,
+    TransportError, TransportResult, UserRecord,
 };
 use gim_sdk::{Client, ClientBuilder, SecretStorage};
 use tempfile::TempDir;
@@ -41,6 +41,12 @@ pub struct Faults {
     /// Flips a byte of every downloaded range past the blob header.
     pub tamper: AtomicBool,
     pub downloaded_bytes: AtomicU64,
+    /// Errors returned by the next `create_session` calls, in order.
+    pub sessions: Mutex<VecDeque<SessionError>>,
+    /// `device_list` calls for the user still answered "unknown".
+    pub hidden_lists: Mutex<HashMap<UserId, usize>>,
+    /// Users whose DeviceList was requested, in order.
+    pub list_requests: Mutex<Vec<UserId>>,
 }
 
 impl Faults {
@@ -90,8 +96,12 @@ impl Transport for FlakyTransport {
         self.inner.auth_challenge(d).await
     }
 
-    async fn create_session(&self, response: Vec<u8>) -> TransportResult<SessionToken> {
-        self.inner.create_session(response).await
+    async fn create_session(&self, response: Vec<u8>) -> Result<SessionToken, SessionError> {
+        let injected = self.faults.sessions.lock().unwrap().pop_front();
+        match injected {
+            Some(err) => Err(err),
+            None => self.inner.create_session(response).await,
+        }
     }
 
     async fn put_recovery_backup(
@@ -104,6 +114,11 @@ impl Transport for FlakyTransport {
     }
 
     async fn device_list(&self, t: &AccessToken, u: &UserId) -> TransportResult<Option<Vec<u8>>> {
+        self.faults.list_requests.lock().unwrap().push(u.clone());
+        if let Some(left @ 1..) = self.faults.hidden_lists.lock().unwrap().get_mut(u) {
+            *left -= 1;
+            return Ok(None);
+        }
         self.inner.device_list(t, u).await
     }
 

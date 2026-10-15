@@ -1,6 +1,6 @@
 //! `/v2/stream` WebSocket client: tokio-tungstenite over rustls (ring
-//! provider, webpki roots), the token in the `token` query parameter, JSON
-//! text frames.
+//! provider, webpki roots), the token in an `Authorization: Bearer` header
+//! (kept out of the URL), JSON text frames.
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -14,7 +14,8 @@ use reqwest::Url;
 use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::StatusCode;
+use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
+use tokio_tungstenite::tungstenite::http::{HeaderValue, StatusCode};
 use tokio_tungstenite::tungstenite::{self, Message};
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
@@ -26,13 +27,9 @@ const PING_INTERVAL: Duration = Duration::from_secs(30);
 /// The connection counts as dead after this long without a frame.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(75);
 
-/// `ws(s)://…/v2/stream?[cursor=N&]token=…` for an `http(s)://…` base URL
-/// without a trailing `/`.
-pub(crate) fn stream_url(
-    base_url: &str,
-    cursor: Option<u64>,
-    token: &AccessToken,
-) -> TransportResult<String> {
+/// `ws(s)://…/v2/stream[?cursor=N]` for an `http(s)://…` base URL without a
+/// trailing `/`.
+pub(crate) fn stream_url(base_url: &str, cursor: Option<u64>) -> TransportResult<String> {
     let (scheme, rest) = if let Some(rest) = base_url.strip_prefix("https://") {
         ("wss://", rest)
     } else if let Some(rest) = base_url.strip_prefix("http://") {
@@ -44,12 +41,9 @@ pub(crate) fn stream_url(
     };
     let mut url = Url::parse(&format!("{scheme}{rest}{}", paths::STREAM))
         .map_err(|e| TransportError::Network(format!("invalid stream URL: {e}")))?;
-    {
-        let mut query = url.query_pairs_mut();
-        if let Some(cursor) = cursor {
-            query.append_pair("cursor", &cursor.to_string());
-        }
-        query.append_pair("token", token.as_str());
+    if let Some(cursor) = cursor {
+        url.query_pairs_mut()
+            .append_pair("cursor", &cursor.to_string());
     }
     Ok(url.into())
 }
@@ -86,8 +80,15 @@ pub(crate) struct WsEventStream {
 impl WsEventStream {
     /// Connects within `timeout`. `Ok(None)` if the hub refuses the upgrade
     /// with a status other than 401: it has no stream.
-    pub(crate) async fn connect(url: String, timeout: Duration) -> TransportResult<Option<Self>> {
-        let request = url.into_client_request().map_err(network)?;
+    pub(crate) async fn connect(
+        url: String,
+        token: &AccessToken,
+        timeout: Duration,
+    ) -> TransportResult<Option<Self>> {
+        let mut request = url.into_client_request().map_err(network)?;
+        let bearer = HeaderValue::from_str(&format!("Bearer {}", token.as_str()))
+            .map_err(|_| TransportError::Unauthorized)?;
+        request.headers_mut().insert(AUTHORIZATION, bearer);
         let connecting = tokio_tungstenite::connect_async_tls_with_config(
             request,
             None,

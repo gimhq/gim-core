@@ -24,8 +24,8 @@ use tokio_util::io::ReaderStream;
 use crate::stream::ws;
 use crate::transport::{
     AccessToken, Challenge, ClaimedKeyPackage, CommitAccepted, EventBatch, EventStream, GroupInfo,
-    HubEvent, KeyPackageCount, OutgoingCommit, PostError, SessionToken, Transport, TransportError,
-    TransportResult, UserRecord,
+    HubEvent, KeyPackageCount, OutgoingCommit, PostError, SessionError, SessionToken, Transport,
+    TransportError, TransportResult, UserRecord,
 };
 
 pub use reqwest::Url;
@@ -197,20 +197,28 @@ impl Transport for HttpTransport {
         })
     }
 
-    async fn create_session(&self, response: Vec<u8>) -> TransportResult<SessionToken> {
+    async fn create_session(&self, response: Vec<u8>) -> Result<SessionToken, SessionError> {
         let request = v2::CreateSessionRequest { response };
-        let result = Self::json::<v2::Session>(
+        let response = Self::send(
             self.api(Method::POST, paths::AUTH_SESSION, None)
                 .json(&request),
         )
-        .await;
-        let session = match result {
-            // A rejected response (403) is a rejected sign-in.
-            Err(TransportError::Server(reason)) if reason.starts_with("403") => {
-                return Err(TransportError::Unauthorized)
-            }
-            session => session?,
-        };
+        .await?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            let body = response.bytes().await.unwrap_or_default();
+            let code = serde_json::from_slice::<v2::ErrorResponse>(&body)
+                .map(|e| e.error.code)
+                .unwrap_or_default();
+            return Err(match code.as_str() {
+                "invalid_challenge" => SessionError::InvalidChallenge,
+                "invalid_signature" | "device_not_active" => SessionError::Rejected(code),
+                _ => TransportError::Unauthorized.into(),
+            });
+        }
+        if !response.status().is_success() {
+            return Err(Self::status_error(response).await.into());
+        }
+        let session: v2::Session = response.json().await.map_err(error::from_reqwest)?;
         Ok(SessionToken {
             token: AccessToken::new(session.token),
             expires_at_ms: millis(session.expires_at),
@@ -441,9 +449,9 @@ impl Transport for HttpTransport {
         token: &AccessToken,
         cursor: Option<u64>,
     ) -> TransportResult<Option<Box<dyn EventStream>>> {
-        let url = ws::stream_url(&self.base_url, cursor, token)?;
+        let url = ws::stream_url(&self.base_url, cursor)?;
         let timeout = self.connect_timeout + self.request_timeout;
-        let stream = ws::WsEventStream::connect(url, timeout).await?;
+        let stream = ws::WsEventStream::connect(url, token, timeout).await?;
         Ok(stream.map(|s| Box::new(s) as Box<dyn EventStream>))
     }
 

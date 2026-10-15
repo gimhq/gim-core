@@ -151,6 +151,29 @@ pub enum TransportError {
     Gone { cursor: u64 },
     #[error("server error: {0}")]
     Server(String),
+    /// 413: the payload exceeds the hub's size limit; resending cannot
+    /// succeed.
+    #[error("too large: {0}")]
+    TooLarge(String),
+    /// The hub refused this device's sign-in for good (401
+    /// `invalid_signature` or `device_not_active`): the device was revoked
+    /// or its keys are broken.
+    #[error("device not active: {0}")]
+    DeviceNotActive(String),
+}
+
+/// Error of [`Transport::create_session`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SessionError {
+    /// 401 `invalid_challenge`: unknown, used, expired or foreign
+    /// challenge; a new challenge may succeed.
+    #[error("invalid challenge")]
+    InvalidChallenge,
+    /// 401 `invalid_signature` or `device_not_active`.
+    #[error("sign-in rejected: {0}")]
+    Rejected(String),
+    #[error(transparent)]
+    Transport(#[from] TransportError),
 }
 
 /// Error of [`Transport::submit_commit`] and [`Transport::post_message`].
@@ -183,11 +206,11 @@ pub trait Transport: Send + Sync {
     async fn put_device_list(&self, user_id: &UserId, device_list: Vec<u8>) -> TransportResult<()>;
 
     /// A sign-in challenge for `device`, which must be active in its user's
-    /// stored DeviceList.
+    /// stored DeviceList ([`TransportError::NotFound`] otherwise).
     async fn auth_challenge(&self, device: &DeviceRef) -> TransportResult<Challenge>;
 
     /// Redeems a gim-identity AuthResponse for a session token.
-    async fn create_session(&self, response: Vec<u8>) -> TransportResult<SessionToken>;
+    async fn create_session(&self, response: Vec<u8>) -> Result<SessionToken, SessionError>;
 
     async fn put_recovery_backup(
         &self,

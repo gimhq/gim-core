@@ -377,8 +377,13 @@ impl<S: StateStore + 'static> Client<S> {
             tracing::warn!(groups = ?repaired, "dropped dangling pending commits");
         }
         self.set_session(session.clone());
-        if let Err(err) = self.valid_token().await {
-            tracing::warn!(error = %err, "cannot sign in; retrying later");
+        match self.valid_token().await {
+            // `renew_token` signed out.
+            Err(TransportError::DeviceNotActive(reason)) => {
+                return Err(ClientError::DeviceNotActive(reason))
+            }
+            Err(err) => tracing::warn!(error = %err, "cannot sign in; retrying later"),
+            Ok(_) => {}
         }
         self.clean_outgoing().await?;
         // Finish what the previous run left: re-submit its pending commits
@@ -692,9 +697,9 @@ impl<S: StateStore + 'static> Client<S> {
             let revoked = self.fetch_device_lists(devices).await?;
             self.record_revoked(session, revoked).await?;
         }
-        let mut attempt = 0;
+        let mut attempt = 1;
+        let mut lists_retried = false;
         loop {
-            attempt += 1;
             self.resolve_pending_commit(session, group_id).await?;
             let (gid, op) = (group_id.clone(), op.clone());
             // The commit record is persisted with the MLS pending commit, so
@@ -747,13 +752,27 @@ impl<S: StateStore + 'static> Client<S> {
                         Ok(true)
                     })
                 })
-                .await?;
+                .await;
+            let created = match created {
+                // Safety net behind the pre-fetch: fetch the list, retry once.
+                Err(ClientError::Base(BaseError::Crypto(CryptoError::DeviceListUnknown {
+                    user_id,
+                }))) if !lists_retried => {
+                    lists_retried = true;
+                    tracing::info!(%user_id, "unknown device list; fetching it and retrying once");
+                    let revoked = self.refresh_device_list(&user_id).await?;
+                    self.record_revoked(session, revoked).await?;
+                    continue;
+                }
+                created => created?,
+            };
             if !created {
                 return Ok(false);
             }
             match self.resolve_pending_commit(session, group_id).await? {
                 Resolved::Accepted | Resolved::None => return Ok(true),
                 Resolved::Conflict if attempt <= MAX_COMMIT_RETRIES => {
+                    attempt += 1;
                     self.sync_locked(session).await?;
                 }
                 Resolved::Conflict => return Err(ClientError::CommitConflict(attempt)),
@@ -1077,6 +1096,17 @@ impl<S: StateStore + 'static> Client<S> {
             .session
             .write()
             .unwrap_or_else(|e| e.into_inner()) = Some(session);
+    }
+
+    /// Signed-out state: forgets the session in memory and in the keystore.
+    /// Keys and local data stay.
+    pub(crate) fn clear_session(&self) -> Result<()> {
+        *self
+            .inner
+            .session
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        Ok(self.inner.secrets.delete(SESSION_SECRET_KEY)?)
     }
 }
 

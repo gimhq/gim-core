@@ -220,6 +220,14 @@ impl MlsEngine {
             .is_some_and(|list| list.is_revoked(&device.device_id))
     }
 
+    /// Validates a KeyPackage as a hub does on upload (signature,
+    /// ciphersuite, gim credential against the engine's lookup) and returns
+    /// the device its credential certifies.
+    pub fn key_package_device(&self, key_package: &[u8]) -> Result<DeviceRef> {
+        let key_package = self.validate_key_package(key_package)?;
+        self.validate_leaf(key_package.leaf_node())
+    }
+
     /// Generates one-time KeyPackages, each a TLS-serialized `MlsMessage`.
     pub fn generate_key_packages(
         &self,
