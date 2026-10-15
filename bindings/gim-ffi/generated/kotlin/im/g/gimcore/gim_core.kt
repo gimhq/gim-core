@@ -828,11 +828,19 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_add_members(
     ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_approve_link(
+    ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_cancel_send(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_chat_list(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_chat_members(
+    ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_claim_handle(
+    ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_confirm_approval(
+    ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_confirm_link(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_connection_state(
     ): Int
@@ -844,6 +852,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_delete_message(
     ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_devices(
+    ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_edit_message(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_fetch_media(
@@ -854,19 +864,29 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_leave_chat(
     ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_local_state_reset(
+    ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_mark_read(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_react(
     ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_release_handle(
+    ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_remove_member(
     ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_restore_from_recovery(
+    ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_retry_send(
+    ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_revoke_device(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_send_media(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_send_text(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_session(
+    ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_set_display_name(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_set_group_info(
     ): Int
@@ -876,15 +896,25 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_sign_out(
     ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_start_link(
+    ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_start_sync(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_stop_sync(
+    ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_stop_typing(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_timeline(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_typing(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_unreact(
+    ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_user_devices(
+    ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_user_id(
+    ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_wait_link(
     ): Int
     external fun uniffi_gim_core_checksum_method_typinglistener_on_update(
     ): Int
@@ -897,6 +927,12 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_gim_core_checksum_method_platformhooks_data_dir(
     ): Int
     external fun uniffi_gim_core_checksum_method_platformhooks_is_network_reachable(
+    ): Int
+    external fun uniffi_gim_core_checksum_method_linksession_qr_string(
+    ): Int
+    external fun uniffi_gim_core_checksum_method_pendingapproval_device_id(
+    ): Int
+    external fun uniffi_gim_core_checksum_method_pendingapproval_sas(
     ): Int
     external fun uniffi_gim_core_checksum_method_taskhandle_cancel(
     ): Int
@@ -957,11 +993,19 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_gim_core_fn_method_gimclient_add_members(`ptr`: Long,`chatId`: RustBuffer.ByValue,`userIds`: RustBuffer.ByValue,
     ): Long
+    external fun uniffi_gim_core_fn_method_gimclient_approve_link(`ptr`: Long,`qrString`: RustBuffer.ByValue,
+    ): Long
     external fun uniffi_gim_core_fn_method_gimclient_cancel_send(`ptr`: Long,`chatId`: RustBuffer.ByValue,`messageId`: RustBuffer.ByValue,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_chat_list(`ptr`: Long,`listener`: Long,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_chat_members(`ptr`: Long,`chatId`: RustBuffer.ByValue,
+    ): Long
+    external fun uniffi_gim_core_fn_method_gimclient_claim_handle(`ptr`: Long,`handle`: RustBuffer.ByValue,
+    ): Long
+    external fun uniffi_gim_core_fn_method_gimclient_confirm_approval(`ptr`: Long,`approval`: Long,`accepted`: Byte,
+    ): Long
+    external fun uniffi_gim_core_fn_method_gimclient_confirm_link(`ptr`: Long,`accepted`: Byte,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_connection_state(`ptr`: Long,`listener`: Long,
     ): Long
@@ -973,6 +1017,8 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_delete_message(`ptr`: Long,`chatId`: RustBuffer.ByValue,`messageId`: RustBuffer.ByValue,
     ): Long
+    external fun uniffi_gim_core_fn_method_gimclient_devices(`ptr`: Long,
+    ): Long
     external fun uniffi_gim_core_fn_method_gimclient_edit_message(`ptr`: Long,`chatId`: RustBuffer.ByValue,`messageId`: RustBuffer.ByValue,`newBody`: RustBuffer.ByValue,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_fetch_media(`ptr`: Long,`chatId`: RustBuffer.ByValue,`messageId`: RustBuffer.ByValue,`destPath`: RustBuffer.ByValue,
@@ -983,19 +1029,29 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_leave_chat(`ptr`: Long,`chatId`: RustBuffer.ByValue,
     ): Long
+    external fun uniffi_gim_core_fn_method_gimclient_local_state_reset(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_gim_core_fn_method_gimclient_mark_read(`ptr`: Long,`chatId`: RustBuffer.ByValue,`upToMessageId`: RustBuffer.ByValue,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_react(`ptr`: Long,`chatId`: RustBuffer.ByValue,`messageId`: RustBuffer.ByValue,`emoji`: RustBuffer.ByValue,
     ): Long
+    external fun uniffi_gim_core_fn_method_gimclient_release_handle(`ptr`: Long,
+    ): Long
     external fun uniffi_gim_core_fn_method_gimclient_remove_member(`ptr`: Long,`chatId`: RustBuffer.ByValue,`userId`: RustBuffer.ByValue,
     ): Long
+    external fun uniffi_gim_core_fn_method_gimclient_restore_from_recovery(`ptr`: Long,`userId`: RustBuffer.ByValue,`recoveryCode`: RustBuffer.ByValue,`revokeOthers`: Byte,
+    ): Long
     external fun uniffi_gim_core_fn_method_gimclient_retry_send(`ptr`: Long,`chatId`: RustBuffer.ByValue,`messageId`: RustBuffer.ByValue,
+    ): Long
+    external fun uniffi_gim_core_fn_method_gimclient_revoke_device(`ptr`: Long,`deviceId`: RustBuffer.ByValue,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_send_media(`ptr`: Long,`chatId`: RustBuffer.ByValue,`filePath`: RustBuffer.ByValue,`mime`: RustBuffer.ByValue,`caption`: RustBuffer.ByValue,`replyTo`: RustBuffer.ByValue,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_send_text(`ptr`: Long,`chatId`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,`replyTo`: RustBuffer.ByValue,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_session(`ptr`: Long,
+    ): Long
+    external fun uniffi_gim_core_fn_method_gimclient_set_display_name(`ptr`: Long,`name`: RustBuffer.ByValue,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_set_group_info(`ptr`: Long,`chatId`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,`avatarFilePath`: RustBuffer.ByValue,
     ): Long
@@ -1005,15 +1061,25 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_sign_out(`ptr`: Long,
     ): Long
+    external fun uniffi_gim_core_fn_method_gimclient_start_link(`ptr`: Long,`hubs`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
     external fun uniffi_gim_core_fn_method_gimclient_start_sync(`ptr`: Long,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_stop_sync(`ptr`: Long,
+    ): Long
+    external fun uniffi_gim_core_fn_method_gimclient_stop_typing(`ptr`: Long,`chatId`: RustBuffer.ByValue,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_timeline(`ptr`: Long,`chatId`: RustBuffer.ByValue,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_typing(`ptr`: Long,`chatId`: RustBuffer.ByValue,`listener`: Long,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_unreact(`ptr`: Long,`chatId`: RustBuffer.ByValue,`messageId`: RustBuffer.ByValue,`emoji`: RustBuffer.ByValue,
+    ): Long
+    external fun uniffi_gim_core_fn_method_gimclient_user_devices(`ptr`: Long,`userId`: RustBuffer.ByValue,
+    ): Long
+    external fun uniffi_gim_core_fn_method_gimclient_user_id(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_gim_core_fn_method_gimclient_wait_link(`ptr`: Long,`link`: Long,
     ): Long
     external fun uniffi_gim_core_fn_clone_typinglistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
@@ -1039,6 +1105,20 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_gim_core_fn_method_platformhooks_is_network_reachable(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
+    external fun uniffi_gim_core_fn_clone_linksession(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_gim_core_fn_free_linksession(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_gim_core_fn_method_linksession_qr_string(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_gim_core_fn_clone_pendingapproval(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_gim_core_fn_free_pendingapproval(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_gim_core_fn_method_pendingapproval_device_id(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_gim_core_fn_method_pendingapproval_sas(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_gim_core_fn_clone_taskhandle(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_gim_core_fn_free_taskhandle(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1208,6 +1288,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_gim_core_checksum_method_gimclient_add_members() and 0xFFFF) != 22623) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_approve_link() and 0xFFFF) != 21168) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_cancel_send() and 0xFFFF) != 2342) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1215,6 +1298,15 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_chat_members() and 0xFFFF) != 23360) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_claim_handle() and 0xFFFF) != 25957) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_confirm_approval() and 0xFFFF) != 47132) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_confirm_link() and 0xFFFF) != 50385) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_connection_state() and 0xFFFF) != 25642) {
@@ -1232,6 +1324,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_gim_core_checksum_method_gimclient_delete_message() and 0xFFFF) != 40750) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_devices() and 0xFFFF) != 33142) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_edit_message() and 0xFFFF) != 16801) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1247,16 +1342,28 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_gim_core_checksum_method_gimclient_leave_chat() and 0xFFFF) != 31409) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_local_state_reset() and 0xFFFF) != 57050) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_mark_read() and 0xFFFF) != 19929) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_react() and 0xFFFF) != 11948) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_release_handle() and 0xFFFF) != 61692) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_remove_member() and 0xFFFF) != 31958) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_restore_from_recovery() and 0xFFFF) != 55724) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_retry_send() and 0xFFFF) != 31098) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_revoke_device() and 0xFFFF) != 54975) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_send_media() and 0xFFFF) != 37766) {
@@ -1265,7 +1372,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_gim_core_checksum_method_gimclient_send_text() and 0xFFFF) != 37175) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_gim_core_checksum_method_gimclient_session() and 0xFFFF) != 61969) {
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_session() and 0xFFFF) != 243) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_set_display_name() and 0xFFFF) != 26277) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_set_group_info() and 0xFFFF) != 58408) {
@@ -1274,16 +1384,22 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_gim_core_checksum_method_gimclient_set_network_reachable() and 0xFFFF) != 23325) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_gim_core_checksum_method_gimclient_set_typing() and 0xFFFF) != 29621) {
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_set_typing() and 0xFFFF) != 10433) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_sign_out() and 0xFFFF) != 6926) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_start_link() and 0xFFFF) != 4052) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_start_sync() and 0xFFFF) != 1762) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_stop_sync() and 0xFFFF) != 2971) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_stop_typing() and 0xFFFF) != 46718) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_timeline() and 0xFFFF) != 44578) {
@@ -1295,10 +1411,19 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_gim_core_checksum_method_gimclient_unreact() and 0xFFFF) != 48531) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_user_devices() and 0xFFFF) != 3625) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_user_id() and 0xFFFF) != 19625) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_wait_link() and 0xFFFF) != 24066) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_gim_core_checksum_method_typinglistener_on_update() and 0xFFFF) != 51337) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_gim_core_checksum_method_platformhooks_secure_store_get() and 0xFFFF) != 40606) {
+    if ((lib.uniffi_gim_core_checksum_method_platformhooks_secure_store_get() and 0xFFFF) != 57240) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_platformhooks_secure_store_set() and 0xFFFF) != 17548) {
@@ -1311,6 +1436,15 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_platformhooks_is_network_reachable() and 0xFFFF) != 53730) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_gim_core_checksum_method_linksession_qr_string() and 0xFFFF) != 7173) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_gim_core_checksum_method_pendingapproval_device_id() and 0xFFFF) != 8700) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_gim_core_checksum_method_pendingapproval_sas() and 0xFFFF) != 53031) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_taskhandle_cancel() and 0xFFFF) != 12087) {
@@ -2473,6 +2607,13 @@ public interface GimClientInterface {
     suspend fun `addMembers`(`chatId`: kotlin.String, `userIds`: List<kotlin.String>)
     
     /**
+     * Old device: approves the link offer scanned from the new device's QR
+     * code. Certifies the new device and sends it the user's keys; returns
+     * the pending approval carrying the SAS to compare.
+     */
+    suspend fun `approveLink`(`qrString`: kotlin.String): PendingApproval
+    
+    /**
      * Removes an unsent message from the outbox and the timeline.
      */
     suspend fun `cancelSend`(`chatId`: kotlin.String, `messageId`: kotlin.String)
@@ -2487,6 +2628,26 @@ public interface GimClientInterface {
      * including the signed-in user.
      */
     suspend fun `chatMembers`(`chatId`: kotlin.String): List<UserProfile>
+    
+    /**
+     * Claims `handle` in the hub directory, so others find the user with
+     * `find_user`; `Server(409)` if it is taken.
+     */
+    suspend fun `claimHandle`(`handle`: kotlin.String)
+    
+    /**
+     * Old device: the user compared the SAS. `true` adds the new device to
+     * the user's devices and to every joined chat (the new device must
+     * have finished `wait_link`); `false` revokes it.
+     */
+    suspend fun `confirmApproval`(`approval`: PendingApproval, `accepted`: kotlin.Boolean)
+    
+    /**
+     * New device: the user compared the SAS. `false` (mismatch) deletes
+     * the linked identity, the local database and the keystore secrets
+     * like `sign_out`; create a new client afterwards.
+     */
+    suspend fun `confirmLink`(`accepted`: kotlin.Boolean)
     
     /**
      * Subscribes to connection state changes.
@@ -2514,6 +2675,11 @@ public interface GimClientInterface {
     
     suspend fun `deleteMessage`(`chatId`: kotlin.String, `messageId`: kotlin.String)
     
+    /**
+     * The devices of the signed-in user.
+     */
+    suspend fun `devices`(): List<DeviceInfo>
+    
     suspend fun `editMessage`(`chatId`: kotlin.String, `messageId`: kotlin.String, `newBody`: kotlin.String)
     
     /**
@@ -2535,6 +2701,14 @@ public interface GimClientInterface {
     suspend fun `leaveChat`(`chatId`: kotlin.String)
     
     /**
+     * Whether opening this client discarded an existing local database
+     * (undecryptable, e.g. its key was lost, or incompatible). The session
+     * is gone with it: show onboarding and tell the user that local
+     * history was lost.
+     */
+    fun `localStateReset`(): kotlin.Boolean
+    
+    /**
      * Marks everything up to and including `up_to_message_id` as read and
      * sends a read receipt.
      */
@@ -2542,12 +2716,36 @@ public interface GimClientInterface {
     
     suspend fun `react`(`chatId`: kotlin.String, `messageId`: kotlin.String, `emoji`: kotlin.String)
     
+    /**
+     * Releases the handle claimed with `claim_handle`; `InvalidInput` if
+     * there is none.
+     */
+    suspend fun `releaseHandle`()
+    
     suspend fun `removeMember`(`chatId`: kotlin.String, `userId`: kotlin.String)
+    
+    /**
+     * Restores the user on this (fresh) device from its recovery code
+     * after losing every device: becomes a new device of `user_id`, signed
+     * in, with a new self group. Chats are not rejoined automatically.
+     *
+     * With `revoke_others` the previous devices are revoked. Keeping them
+     * (`revoke_others == false`) needs the user's current DeviceList
+     * cached locally, which a fresh install does not have: it then fails
+     * with `InvalidInput`.
+     */
+    suspend fun `restoreFromRecovery`(`userId`: kotlin.String, `recoveryCode`: kotlin.String, `revokeOthers`: kotlin.Boolean)
     
     /**
      * Re-queues a message in `SendState::Failed`.
      */
     suspend fun `retrySend`(`chatId`: kotlin.String, `messageId`: kotlin.String)
+    
+    /**
+     * Revokes another device of the signed-in user and removes it from
+     * every chat. `InvalidInput` for the current device.
+     */
+    suspend fun `revokeDevice`(`deviceId`: kotlin.String)
     
     /**
      * Encrypts, uploads and sends a file; returns its message id. The file
@@ -2561,9 +2759,16 @@ public interface GimClientInterface {
     suspend fun `sendText`(`chatId`: kotlin.String, `body`: kotlin.String, `replyTo`: kotlin.String?): kotlin.String
     
     /**
-     * The persisted session, or `None` before `register`.
+     * The persisted session, or `None` before an identity exists on this
+     * device (`create_identity`, `restore_from_recovery` or a device link).
      */
     suspend fun `session`(): Session?
+    
+    /**
+     * Sets the signed-in user's display name; synced to the user's other
+     * devices and announced to every joined chat.
+     */
+    suspend fun `setDisplayName`(`name`: kotlin.String)
     
     /**
      * Updates the group name and/or avatar and shares them with the
@@ -2577,12 +2782,24 @@ public interface GimClientInterface {
      */
     fun `setNetworkReachable`(`reachable`: kotlin.Boolean)
     
+    /**
+     * Reports whether the user is typing. Call it with `true` on every
+     * keystroke (notifications are rate-limited) and with `false` when
+     * typing stops; see `stop_typing`.
+     */
     suspend fun `setTyping`(`chatId`: kotlin.String, `active`: kotlin.Boolean)
     
     /**
      * Stops sync and deletes the session, local data and keystore secrets.
      */
     suspend fun `signOut`()
+    
+    /**
+     * New device: starts a link. Show `LinkSession.qr_string()` as a QR
+     * code and call `wait_link`. `hubs` are the hub URLs the old device
+     * may post the bundle to.
+     */
+    fun `startLink`(`hubs`: List<kotlin.String>): LinkSession
     
     /**
      * Starts the background sync loop (WebSocket stream with a long-poll
@@ -2596,6 +2813,13 @@ public interface GimClientInterface {
     suspend fun `stopSync`()
     
     /**
+     * Tells the chat the user stopped typing (the input was cleared, the
+     * message sent or the chat closed); same as `set_typing(chat_id,
+     * false)`. Does nothing unless typing was reported.
+     */
+    suspend fun `stopTyping`(`chatId`: kotlin.String)
+    
+    /**
      * The timeline of one chat. Cheap; listeners are added on the result.
      */
     suspend fun `timeline`(`chatId`: kotlin.String): Timeline
@@ -2606,6 +2830,25 @@ public interface GimClientInterface {
     suspend fun `typing`(`chatId`: kotlin.String, `listener`: TypingListener): TaskHandle
     
     suspend fun `unreact`(`chatId`: kotlin.String, `messageId`: kotlin.String, `emoji`: kotlin.String)
+    
+    /**
+     * The devices of any user, from the user's current DeviceList; empty
+     * for an unknown user.
+     */
+    suspend fun `userDevices`(`userId`: kotlin.String): List<DeviceInfo>
+    
+    /**
+     * The signed-in user's id; `None` without a session.
+     */
+    fun `userId`(): kotlin.String?
+    
+    /**
+     * New device: waits (up to 10 minutes) for the old device to approve
+     * the link, then signs in as a new device of that user. Returns the
+     * SAS to compare with the one the old device shows; finish with
+     * `confirm_link`.
+     */
+    suspend fun `waitLink`(`link`: LinkSession): kotlin.String
     
     companion object
 }
@@ -2740,6 +2983,33 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
 
     
     /**
+     * Old device: approves the link offer scanned from the new device's QR
+     * code. Certifies the new device and sends it the user's keys; returns
+     * the pending approval carrying the SAS to compare.
+     */
+    @Throws(GimException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `approveLink`(`qrString`: kotlin.String) : PendingApproval {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_gim_core_fn_method_gimclient_approve_link(
+                uniffiHandle,
+                
+        FfiConverterString.lower(`qrString`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_gim_core_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_gim_core_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterTypePendingApproval.lift(it) },
+        // Error FFI converter
+        GimException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * Removes an unsent message from the outbox and the timeline.
      */
     @Throws(GimException::class)
@@ -2811,6 +3081,90 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
         { future -> UniffiLib.ffi_gim_core_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterSequenceTypeUserProfile.lift(it) },
+        // Error FFI converter
+        GimException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Claims `handle` in the hub directory, so others find the user with
+     * `find_user`; `Server(409)` if it is taken.
+     */
+    @Throws(GimException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `claimHandle`(`handle`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_gim_core_fn_method_gimclient_claim_handle(
+                uniffiHandle,
+                
+        FfiConverterString.lower(`handle`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_gim_core_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_gim_core_rust_future_free_void(future) },
+        // lift function
+        { },
+        
+        // Error FFI converter
+        GimException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Old device: the user compared the SAS. `true` adds the new device to
+     * the user's devices and to every joined chat (the new device must
+     * have finished `wait_link`); `false` revokes it.
+     */
+    @Throws(GimException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `confirmApproval`(`approval`: PendingApproval, `accepted`: kotlin.Boolean) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_gim_core_fn_method_gimclient_confirm_approval(
+                uniffiHandle,
+                
+        FfiConverterTypePendingApproval.lower(`approval`),
+        FfiConverterBoolean.lower(`accepted`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_gim_core_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_gim_core_rust_future_free_void(future) },
+        // lift function
+        { },
+        
+        // Error FFI converter
+        GimException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * New device: the user compared the SAS. `false` (mismatch) deletes
+     * the linked identity, the local database and the keystore secrets
+     * like `sign_out`; create a new client afterwards.
+     */
+    @Throws(GimException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `confirmLink`(`accepted`: kotlin.Boolean) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_gim_core_fn_method_gimclient_confirm_link(
+                uniffiHandle,
+                
+        FfiConverterBoolean.lower(`accepted`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_gim_core_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_gim_core_rust_future_free_void(future) },
+        // lift function
+        { },
+        
         // Error FFI converter
         GimException.ErrorHandler,
     )
@@ -2946,6 +3300,30 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
     }
 
     
+    /**
+     * The devices of the signed-in user.
+     */
+    @Throws(GimException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `devices`() : List<DeviceInfo> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_gim_core_fn_method_gimclient_devices(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_gim_core_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_gim_core_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeDeviceInfo.lift(it) },
+        // Error FFI converter
+        GimException.ErrorHandler,
+    )
+    }
+
+    
     @Throws(GimException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
     override suspend fun `editMessage`(`chatId`: kotlin.String, `messageId`: kotlin.String, `newBody`: kotlin.String) {
@@ -3075,6 +3453,25 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
 
     
     /**
+     * Whether opening this client discarded an existing local database
+     * (undecryptable, e.g. its key was lost, or incompatible). The session
+     * is gone with it: show onboarding and tell the user that local
+     * history was lost.
+     */override fun `localStateReset`(): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_gim_core_fn_method_gimclient_local_state_reset(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Marks everything up to and including `up_to_message_id` as read and
      * sends a read receipt.
      */
@@ -3127,6 +3524,32 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
     }
 
     
+    /**
+     * Releases the handle claimed with `claim_handle`; `InvalidInput` if
+     * there is none.
+     */
+    @Throws(GimException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `releaseHandle`() {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_gim_core_fn_method_gimclient_release_handle(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_gim_core_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_gim_core_rust_future_free_void(future) },
+        // lift function
+        { },
+        
+        // Error FFI converter
+        GimException.ErrorHandler,
+    )
+    }
+
+    
     @Throws(GimException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
     override suspend fun `removeMember`(`chatId`: kotlin.String, `userId`: kotlin.String) {
@@ -3137,6 +3560,41 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
                 
         FfiConverterString.lower(`chatId`),
         FfiConverterString.lower(`userId`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_gim_core_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_gim_core_rust_future_free_void(future) },
+        // lift function
+        { },
+        
+        // Error FFI converter
+        GimException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Restores the user on this (fresh) device from its recovery code
+     * after losing every device: becomes a new device of `user_id`, signed
+     * in, with a new self group. Chats are not rejoined automatically.
+     *
+     * With `revoke_others` the previous devices are revoked. Keeping them
+     * (`revoke_others == false`) needs the user's current DeviceList
+     * cached locally, which a fresh install does not have: it then fails
+     * with `InvalidInput`.
+     */
+    @Throws(GimException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `restoreFromRecovery`(`userId`: kotlin.String, `recoveryCode`: kotlin.String, `revokeOthers`: kotlin.Boolean) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_gim_core_fn_method_gimclient_restore_from_recovery(
+                uniffiHandle,
+                
+        FfiConverterString.lower(`userId`),
+        FfiConverterString.lower(`recoveryCode`),
+        FfiConverterBoolean.lower(`revokeOthers`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_void(future, callback, continuation) },
@@ -3164,6 +3622,33 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
                 
         FfiConverterString.lower(`chatId`),
         FfiConverterString.lower(`messageId`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_gim_core_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_gim_core_rust_future_free_void(future) },
+        // lift function
+        { },
+        
+        // Error FFI converter
+        GimException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Revokes another device of the signed-in user and removes it from
+     * every chat. `InvalidInput` for the current device.
+     */
+    @Throws(GimException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `revokeDevice`(`deviceId`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_gim_core_fn_method_gimclient_revoke_device(
+                uniffiHandle,
+                
+        FfiConverterString.lower(`deviceId`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_void(future, callback, continuation) },
@@ -3236,7 +3721,8 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
 
     
     /**
-     * The persisted session, or `None` before `register`.
+     * The persisted session, or `None` before an identity exists on this
+     * device (`create_identity`, `restore_from_recovery` or a device link).
      */
     @Throws(GimException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -3253,6 +3739,33 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
         { future -> UniffiLib.ffi_gim_core_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterOptionalTypeSession.lift(it) },
+        // Error FFI converter
+        GimException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Sets the signed-in user's display name; synced to the user's other
+     * devices and announced to every joined chat.
+     */
+    @Throws(GimException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `setDisplayName`(`name`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_gim_core_fn_method_gimclient_set_display_name(
+                uniffiHandle,
+                
+        FfiConverterString.lower(`name`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_gim_core_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_gim_core_rust_future_free_void(future) },
+        // lift function
+        { },
+        
         // Error FFI converter
         GimException.ErrorHandler,
     )
@@ -3305,6 +3818,11 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
     
 
     
+    /**
+     * Reports whether the user is typing. Call it with `true` on every
+     * keystroke (notifications are rate-limited) and with `false` when
+     * typing stops; see `stop_typing`.
+     */
     @Throws(GimException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
     override suspend fun `setTyping`(`chatId`: kotlin.String, `active`: kotlin.Boolean) {
@@ -3355,6 +3873,26 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
 
     
     /**
+     * New device: starts a link. Show `LinkSession.qr_string()` as a QR
+     * code and call `wait_link`. `hubs` are the hub URLs the old device
+     * may post the bundle to.
+     */
+    @Throws(GimException::class)override fun `startLink`(`hubs`: List<kotlin.String>): LinkSession {
+            return FfiConverterTypeLinkSession.lift(
+    callWithHandle {
+    uniffiRustCallWithError(GimException) { _status ->
+    UniffiLib.uniffi_gim_core_fn_method_gimclient_start_link(
+        it,
+        
+        FfiConverterSequenceString.lower(`hubs`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Starts the background sync loop (WebSocket stream with a long-poll
      * fallback, reconnecting with backoff) and the outbox sender.
      */
@@ -3391,6 +3929,34 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
             UniffiLib.uniffi_gim_core_fn_method_gimclient_stop_sync(
                 uniffiHandle,
                 
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_gim_core_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_gim_core_rust_future_free_void(future) },
+        // lift function
+        { },
+        
+        // Error FFI converter
+        GimException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Tells the chat the user stopped typing (the input was cleared, the
+     * message sent or the chat closed); same as `set_typing(chat_id,
+     * false)`. Does nothing unless typing was reported.
+     */
+    @Throws(GimException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `stopTyping`(`chatId`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_gim_core_fn_method_gimclient_stop_typing(
+                uniffiHandle,
+                
+        FfiConverterString.lower(`chatId`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_void(future, callback, continuation) },
@@ -3475,6 +4041,76 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
         // lift function
         { },
         
+        // Error FFI converter
+        GimException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * The devices of any user, from the user's current DeviceList; empty
+     * for an unknown user.
+     */
+    @Throws(GimException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `userDevices`(`userId`: kotlin.String) : List<DeviceInfo> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_gim_core_fn_method_gimclient_user_devices(
+                uniffiHandle,
+                
+        FfiConverterString.lower(`userId`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_gim_core_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_gim_core_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeDeviceInfo.lift(it) },
+        // Error FFI converter
+        GimException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * The signed-in user's id; `None` without a session.
+     */override fun `userId`(): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_gim_core_fn_method_gimclient_user_id(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * New device: waits (up to 10 minutes) for the old device to approve
+     * the link, then signs in as a new device of that user. Returns the
+     * SAS to compare with the one the old device shows; finish with
+     * `confirm_link`.
+     */
+    @Throws(GimException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `waitLink`(`link`: LinkSession) : kotlin.String {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_gim_core_fn_method_gimclient_wait_link(
+                uniffiHandle,
+                
+        FfiConverterTypeLinkSession.lower(`link`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_gim_core_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_gim_core_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterString.lift(it) },
         // Error FFI converter
         GimException.ErrorHandler,
     )
@@ -3615,6 +4251,567 @@ public object FfiConverterTypeGimClient: FfiConverter<GimClient, Long> {
 
 
 /**
+ * A link offer of a new device: show [`Self::qr_string`] as a QR code,
+ * then pass it to `GimClient::wait_link`. Accepts a single bundle; start a
+ * new one after a failed `wait_link`.
+ */
+public interface LinkSessionInterface {
+    
+    /**
+     * The string to encode in the QR code the old device scans.
+     */
+    fun `qrString`(): kotlin.String
+    
+    companion object
+}
+
+/**
+ * A link offer of a new device: show [`Self::qr_string`] as a QR code,
+ * then pass it to `GimClient::wait_link`. Accepts a single bundle; start a
+ * new one after a failed `wait_link`.
+ */
+open class LinkSession: Disposable, AutoCloseable, LinkSessionInterface
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    /**
+     * Whether the current object has been destroyed and its reference is gone in the Rust side.
+     */
+    val uniffiIsDestroyed: Boolean get() = wasDestroyed.get()
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_gim_core_fn_free_linksession(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_gim_core_fn_clone_linksession(handle, status)
+        }
+    }
+
+    
+    /**
+     * The string to encode in the QR code the old device scans.
+     */override fun `qrString`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_gim_core_fn_method_linksession_qr_string(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+
+    
+
+
+    
+    
+    /**
+     * @suppress
+     */
+    companion object
+    
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeLinkSession: FfiConverter<LinkSession, Long> {
+    override fun lower(value: LinkSession): Long {
+        return value.uniffiCloneHandle()
+    }
+
+    override fun lift(value: Long): LinkSession {
+        return LinkSession(UniffiWithHandle, value)
+    }
+
+    override fun read(buf: ByteBuffer): LinkSession {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: LinkSession) = 8UL
+
+    override fun write(value: LinkSession, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+/**
+ * A link approved on the old device: show [`Self::sas`], then pass it to
+ * `GimClient::confirm_approval`.
+ */
+public interface PendingApprovalInterface {
+    
+    /**
+     * The new device.
+     */
+    fun `deviceId`(): kotlin.String
+    
+    /**
+     * Six-digit short authentication string, `"123 456"`.
+     */
+    fun `sas`(): kotlin.String
+    
+    companion object
+}
+
+/**
+ * A link approved on the old device: show [`Self::sas`], then pass it to
+ * `GimClient::confirm_approval`.
+ */
+open class PendingApproval: Disposable, AutoCloseable, PendingApprovalInterface
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    /**
+     * Whether the current object has been destroyed and its reference is gone in the Rust side.
+     */
+    val uniffiIsDestroyed: Boolean get() = wasDestroyed.get()
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_gim_core_fn_free_pendingapproval(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_gim_core_fn_clone_pendingapproval(handle, status)
+        }
+    }
+
+    
+    /**
+     * The new device.
+     */override fun `deviceId`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_gim_core_fn_method_pendingapproval_device_id(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Six-digit short authentication string, `"123 456"`.
+     */override fun `sas`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_gim_core_fn_method_pendingapproval_sas(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+
+    
+
+
+    
+    
+    /**
+     * @suppress
+     */
+    companion object
+    
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePendingApproval: FfiConverter<PendingApproval, Long> {
+    override fun lower(value: PendingApproval): Long {
+        return value.uniffiCloneHandle()
+    }
+
+    override fun lift(value: Long): PendingApproval {
+        return PendingApproval(UniffiWithHandle, value)
+    }
+
+    override fun read(buf: ByteBuffer): PendingApproval {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: PendingApproval) = 8UL
+
+    override fun write(value: PendingApproval, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+/**
  * Services the native app provides to gim-core. Implemented in Kotlin/Swift
  * and passed to `create_client`. Methods may be called from any Rust thread.
  */
@@ -3622,7 +4819,10 @@ public interface PlatformHooks {
     
     /**
      * Reads a secret from the platform keystore (Keychain / Android Keystore).
-     * Returns `None` when the key does not exist.
+     * Returns `None` when the key does not exist. Throw when the keystore
+     * cannot be read (e.g. locked before first unlock): gim-core then fails
+     * the call instead of treating the secret as absent, so it never
+     * replaces an existing database key.
      */
     fun `secureStoreGet`(`key`: kotlin.String): kotlin.ByteArray?
     
@@ -3759,11 +4959,15 @@ open class PlatformHooksImpl: Disposable, AutoCloseable, PlatformHooks
     
     /**
      * Reads a secret from the platform keystore (Keychain / Android Keystore).
-     * Returns `None` when the key does not exist.
-     */override fun `secureStoreGet`(`key`: kotlin.String): kotlin.ByteArray? {
+     * Returns `None` when the key does not exist. Throw when the keystore
+     * cannot be read (e.g. locked before first unlock): gim-core then fails
+     * the call instead of treating the secret as absent, so it never
+     * replaces an existing database key.
+     */
+    @Throws(GimException::class)override fun `secureStoreGet`(`key`: kotlin.String): kotlin.ByteArray? {
             return FfiConverterOptionalByteArray.lift(
     callWithHandle {
-    uniffiRustCall() { _status ->
+    uniffiRustCallWithError(GimException) { _status ->
     UniffiLib.uniffi_gim_core_fn_method_platformhooks_secure_store_get(
         it,
         
@@ -3869,7 +5073,12 @@ internal object uniffiCallbackInterfacePlatformHooks {
                 )
             }
             val writeReturn = { value: kotlin.ByteArray? -> uniffiOutReturn.setValue(FfiConverterOptionalByteArray.lower(value)) }
-            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+            uniffiTraitInterfaceCallWithError(
+                uniffiCallStatus,
+                makeCall,
+                writeReturn,
+                { e: GimException -> FfiConverterTypeGimError.lower(e) }
+            )
         }
     }
     internal object `secureStoreSet`: UniffiCallbackInterfacePlatformHooksMethod1 {
@@ -5356,6 +6565,63 @@ public object FfiConverterTypeClientConfig: FfiConverterRustBuffer<ClientConfig>
 
 
 /**
+ * A device of a user, from the user's signed DeviceList.
+ */
+data class DeviceInfo (
+    var `deviceId`: kotlin.String
+    , 
+    /**
+     * When the device was certified; 0 for revoked devices.
+     */
+    var `createdAtMs`: kotlin.ULong
+    , 
+    /**
+     * This client's device.
+     */
+    var `isCurrent`: kotlin.Boolean
+    , 
+    var `revoked`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDeviceInfo: FfiConverterRustBuffer<DeviceInfo> {
+    override fun read(buf: ByteBuffer): DeviceInfo {
+        return DeviceInfo(
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: DeviceInfo) = (
+            FfiConverterString.allocationSize(value.`deviceId`) +
+            FfiConverterULong.allocationSize(value.`createdAtMs`) +
+            FfiConverterBoolean.allocationSize(value.`isCurrent`) +
+            FfiConverterBoolean.allocationSize(value.`revoked`)
+    )
+
+    override fun write(value: DeviceInfo, buf: ByteBuffer) {
+            FfiConverterString.write(value.`deviceId`, buf)
+            FfiConverterULong.write(value.`createdAtMs`, buf)
+            FfiConverterBoolean.write(value.`isCurrent`, buf)
+            FfiConverterBoolean.write(value.`revoked`, buf)
+    }
+}
+
+
+
+/**
  * Handle to an encrypted attachment. Pass it back to `fetch_media` /
  * `fetch_thumbnail`; keys and blob ids never leave Rust.
  */
@@ -5650,6 +6916,9 @@ data class Session (
     , 
     var `deviceId`: kotlin.String
     , 
+    /**
+     * Empty until `claim_handle`.
+     */
     var `handle`: kotlin.String
     , 
     var `displayName`: kotlin.String
@@ -6114,7 +7383,9 @@ sealed class GimException: kotlin.Exception() {
     }
     
     /**
-     * The call needs a session; call `register` first.
+     * The call needs a session: create an identity, restore one from its
+     * recovery code or link this device first. Also returned after
+     * `sign_out` and once the hub reports this device as revoked.
      */
     class NotRegistered(
         ) : GimException() {
@@ -6577,13 +7848,13 @@ sealed class SendState {
     
     
     /**
-     * Delivered to at least one recipient device.
+     * Delivered to every device of every other member.
      */
     object Delivered : SendState()
     
     
     /**
-     * Read by at least one recipient.
+     * Read on every device of every other member.
      */
     object Read : SendState()
     
@@ -7432,6 +8703,34 @@ public object FfiConverterSequenceTypeChatSummary: FfiConverterRustBuffer<List<C
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeChatSummary.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeDeviceInfo: FfiConverterRustBuffer<List<DeviceInfo>> {
+    override fun read(buf: ByteBuffer): List<DeviceInfo> {
+        val len = buf.getInt()
+        return List<DeviceInfo>(len) {
+            FfiConverterTypeDeviceInfo.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<DeviceInfo>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeDeviceInfo.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<DeviceInfo>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeDeviceInfo.write(it, buf)
         }
     }
 }

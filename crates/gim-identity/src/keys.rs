@@ -89,6 +89,15 @@ impl DeviceSigningKey {
     }
 }
 
+impl RootKey {
+    /// The 32-byte Ed25519 seed, for persisting a root key received in a
+    /// link bundle or opened from a recovery backup in the platform
+    /// keystore; transmit only sealed (link bundle, recovery backup).
+    pub fn to_seed(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.0.to_bytes())
+    }
+}
+
 /// `context || 0x00 || tbs`, the message every signature covers.
 fn signing_input(context: &[u8], tbs: &[u8]) -> Vec<u8> {
     let mut message = Vec::with_capacity(context.len() + 1 + tbs.len());

@@ -44,6 +44,7 @@ struct Rows {
     departed: BTreeSet<DepartedMember>,
     membership: BTreeMap<(GroupId, u64, UserId), MembershipEvent>,
     device_lists: BTreeMap<UserId, Vec<u8>>,
+    self_groups: Vec<GroupId>,
 }
 
 #[derive(Debug, Default)]
@@ -239,6 +240,10 @@ impl StateReader for MemoryStore {
     fn device_lists(&self) -> StoreResult<Vec<(UserId, Vec<u8>)>> {
         Ok(read(&self.rows)?.device_lists.clone().into_iter().collect())
     }
+
+    fn self_groups(&self) -> StoreResult<Vec<GroupId>> {
+        Ok(read(&self.rows)?.self_groups.clone())
+    }
 }
 
 impl StateReader for MemoryTxn {
@@ -322,6 +327,10 @@ impl StateReader for MemoryTxn {
     fn device_lists(&self) -> StoreResult<Vec<(UserId, Vec<u8>)>> {
         Ok(self.rows.device_lists.clone().into_iter().collect())
     }
+
+    fn self_groups(&self) -> StoreResult<Vec<GroupId>> {
+        Ok(self.rows.self_groups.clone())
+    }
 }
 
 impl StoreTxn for MemoryTxn {
@@ -342,6 +351,7 @@ impl StoreTxn for MemoryTxn {
         rows.pending_commits.remove(group_id);
         rows.departed.retain(|d| &d.group_id != group_id);
         rows.membership.retain(|(g, _, _), _| g != group_id);
+        rows.self_groups.retain(|g| g != group_id);
         Ok(())
     }
 
@@ -448,6 +458,13 @@ impl StoreTxn for MemoryTxn {
             .insert(user_id.clone(), device_list.to_vec());
         Ok(())
     }
+
+    fn add_self_group(&mut self, group_id: &GroupId) -> StoreResult<()> {
+        if !self.rows.self_groups.contains(group_id) {
+            self.rows.self_groups.push(group_id.clone());
+        }
+        Ok(())
+    }
 }
 
 impl CryptoStore for MemoryTxn {
@@ -515,7 +532,12 @@ fn timeline_key(m: &Message) -> (u64, u64, &MessageId) {
 
 impl Rows {
     fn chats(&self) -> StoreResult<Vec<Chat>> {
-        let mut chats: Vec<Chat> = self.chats.values().cloned().collect();
+        let mut chats: Vec<Chat> = self
+            .chats
+            .values()
+            .filter(|c| !self.self_groups.contains(&c.group_id))
+            .cloned()
+            .collect();
         chats.sort_by_key(|c| std::cmp::Reverse(c.updated_at_ms));
         Ok(chats)
     }

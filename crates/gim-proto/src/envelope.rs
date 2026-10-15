@@ -27,6 +27,16 @@
 //! | `"receipt"` | `k` `"delivered"` or `"read"`, `ids` array of message ids |
 //! | `"typing"` | `a` bool (active) |
 //! | `"group_info"` | `n` name (optional), `av` media map (optional) |
+//! | `"profile"` | `n` display name of the sender's user |
+//! | `"self.device_list"` | `dl` signed gim-identity DeviceList (bstr) |
+//! | `"self.profile"` | `n` display name of the own user |
+//! | `"self.contacts"` | `u` array of contact maps |
+//! | `"self.read_marker"` | `g` group id, `s` seq of the last read message |
+//!
+//! The `self.*` contents travel only in the self group, the MLS group of
+//! one user's own devices, and are ignored from any other user. A contact
+//! map has `id` user id (text) and optional `h` handle and `n` display name
+//! (text).
 //!
 //! A media map has `id` blob id (text), `k` AES-256 key (32-byte bstr),
 //! `d` SHA-256 of the encrypted blob (32-byte bstr), `mt` MIME type (text),
@@ -36,7 +46,7 @@
 use std::fmt;
 
 use ciborium::Value;
-use gim_common::MessageId;
+use gim_common::{GroupId, MessageId, UserId};
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 
@@ -103,6 +113,40 @@ pub enum Content {
         name: Option<String>,
         avatar: Option<MediaInfo>,
     },
+    /// The sender's display name, announced to a chat on join and on
+    /// change.
+    Profile {
+        display_name: String,
+    },
+    /// Self group: the user's signed DeviceList, broadcast on change.
+    SelfDeviceList {
+        device_list: Vec<u8>,
+    },
+    /// Self group: the own display name.
+    SelfProfile {
+        display_name: String,
+    },
+    /// Self group: contacts to add to (or update in) the user directory
+    /// cache.
+    SelfContacts {
+        contacts: Vec<Contact>,
+    },
+    /// Self group: the chat was read up to the message at `seq`.
+    SelfReadMarker {
+        group_id: GroupId,
+        seq: u64,
+    },
+}
+
+/// A contact shared through the self group.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Contact {
+    #[serde(rename = "id")]
+    pub user_id: UserId,
+    #[serde(default, rename = "h", skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
+    #[serde(default, rename = "n", skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -247,6 +291,26 @@ enum WireContent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         av: Option<WireMedia>,
     },
+    Profile {
+        n: String,
+    },
+    #[serde(rename = "self.device_list")]
+    SelfDeviceList {
+        dl: ByteBuf,
+    },
+    #[serde(rename = "self.profile")]
+    SelfProfile {
+        n: String,
+    },
+    #[serde(rename = "self.contacts")]
+    SelfContacts {
+        u: Vec<Contact>,
+    },
+    #[serde(rename = "self.read_marker")]
+    SelfReadMarker {
+        g: GroupId,
+        s: u64,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -297,6 +361,16 @@ impl From<&Content> for WireContent {
                 n: name,
                 av: avatar.map(WireMedia::from),
             },
+            Content::Profile { display_name } => Self::Profile { n: display_name },
+            Content::SelfDeviceList { device_list } => Self::SelfDeviceList {
+                dl: ByteBuf::from(device_list),
+            },
+            Content::SelfProfile { display_name } => Self::SelfProfile { n: display_name },
+            Content::SelfContacts { contacts } => Self::SelfContacts { u: contacts },
+            Content::SelfReadMarker { group_id, seq } => Self::SelfReadMarker {
+                g: group_id,
+                s: seq,
+            },
         }
     }
 }
@@ -329,6 +403,16 @@ impl TryFrom<WireContent> for Content {
             WireContent::GroupInfo { n, av } => Self::GroupInfo {
                 name: n,
                 avatar: av.map(MediaInfo::try_from).transpose()?,
+            },
+            WireContent::Profile { n } => Self::Profile { display_name: n },
+            WireContent::SelfDeviceList { dl } => Self::SelfDeviceList {
+                device_list: dl.into_vec(),
+            },
+            WireContent::SelfProfile { n } => Self::SelfProfile { display_name: n },
+            WireContent::SelfContacts { u } => Self::SelfContacts { contacts: u },
+            WireContent::SelfReadMarker { g, s } => Self::SelfReadMarker {
+                group_id: g,
+                seq: s,
             },
         })
     }

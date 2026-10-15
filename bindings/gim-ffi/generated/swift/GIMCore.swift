@@ -1027,6 +1027,13 @@ public protocol GimClientProtocol: AnyObject, Sendable {
     func addMembers(chatId: String, userIds: [String]) async throws 
     
     /**
+     * Old device: approves the link offer scanned from the new device's QR
+     * code. Certifies the new device and sends it the user's keys; returns
+     * the pending approval carrying the SAS to compare.
+     */
+    func approveLink(qrString: String) async throws  -> PendingApproval
+    
+    /**
      * Removes an unsent message from the outbox and the timeline.
      */
     func cancelSend(chatId: String, messageId: String) async throws 
@@ -1041,6 +1048,26 @@ public protocol GimClientProtocol: AnyObject, Sendable {
      * including the signed-in user.
      */
     func chatMembers(chatId: String) async throws  -> [UserProfile]
+    
+    /**
+     * Claims `handle` in the hub directory, so others find the user with
+     * `find_user`; `Server(409)` if it is taken.
+     */
+    func claimHandle(handle: String) async throws 
+    
+    /**
+     * Old device: the user compared the SAS. `true` adds the new device to
+     * the user's devices and to every joined chat (the new device must
+     * have finished `wait_link`); `false` revokes it.
+     */
+    func confirmApproval(approval: PendingApproval, accepted: Bool) async throws 
+    
+    /**
+     * New device: the user compared the SAS. `false` (mismatch) deletes
+     * the linked identity, the local database and the keystore secrets
+     * like `sign_out`; create a new client afterwards.
+     */
+    func confirmLink(accepted: Bool) async throws 
     
     /**
      * Subscribes to connection state changes.
@@ -1068,6 +1095,11 @@ public protocol GimClientProtocol: AnyObject, Sendable {
     
     func deleteMessage(chatId: String, messageId: String) async throws 
     
+    /**
+     * The devices of the signed-in user.
+     */
+    func devices() async throws  -> [DeviceInfo]
+    
     func editMessage(chatId: String, messageId: String, newBody: String) async throws 
     
     /**
@@ -1089,6 +1121,14 @@ public protocol GimClientProtocol: AnyObject, Sendable {
     func leaveChat(chatId: String) async throws 
     
     /**
+     * Whether opening this client discarded an existing local database
+     * (undecryptable, e.g. its key was lost, or incompatible). The session
+     * is gone with it: show onboarding and tell the user that local
+     * history was lost.
+     */
+    func localStateReset()  -> Bool
+    
+    /**
      * Marks everything up to and including `up_to_message_id` as read and
      * sends a read receipt.
      */
@@ -1096,12 +1136,36 @@ public protocol GimClientProtocol: AnyObject, Sendable {
     
     func react(chatId: String, messageId: String, emoji: String) async throws 
     
+    /**
+     * Releases the handle claimed with `claim_handle`; `InvalidInput` if
+     * there is none.
+     */
+    func releaseHandle() async throws 
+    
     func removeMember(chatId: String, userId: String) async throws 
+    
+    /**
+     * Restores the user on this (fresh) device from its recovery code
+     * after losing every device: becomes a new device of `user_id`, signed
+     * in, with a new self group. Chats are not rejoined automatically.
+     *
+     * With `revoke_others` the previous devices are revoked. Keeping them
+     * (`revoke_others == false`) needs the user's current DeviceList
+     * cached locally, which a fresh install does not have: it then fails
+     * with `InvalidInput`.
+     */
+    func restoreFromRecovery(userId: String, recoveryCode: String, revokeOthers: Bool) async throws 
     
     /**
      * Re-queues a message in `SendState::Failed`.
      */
     func retrySend(chatId: String, messageId: String) async throws 
+    
+    /**
+     * Revokes another device of the signed-in user and removes it from
+     * every chat. `InvalidInput` for the current device.
+     */
+    func revokeDevice(deviceId: String) async throws 
     
     /**
      * Encrypts, uploads and sends a file; returns its message id. The file
@@ -1115,9 +1179,16 @@ public protocol GimClientProtocol: AnyObject, Sendable {
     func sendText(chatId: String, body: String, replyTo: String?) async throws  -> String
     
     /**
-     * The persisted session, or `None` before `register`.
+     * The persisted session, or `None` before an identity exists on this
+     * device (`create_identity`, `restore_from_recovery` or a device link).
      */
     func session() async throws  -> Session?
+    
+    /**
+     * Sets the signed-in user's display name; synced to the user's other
+     * devices and announced to every joined chat.
+     */
+    func setDisplayName(name: String) async throws 
     
     /**
      * Updates the group name and/or avatar and shares them with the
@@ -1131,12 +1202,24 @@ public protocol GimClientProtocol: AnyObject, Sendable {
      */
     func setNetworkReachable(reachable: Bool) 
     
+    /**
+     * Reports whether the user is typing. Call it with `true` on every
+     * keystroke (notifications are rate-limited) and with `false` when
+     * typing stops; see `stop_typing`.
+     */
     func setTyping(chatId: String, active: Bool) async throws 
     
     /**
      * Stops sync and deletes the session, local data and keystore secrets.
      */
     func signOut() async throws 
+    
+    /**
+     * New device: starts a link. Show `LinkSession.qr_string()` as a QR
+     * code and call `wait_link`. `hubs` are the hub URLs the old device
+     * may post the bundle to.
+     */
+    func startLink(hubs: [String]) throws  -> LinkSession
     
     /**
      * Starts the background sync loop (WebSocket stream with a long-poll
@@ -1150,6 +1233,13 @@ public protocol GimClientProtocol: AnyObject, Sendable {
     func stopSync() async throws 
     
     /**
+     * Tells the chat the user stopped typing (the input was cleared, the
+     * message sent or the chat closed); same as `set_typing(chat_id,
+     * false)`. Does nothing unless typing was reported.
+     */
+    func stopTyping(chatId: String) async throws 
+    
+    /**
      * The timeline of one chat. Cheap; listeners are added on the result.
      */
     func timeline(chatId: String) async throws  -> Timeline
@@ -1160,6 +1250,25 @@ public protocol GimClientProtocol: AnyObject, Sendable {
     func typing(chatId: String, listener: TypingListener) async throws  -> TaskHandle
     
     func unreact(chatId: String, messageId: String, emoji: String) async throws 
+    
+    /**
+     * The devices of any user, from the user's current DeviceList; empty
+     * for an unknown user.
+     */
+    func userDevices(userId: String) async throws  -> [DeviceInfo]
+    
+    /**
+     * The signed-in user's id; `None` without a session.
+     */
+    func userId()  -> String?
+    
+    /**
+     * New device: waits (up to 10 minutes) for the old device to approve
+     * the link, then signs in as a new device of that user. Returns the
+     * SAS to compare with the one the old device shows; finish with
+     * `confirm_link`.
+     */
+    func waitLink(link: LinkSession) async throws  -> String
     
 }
 /**
@@ -1235,6 +1344,27 @@ open func addMembers(chatId: String, userIds: [String])async throws   {
 }
     
     /**
+     * Old device: approves the link offer scanned from the new device's QR
+     * code. Certifies the new device and sends it the user's keys; returns
+     * the pending approval carrying the SAS to compare.
+     */
+open func approveLink(qrString: String)async throws  -> PendingApproval  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_gim_core_fn_method_gimclient_approve_link(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(qrString)
+                )
+            },
+            pollFunc: ffi_gim_core_rust_future_poll_u64,
+            completeFunc: ffi_gim_core_rust_future_complete_u64,
+            freeFunc: ffi_gim_core_rust_future_free_u64,
+            liftFunc: FfiConverterTypePendingApproval_lift,
+            errorHandler: FfiConverterTypeGimError_lift
+        )
+}
+    
+    /**
      * Removes an unsent message from the outbox and the timeline.
      */
 open func cancelSend(chatId: String, messageId: String)async throws   {
@@ -1288,6 +1418,68 @@ open func chatMembers(chatId: String)async throws  -> [UserProfile]  {
             completeFunc: ffi_gim_core_rust_future_complete_rust_buffer,
             freeFunc: ffi_gim_core_rust_future_free_rust_buffer,
             liftFunc: FfiConverterSequenceTypeUserProfile.lift,
+            errorHandler: FfiConverterTypeGimError_lift
+        )
+}
+    
+    /**
+     * Claims `handle` in the hub directory, so others find the user with
+     * `find_user`; `Server(409)` if it is taken.
+     */
+open func claimHandle(handle: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_gim_core_fn_method_gimclient_claim_handle(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(handle)
+                )
+            },
+            pollFunc: ffi_gim_core_rust_future_poll_void,
+            completeFunc: ffi_gim_core_rust_future_complete_void,
+            freeFunc: ffi_gim_core_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeGimError_lift
+        )
+}
+    
+    /**
+     * Old device: the user compared the SAS. `true` adds the new device to
+     * the user's devices and to every joined chat (the new device must
+     * have finished `wait_link`); `false` revokes it.
+     */
+open func confirmApproval(approval: PendingApproval, accepted: Bool)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_gim_core_fn_method_gimclient_confirm_approval(
+                        self.uniffiCloneHandle(),FfiConverterTypePendingApproval_lower(approval),FfiConverterBool.lower(accepted)
+                )
+            },
+            pollFunc: ffi_gim_core_rust_future_poll_void,
+            completeFunc: ffi_gim_core_rust_future_complete_void,
+            freeFunc: ffi_gim_core_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeGimError_lift
+        )
+}
+    
+    /**
+     * New device: the user compared the SAS. `false` (mismatch) deletes
+     * the linked identity, the local database and the keystore secrets
+     * like `sign_out`; create a new client afterwards.
+     */
+open func confirmLink(accepted: Bool)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_gim_core_fn_method_gimclient_confirm_link(
+                        self.uniffiCloneHandle(),FfiConverterBool.lower(accepted)
+                )
+            },
+            pollFunc: ffi_gim_core_rust_future_poll_void,
+            completeFunc: ffi_gim_core_rust_future_complete_void,
+            freeFunc: ffi_gim_core_rust_future_free_void,
+            liftFunc: { $0 },
             errorHandler: FfiConverterTypeGimError_lift
         )
 }
@@ -1388,6 +1580,25 @@ open func deleteMessage(chatId: String, messageId: String)async throws   {
         )
 }
     
+    /**
+     * The devices of the signed-in user.
+     */
+open func devices()async throws  -> [DeviceInfo]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_gim_core_fn_method_gimclient_devices(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_gim_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_gim_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_gim_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeDeviceInfo.lift,
+            errorHandler: FfiConverterTypeGimError_lift
+        )
+}
+    
 open func editMessage(chatId: String, messageId: String, newBody: String)async throws   {
     return
         try  await uniffiRustCallAsync(
@@ -1479,6 +1690,21 @@ open func leaveChat(chatId: String)async throws   {
 }
     
     /**
+     * Whether opening this client discarded an existing local database
+     * (undecryptable, e.g. its key was lost, or incompatible). The session
+     * is gone with it: show onboarding and tell the user that local
+     * history was lost.
+     */
+open func localStateReset() -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_gim_core_fn_method_gimclient_local_state_reset(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Marks everything up to and including `up_to_message_id` as read and
      * sends a read receipt.
      */
@@ -1514,12 +1740,58 @@ open func react(chatId: String, messageId: String, emoji: String)async throws   
         )
 }
     
+    /**
+     * Releases the handle claimed with `claim_handle`; `InvalidInput` if
+     * there is none.
+     */
+open func releaseHandle()async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_gim_core_fn_method_gimclient_release_handle(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_gim_core_rust_future_poll_void,
+            completeFunc: ffi_gim_core_rust_future_complete_void,
+            freeFunc: ffi_gim_core_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeGimError_lift
+        )
+}
+    
 open func removeMember(chatId: String, userId: String)async throws   {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_gim_core_fn_method_gimclient_remove_member(
                         self.uniffiCloneHandle(),FfiConverterString.lower(chatId),FfiConverterString.lower(userId)
+                )
+            },
+            pollFunc: ffi_gim_core_rust_future_poll_void,
+            completeFunc: ffi_gim_core_rust_future_complete_void,
+            freeFunc: ffi_gim_core_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeGimError_lift
+        )
+}
+    
+    /**
+     * Restores the user on this (fresh) device from its recovery code
+     * after losing every device: becomes a new device of `user_id`, signed
+     * in, with a new self group. Chats are not rejoined automatically.
+     *
+     * With `revoke_others` the previous devices are revoked. Keeping them
+     * (`revoke_others == false`) needs the user's current DeviceList
+     * cached locally, which a fresh install does not have: it then fails
+     * with `InvalidInput`.
+     */
+open func restoreFromRecovery(userId: String, recoveryCode: String, revokeOthers: Bool)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_gim_core_fn_method_gimclient_restore_from_recovery(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(userId),FfiConverterString.lower(recoveryCode),FfiConverterBool.lower(revokeOthers)
                 )
             },
             pollFunc: ffi_gim_core_rust_future_poll_void,
@@ -1539,6 +1811,26 @@ open func retrySend(chatId: String, messageId: String)async throws   {
             rustFutureFunc: {
                 uniffi_gim_core_fn_method_gimclient_retry_send(
                         self.uniffiCloneHandle(),FfiConverterString.lower(chatId),FfiConverterString.lower(messageId)
+                )
+            },
+            pollFunc: ffi_gim_core_rust_future_poll_void,
+            completeFunc: ffi_gim_core_rust_future_complete_void,
+            freeFunc: ffi_gim_core_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeGimError_lift
+        )
+}
+    
+    /**
+     * Revokes another device of the signed-in user and removes it from
+     * every chat. `InvalidInput` for the current device.
+     */
+open func revokeDevice(deviceId: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_gim_core_fn_method_gimclient_revoke_device(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId)
                 )
             },
             pollFunc: ffi_gim_core_rust_future_poll_void,
@@ -1589,7 +1881,8 @@ open func sendText(chatId: String, body: String, replyTo: String?)async throws  
 }
     
     /**
-     * The persisted session, or `None` before `register`.
+     * The persisted session, or `None` before an identity exists on this
+     * device (`create_identity`, `restore_from_recovery` or a device link).
      */
 open func session()async throws  -> Session?  {
     return
@@ -1603,6 +1896,26 @@ open func session()async throws  -> Session?  {
             completeFunc: ffi_gim_core_rust_future_complete_rust_buffer,
             freeFunc: ffi_gim_core_rust_future_free_rust_buffer,
             liftFunc: FfiConverterOptionTypeSession.lift,
+            errorHandler: FfiConverterTypeGimError_lift
+        )
+}
+    
+    /**
+     * Sets the signed-in user's display name; synced to the user's other
+     * devices and announced to every joined chat.
+     */
+open func setDisplayName(name: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_gim_core_fn_method_gimclient_set_display_name(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(name)
+                )
+            },
+            pollFunc: ffi_gim_core_rust_future_poll_void,
+            completeFunc: ffi_gim_core_rust_future_complete_void,
+            freeFunc: ffi_gim_core_rust_future_free_void,
+            liftFunc: { $0 },
             errorHandler: FfiConverterTypeGimError_lift
         )
 }
@@ -1640,6 +1953,11 @@ open func setNetworkReachable(reachable: Bool)  {try! rustCall() {
 }
 }
     
+    /**
+     * Reports whether the user is typing. Call it with `true` on every
+     * keystroke (notifications are rate-limited) and with `false` when
+     * typing stops; see `stop_typing`.
+     */
 open func setTyping(chatId: String, active: Bool)async throws   {
     return
         try  await uniffiRustCallAsync(
@@ -1676,6 +1994,21 @@ open func signOut()async throws   {
 }
     
     /**
+     * New device: starts a link. Show `LinkSession.qr_string()` as a QR
+     * code and call `wait_link`. `hubs` are the hub URLs the old device
+     * may post the bundle to.
+     */
+open func startLink(hubs: [String])throws  -> LinkSession  {
+    return try  FfiConverterTypeLinkSession_lift(try rustCallWithError(FfiConverterTypeGimError_lift) {
+        uniffiCallStatus in
+    uniffi_gim_core_fn_method_gimclient_start_link(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceString.lower(hubs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Starts the background sync loop (WebSocket stream with a long-poll
      * fallback, reconnecting with backoff) and the outbox sender.
      */
@@ -1704,6 +2037,27 @@ open func stopSync()async throws   {
             rustFutureFunc: {
                 uniffi_gim_core_fn_method_gimclient_stop_sync(
                         self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_gim_core_rust_future_poll_void,
+            completeFunc: ffi_gim_core_rust_future_complete_void,
+            freeFunc: ffi_gim_core_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeGimError_lift
+        )
+}
+    
+    /**
+     * Tells the chat the user stopped typing (the input was cleared, the
+     * message sent or the chat closed); same as `set_typing(chat_id,
+     * false)`. Does nothing unless typing was reported.
+     */
+open func stopTyping(chatId: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_gim_core_fn_method_gimclient_stop_typing(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(chatId)
                 )
             },
             pollFunc: ffi_gim_core_rust_future_poll_void,
@@ -1768,6 +2122,60 @@ open func unreact(chatId: String, messageId: String, emoji: String)async throws 
         )
 }
     
+    /**
+     * The devices of any user, from the user's current DeviceList; empty
+     * for an unknown user.
+     */
+open func userDevices(userId: String)async throws  -> [DeviceInfo]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_gim_core_fn_method_gimclient_user_devices(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(userId)
+                )
+            },
+            pollFunc: ffi_gim_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_gim_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_gim_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeDeviceInfo.lift,
+            errorHandler: FfiConverterTypeGimError_lift
+        )
+}
+    
+    /**
+     * The signed-in user's id; `None` without a session.
+     */
+open func userId() -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_gim_core_fn_method_gimclient_user_id(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * New device: waits (up to 10 minutes) for the old device to approve
+     * the link, then signs in as a new device of that user. Returns the
+     * SAS to compare with the one the old device shows; finish with
+     * `confirm_link`.
+     */
+open func waitLink(link: LinkSession)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_gim_core_fn_method_gimclient_wait_link(
+                        self.uniffiCloneHandle(),FfiConverterTypeLinkSession_lower(link)
+                )
+            },
+            pollFunc: ffi_gim_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_gim_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_gim_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeGimError_lift
+        )
+}
+    
 
     
 }
@@ -1819,6 +2227,287 @@ public func FfiConverterTypeGimClient_lower(_ value: GimClient) -> UInt64 {
 
 
 /**
+ * A link offer of a new device: show [`Self::qr_string`] as a QR code,
+ * then pass it to `GimClient::wait_link`. Accepts a single bundle; start a
+ * new one after a failed `wait_link`.
+ */
+public protocol LinkSessionProtocol: AnyObject, Sendable {
+    
+    /**
+     * The string to encode in the QR code the old device scans.
+     */
+    func qrString()  -> String
+    
+}
+/**
+ * A link offer of a new device: show [`Self::qr_string`] as a QR code,
+ * then pass it to `GimClient::wait_link`. Accepts a single bundle; start a
+ * new one after a failed `wait_link`.
+ */
+open class LinkSession: LinkSessionProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_gim_core_fn_clone_linksession(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_gim_core_fn_free_linksession(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * The string to encode in the QR code the old device scans.
+     */
+open func qrString() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_gim_core_fn_method_linksession_qr_string(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLinkSession: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = LinkSession
+
+    public static func lift(_ handle: UInt64) throws -> LinkSession {
+        return LinkSession(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: LinkSession) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LinkSession {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: LinkSession, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLinkSession_lift(_ handle: UInt64) throws -> LinkSession {
+    return try FfiConverterTypeLinkSession.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLinkSession_lower(_ value: LinkSession) -> UInt64 {
+    return FfiConverterTypeLinkSession.lower(value)
+}
+
+
+
+
+
+
+/**
+ * A link approved on the old device: show [`Self::sas`], then pass it to
+ * `GimClient::confirm_approval`.
+ */
+public protocol PendingApprovalProtocol: AnyObject, Sendable {
+    
+    /**
+     * The new device.
+     */
+    func deviceId()  -> String
+    
+    /**
+     * Six-digit short authentication string, `"123 456"`.
+     */
+    func sas()  -> String
+    
+}
+/**
+ * A link approved on the old device: show [`Self::sas`], then pass it to
+ * `GimClient::confirm_approval`.
+ */
+open class PendingApproval: PendingApprovalProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_gim_core_fn_clone_pendingapproval(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_gim_core_fn_free_pendingapproval(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * The new device.
+     */
+open func deviceId() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_gim_core_fn_method_pendingapproval_device_id(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Six-digit short authentication string, `"123 456"`.
+     */
+open func sas() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_gim_core_fn_method_pendingapproval_sas(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePendingApproval: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = PendingApproval
+
+    public static func lift(_ handle: UInt64) throws -> PendingApproval {
+        return PendingApproval(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: PendingApproval) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PendingApproval {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: PendingApproval, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePendingApproval_lift(_ handle: UInt64) throws -> PendingApproval {
+    return try FfiConverterTypePendingApproval.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePendingApproval_lower(_ value: PendingApproval) -> UInt64 {
+    return FfiConverterTypePendingApproval.lower(value)
+}
+
+
+
+
+
+
+/**
  * Services the native app provides to gim-core. Implemented in Kotlin/Swift
  * and passed to `create_client`. Methods may be called from any Rust thread.
  */
@@ -1826,9 +2515,12 @@ public protocol PlatformHooks: AnyObject, Sendable {
     
     /**
      * Reads a secret from the platform keystore (Keychain / Android Keystore).
-     * Returns `None` when the key does not exist.
+     * Returns `None` when the key does not exist. Throw when the keystore
+     * cannot be read (e.g. locked before first unlock): gim-core then fails
+     * the call instead of treating the secret as absent, so it never
+     * replaces an existing database key.
      */
-    func secureStoreGet(key: String)  -> Data?
+    func secureStoreGet(key: String) throws  -> Data?
     
     /**
      * Writes a secret to the platform keystore, replacing any existing value.
@@ -1912,10 +2604,13 @@ open class PlatformHooksImpl: PlatformHooks, @unchecked Sendable {
     
     /**
      * Reads a secret from the platform keystore (Keychain / Android Keystore).
-     * Returns `None` when the key does not exist.
+     * Returns `None` when the key does not exist. Throw when the keystore
+     * cannot be read (e.g. locked before first unlock): gim-core then fails
+     * the call instead of treating the secret as absent, so it never
+     * replaces an existing database key.
      */
-open func secureStoreGet(key: String) -> Data?  {
-    return try!  FfiConverterOptionData.lift(try! rustCall() {
+open func secureStoreGet(key: String)throws  -> Data?  {
+    return try  FfiConverterOptionData.lift(try rustCallWithError(FfiConverterTypeGimError_lift) {
         uniffiCallStatus in
     uniffi_gim_core_fn_method_platformhooks_secure_store_get(
             self.uniffiCloneHandle(),
@@ -2014,17 +2709,18 @@ fileprivate struct UniffiCallbackInterfacePlatformHooks {
                 guard let uniffiObj = try? FfiConverterTypePlatformHooks.handleMap.get(handle: uniffiHandle) else {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
-                return uniffiObj.secureStoreGet(
+                return try uniffiObj.secureStoreGet(
                      key: try FfiConverterString.lift(key)
                 )
             }
 
             
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionData.lower($0) }
-            uniffiTraitInterfaceCall(
+            uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
-                writeReturn: writeReturn
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeGimError_lower
             )
         },
         secureStoreSet: { (
@@ -3078,6 +3774,83 @@ public func FfiConverterTypeClientConfig_lower(_ value: ClientConfig) -> RustBuf
 
 
 /**
+ * A device of a user, from the user's signed DeviceList.
+ */
+public struct DeviceInfo: Equatable, Hashable {
+    public var deviceId: String
+    /**
+     * When the device was certified; 0 for revoked devices.
+     */
+    public var createdAtMs: UInt64
+    /**
+     * This client's device.
+     */
+    public var isCurrent: Bool
+    public var revoked: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(deviceId: String, 
+        /**
+         * When the device was certified; 0 for revoked devices.
+         */createdAtMs: UInt64, 
+        /**
+         * This client's device.
+         */isCurrent: Bool, revoked: Bool) {
+        self.deviceId = deviceId
+        self.createdAtMs = createdAtMs
+        self.isCurrent = isCurrent
+        self.revoked = revoked
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DeviceInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDeviceInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DeviceInfo {
+        return
+            try DeviceInfo(
+                deviceId: FfiConverterString.read(from: &buf), 
+                createdAtMs: FfiConverterUInt64.read(from: &buf), 
+                isCurrent: FfiConverterBool.read(from: &buf), 
+                revoked: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DeviceInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.deviceId, into: &buf)
+        FfiConverterUInt64.write(value.createdAtMs, into: &buf)
+        FfiConverterBool.write(value.isCurrent, into: &buf)
+        FfiConverterBool.write(value.revoked, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceInfo_lift(_ buf: RustBuffer) throws -> DeviceInfo {
+    return try FfiConverterTypeDeviceInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceInfo_lower(_ value: DeviceInfo) -> RustBuffer {
+    return FfiConverterTypeDeviceInfo.lower(value)
+}
+
+
+/**
  * Handle to an encrypted attachment. Pass it back to `fetch_media` /
  * `fetch_thumbnail`; keys and blob ids never leave Rust.
  */
@@ -3447,12 +4220,18 @@ public func FfiConverterTypeReplyPreview_lower(_ value: ReplyPreview) -> RustBuf
 public struct Session: Equatable, Hashable {
     public var userId: String
     public var deviceId: String
+    /**
+     * Empty until `claim_handle`.
+     */
     public var handle: String
     public var displayName: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(userId: String, deviceId: String, handle: String, displayName: String) {
+    public init(userId: String, deviceId: String, 
+        /**
+         * Empty until `claim_handle`.
+         */handle: String, displayName: String) {
         self.userId = userId
         self.deviceId = deviceId
         self.handle = handle
@@ -3891,7 +4670,9 @@ enum GimError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
     case Network(reason: String
     )
     /**
-     * The call needs a session; call `register` first.
+     * The call needs a session: create an identity, restore one from its
+     * recovery code or link this device first. Also returned after
+     * `sign_out` and once the hub reports this device as revoked.
      */
     case NotRegistered
     /**
@@ -4257,11 +5038,11 @@ public enum SendState: Equatable, Hashable {
      */
     case sent
     /**
-     * Delivered to at least one recipient device.
+     * Delivered to every device of every other member.
      */
     case delivered
     /**
-     * Read by at least one recipient.
+     * Read on every device of every other member.
      */
     case read
     /**
@@ -4867,6 +5648,31 @@ fileprivate struct FfiConverterSequenceTypeChatSummary: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeDeviceInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [DeviceInfo]
+
+    public static func write(_ value: [DeviceInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeDeviceInfo.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [DeviceInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [DeviceInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeDeviceInfo.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeReactionGroup: FfiConverterRustBuffer {
     typealias SwiftType = [ReactionGroup]
 
@@ -5108,6 +5914,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_gim_core_checksum_method_gimclient_add_members() != 22623) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_gim_core_checksum_method_gimclient_approve_link() != 21168) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_gim_core_checksum_method_gimclient_cancel_send() != 2342) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -5115,6 +5924,15 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_gimclient_chat_members() != 23360) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_gim_core_checksum_method_gimclient_claim_handle() != 25957) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_gim_core_checksum_method_gimclient_confirm_approval() != 47132) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_gim_core_checksum_method_gimclient_confirm_link() != 50385) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_gimclient_connection_state() != 25642) {
@@ -5132,6 +5950,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_gim_core_checksum_method_gimclient_delete_message() != 40750) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_gim_core_checksum_method_gimclient_devices() != 33142) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_gim_core_checksum_method_gimclient_edit_message() != 16801) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -5147,16 +5968,28 @@ private let initializationResult: InitializationResult = {
     if (uniffi_gim_core_checksum_method_gimclient_leave_chat() != 31409) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_gim_core_checksum_method_gimclient_local_state_reset() != 57050) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_gim_core_checksum_method_gimclient_mark_read() != 19929) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_gimclient_react() != 11948) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_gim_core_checksum_method_gimclient_release_handle() != 61692) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_gim_core_checksum_method_gimclient_remove_member() != 31958) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_gim_core_checksum_method_gimclient_restore_from_recovery() != 55724) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_gim_core_checksum_method_gimclient_retry_send() != 31098) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_gim_core_checksum_method_gimclient_revoke_device() != 54975) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_gimclient_send_media() != 37766) {
@@ -5165,7 +5998,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_gim_core_checksum_method_gimclient_send_text() != 37175) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_gim_core_checksum_method_gimclient_session() != 61969) {
+    if (uniffi_gim_core_checksum_method_gimclient_session() != 243) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_gim_core_checksum_method_gimclient_set_display_name() != 26277) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_gimclient_set_group_info() != 58408) {
@@ -5174,16 +6010,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_gim_core_checksum_method_gimclient_set_network_reachable() != 23325) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_gim_core_checksum_method_gimclient_set_typing() != 29621) {
+    if (uniffi_gim_core_checksum_method_gimclient_set_typing() != 10433) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_gimclient_sign_out() != 6926) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_gim_core_checksum_method_gimclient_start_link() != 4052) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_gimclient_start_sync() != 1762) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_gimclient_stop_sync() != 2971) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_gim_core_checksum_method_gimclient_stop_typing() != 46718) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_gimclient_timeline() != 44578) {
@@ -5195,10 +6037,19 @@ private let initializationResult: InitializationResult = {
     if (uniffi_gim_core_checksum_method_gimclient_unreact() != 48531) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_gim_core_checksum_method_gimclient_user_devices() != 3625) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_gim_core_checksum_method_gimclient_user_id() != 19625) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_gim_core_checksum_method_gimclient_wait_link() != 24066) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_gim_core_checksum_method_typinglistener_on_update() != 51337) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_gim_core_checksum_method_platformhooks_secure_store_get() != 40606) {
+    if (uniffi_gim_core_checksum_method_platformhooks_secure_store_get() != 57240) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_platformhooks_secure_store_set() != 17548) {
@@ -5211,6 +6062,15 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_platformhooks_is_network_reachable() != 53730) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_gim_core_checksum_method_linksession_qr_string() != 7173) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_gim_core_checksum_method_pendingapproval_device_id() != 8700) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_gim_core_checksum_method_pendingapproval_sas() != 53031) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_taskhandle_cancel() != 12087) {
