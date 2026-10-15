@@ -11,22 +11,27 @@ testing = ["dep:gim-test"]
 
 [dependencies]
 async-trait.workspace = true
+futures-util = { workspace = true, features = ["sink"] }
 gim-base.workspace = true
 gim-common.workspace = true
 gim-crypto.workspace = true
 gim-proto.workspace = true
 gim-test = { workspace = true, optional = true }
 reqwest.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "macros", "rt", "sync", "time"] }
+tokio-tungstenite.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+webpki-roots.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
 gim-sdk = { path = ".", features = ["testing"] }
 gim-test.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread"] }
 wiremock.workspace = true
