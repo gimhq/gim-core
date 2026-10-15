@@ -1,0 +1,42 @@
+{
+  "description": "gim hub identity and hosting record test vectors, see docs/identity.md",
+  "hosting_record": {
+    "expires_at": 1760659200000,
+    "hubs": [
+      {
+        "hub": 0,
+        "priority": 0
+      },
+      {
+        "hub": 1,
+        "priority": 10
+      }
+    ],
+    "primary_hub_id": "hciqgrcknldyy6lbu2splf5frcdqeftipgfikjxbzeq6x6y55lggapay",
+    "seq": 1,
+    "signed": "825901358601783875636971666d72323275356b676772326d616b633536786e376670666c6f706e676b653279716f706a77353269646d786b77656478626461582003a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8011b00000199ef77580082835820174553b456dddfc6908ecab1c101fe6ab21e2baa0617795b7d43a63482993fd50058402bede471d62612b6ed10c48dca11e081e737a8406e4a3467fa374aaf951b9b948d4ca3c6b593658e828d2dc37c4f48e571cc6db6172e8bec8754c98ba15fd20e835820cd14b37f956e953194ff7fb73b3d81dcc561d61a7538094b7c3e1a643ee5f3aa0a584017e3969c6c0227cbb754e499efc70ebf7690eb4080ca9b7c5c62f91ad803f876afc6f8b56c1865b29178b80dace6efd08cda5a737e0c6d3305d3194f9b46710e58402a81a1474d94d9b444571c3549b4938247e432c021ee4ff2540fff4541853b20f0c66f8c37909be7e7767e5ebaa493e5884648c7dafa094aeb98479594eb220d",
+    "user_id": "uciqfmr22u5kggr2makc56xn7fpflopngke2yqopjw52idmxkwedxbda",
+    "user_root_seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+  },
+  "hubs": [
+    {
+      "hub_id": "hciqgrcknldyy6lbu2splf5frcdqeftipgfikjxbzeq6x6y55lggapay",
+      "root_pubkey": "174553b456dddfc6908ecab1c101fe6ab21e2baa0617795b7d43a63482993fd5",
+      "root_seed": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f"
+    },
+    {
+      "hub_id": "hciqfdhfosputvuar26ctkweuibpnr6ubmldoksw2cm53w3n3smw7k6y",
+      "root_pubkey": "cd14b37f956e953194ff7fb73b3d81dcc561d61a7538094b7c3e1a643ee5f3aa",
+      "root_seed": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+    }
+  ],
+  "runtime_cert": {
+    "hub": 0,
+    "not_after": 1760572800000,
+    "not_before": 1760486400000,
+    "peer_id": "0024080112204fd099ccd47d7893dfe9ec24414ecb0d9b5420232aad30d91c465be33cbe65c4",
+    "runtime_pubkey": "4fd099ccd47d7893dfe9ec24414ecb0d9b5420232aad30d91c465be33cbe65c4",
+    "runtime_seed": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+    "signed": "82585885015820174553b456dddfc6908ecab1c101fe6ab21e2baa0617795b7d43a63482993fd558204fd099ccd47d7893dfe9ec24414ecb0d9b5420232aad30d91c465be33cbe65c41b00000199e52aa0001b00000199ea50fc0058401b04bae81e49fa9dd573f1d807941ee47499776e56235663adbc9429407e16019ab840a1ed435db6c4cb3d007180cf8140c675a9f4db3ca86a1bf275c190840a"
+  }
+}

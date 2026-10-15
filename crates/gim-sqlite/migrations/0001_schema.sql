@@ -1,3 +1,6 @@
+-- M2 schema v1. M1 databases (plaintext, migrations 0001-0004) are not
+-- migrated: SqliteStore resets them (see src/lib.rs).
+
 -- gim-base state rows. Columns hold what is queried or ordered on; the rest
 -- of a row is a CBOR `data` blob (see src/rows.rs). No foreign keys to
 -- `chats`: messages may be parked before their chat exists, and
@@ -64,4 +67,48 @@ CREATE TABLE users (
 CREATE TABLE sync_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     global_cursor INTEGER NOT NULL
+);
+
+-- gim-crypto CryptoStore rows besides the OpenMLS storage provider tables,
+-- which openmls_sqlite_storage creates with its own migrations.
+
+CREATE TABLE crypto_identity (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    user_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    signature_private_key BLOB NOT NULL,
+    signature_public_key BLOB NOT NULL
+);
+
+CREATE TABLE crypto_groups (
+    group_id TEXT PRIMARY KEY NOT NULL
+);
+
+-- Own commits whose outcome or follow-up is not settled yet (one per
+-- group), and devices that left a group's fan-out list but may still be in
+-- its MLS tree.
+
+CREATE TABLE pending_commits (
+    group_id TEXT PRIMARY KEY NOT NULL,
+    data BLOB NOT NULL
+);
+
+CREATE TABLE departed_members (
+    group_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    PRIMARY KEY (group_id, user_id, device_id)
+);
+
+-- Users joining or leaving a chat, one row per (group, seq, user), recorded
+-- when the commit or Welcome that did it is applied.
+
+CREATE TABLE membership_events (
+    group_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    user_id TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('added', 'removed', 'left')),
+    at_ms INTEGER NOT NULL,
+    PRIMARY KEY (group_id, seq, user_id)
 );
