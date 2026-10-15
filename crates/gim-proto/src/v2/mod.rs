@@ -20,18 +20,22 @@
 //! | `Me`, `User`, `DeviceList`, `PutDeviceListRequest`, `Handle` | [`Me`], [`User`], [`DeviceList`], [`PutDeviceListRequest`], [`Handle`] |
 //! | `PutRecoveryBackupRequest`, `RecoveryBackup` | [`PutRecoveryBackupRequest`], [`RecoveryBackup`] |
 //! | `CreateLinkBundleRequest`, `LinkBundleCreated`, `LinkBundle` | [`CreateLinkBundleRequest`], [`LinkBundleCreated`], [`LinkBundle`] |
+//! | `CreateHostingEntryRequest`, `HostingEntry`, `PutHostingRecordRequest`, `HostingRecord` | [`CreateHostingEntryRequest`], [`HostingEntry`], [`PutHostingRecordRequest`], [`HostingRecord`] |
 //! | `UploadKeyPackagesRequest`, `KeyPackageCount` | [`UploadKeyPackagesRequest`], [`KeyPackageCount`] |
 //! | `ClaimKeyPackagesRequest`, `ClaimTarget`, `ClaimKeyPackagesResponse`, `ClaimedKeyPackage` | [`ClaimKeyPackagesRequest`], [`ClaimTarget`], [`ClaimKeyPackagesResponse`], [`ClaimedKeyPackage`] |
 //! | `Group`, `GroupKind`, `GroupMember`, `GroupList`, `CreateGroupRequest` | [`Group`], [`GroupKind`], [`GroupMember`], [`GroupList`], [`CreateGroupRequest`] |
 //! | `SubmitCommitRequest`, `CommitResult` | [`SubmitCommitRequest`], [`CommitResult`] |
 //! | `Message`, `MessageKind`, `MessageList`, `SendMessageRequest` | [`Message`], [`MessageKind`], [`MessageList`], [`SendMessageRequest`] |
 //! | `Event`, `EventList` | [`Event`], [`EventList`] |
-//! | `MessageEvent`, `MemberAddedEvent`, `MemberRemovedEvent`, `WelcomeEvent`, `KeyPackagesLowEvent`, `DeviceListUpdatedEvent` | [`EventData`] variants |
-//! | `MembershipChange`, `Welcome`, `KeyPackagesLow` | [`MembershipChange`], [`Welcome`], [`KeyPackagesLow`] |
+//! | `MessageEvent`, `MemberAddedEvent`, `MemberRemovedEvent`, `WelcomeEvent`, `KeyPackagesLowEvent`, `DeviceListUpdatedEvent`, `HostingRecordExpiringEvent` | [`EventData`] variants |
+//! | `MembershipChange`, `Welcome`, `KeyPackagesLow`, `HostingRecordExpiring` | [`MembershipChange`], [`Welcome`], [`KeyPackagesLow`], [`HostingRecordExpiring`] |
 //! | `PendingWelcome`, `PendingWelcomeList` | [`PendingWelcome`], [`PendingWelcomeList`] |
 //! | `PushProvider`, `PushRegistration` | [`PushProvider`], [`PushRegistration`] |
 //! | `BlobCreated` | [`BlobCreated`] |
 //! | `Error`, `ErrorBody`, `StaleEpochError`, `CursorExpiredError` | [`ErrorResponse`], [`ErrorBody`], [`StaleEpochError`], [`CursorExpiredError`] |
+//!
+//! Error codes the SDK branches on are constants ([`STALE_EPOCH`],
+//! [`CURSOR_EXPIRED`], [`HOSTING_RECORD_REQUIRED`], ...).
 //!
 //! Query strings are [`EventsQuery`], [`StreamQuery`], [`MessagesQuery`],
 //! [`PendingWelcomesQuery`] and [`LinkBundleQuery`]. The `/v2/stream`
@@ -44,6 +48,7 @@ use crate::base64;
 mod auth;
 mod events;
 mod groups;
+mod hosting;
 mod keypackages;
 pub mod paths;
 mod service;
@@ -59,13 +64,18 @@ pub use groups::{
     CommitResult, CreateGroupRequest, Group, GroupKind, GroupList, GroupMember, Message,
     MessageKind, MessageList, MessagesQuery, SendMessageRequest, SubmitCommitRequest,
 };
+pub use hosting::{
+    CreateHostingEntryRequest, HostingEntry, HostingRecord, HostingRecordExpiring,
+    PutHostingRecordRequest,
+};
 pub use keypackages::{
     ClaimKeyPackagesRequest, ClaimKeyPackagesResponse, ClaimTarget, ClaimedKeyPackage,
     KeyPackageCount, UploadKeyPackagesRequest,
 };
 pub use service::{
     BlobCreated, CursorExpiredError, ErrorBody, ErrorResponse, Health, HealthStatus, PushProvider,
-    PushRegistration, StaleEpochError, CURSOR_EXPIRED, STALE_EPOCH,
+    PushRegistration, StaleEpochError, CURSOR_EXPIRED, HOSTING_RECORD_REQUIRED,
+    INVALID_HOSTING_RECORD, PEER_REFUSED, PEER_UNAVAILABLE, STALE_EPOCH, STALE_HOSTING_RECORD,
 };
 pub use users::{
     CreateLinkBundleRequest, DeviceList, Handle, LinkBundle, LinkBundleCreated, LinkBundleQuery,

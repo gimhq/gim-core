@@ -3,7 +3,10 @@
 
 use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
+use gim_base::model::Membership;
+use gim_base::StateReader;
 use gim_common::{ClientId, DeviceRef};
 use gim_integration_testing::sdk::SdkDevice;
 use gim_integration_testing::{server_url, wait_for};
@@ -194,4 +197,66 @@ async fn expired_cursor_recovers_through_pending_welcomes() {
     bob.client.send_text(&group, "back", None).await.unwrap();
     alice.sync().await;
     assert_eq!(alice.texts(&group), ["in the group", "after", "back"]);
+}
+
+/// Carol leaves a group of three. Of Alice and Bob, the device with the
+/// lowest id commits her Proposal at once; the other waits its default
+/// 5-15 s delay, syncs, finds the Proposal committed and commits nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a gim-hub: scripts/integration-test.sh"]
+async fn group_leave_three_members() {
+    let Some(url) = server_url("group_leave_three_members") else {
+        return;
+    };
+    let alice = SdkDevice::create(&url, "Alice").await;
+    let bob = SdkDevice::create(&url, "Bob").await;
+    let carol = SdkDevice::create(&url, "Carol").await;
+    let g = alice
+        .client
+        .create_group_chat(Some("Crew".into()), &[bob.user_id(), carol.user_id()])
+        .await
+        .unwrap();
+    bob.sync().await;
+    carol.sync().await;
+    let epoch = alice.hub_group(&g).await.epoch;
+
+    carol.client.leave(&g).await.unwrap();
+    let device_id = |d: &SdkDevice| d.client.session().unwrap().device.device_id;
+    let (chosen, other) = if device_id(&alice) < device_id(&bob) {
+        (&alice, &bob)
+    } else {
+        (&bob, &alice)
+    };
+    let commits = |d: &SdkDevice| d.hub.faults.commit_results.lock().unwrap().len();
+    let (chosen_commits, other_commits) = (commits(chosen), commits(other));
+    other.sync().await;
+    assert_eq!(alice.hub_group(&g).await.epoch, epoch, "the other waits");
+    chosen.sync().await;
+    assert_eq!(alice.hub_group(&g).await.epoch, epoch + 1);
+    assert_eq!(commits(chosen), chosen_commits + 1);
+
+    // Past the other's delay: still one commit.
+    tokio::time::sleep(Duration::from_secs(16)).await;
+    let group = alice.hub_group(&g).await;
+    assert_eq!(group.epoch, epoch + 1, "committed once");
+    assert_eq!(
+        group.members.into_iter().collect::<BTreeSet<_>>(),
+        devices(&[&alice, &bob])
+    );
+    assert_eq!(commits(other), other_commits);
+
+    carol.sync().await;
+    assert_eq!(
+        carol.store.chat(&g).unwrap().unwrap().membership,
+        Membership::Left
+    );
+    chosen
+        .client
+        .send_text(&g, "without carol", None)
+        .await
+        .unwrap();
+    other.sync().await;
+    carol.sync().await;
+    assert_eq!(other.texts(&g), ["without carol"]);
+    assert!(carol.texts(&g).is_empty());
 }

@@ -10,6 +10,7 @@ use gim_identity::{AuthChallenge, AuthResponse, DeviceSigningKey, AUTH_CHALLENGE
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::client::{Session, DEVICE_KEY_SECRET_KEY, SESSION_SECRET_KEY};
+use crate::hosting::Publish;
 use crate::transport::{
     AccessToken, Challenge, PostError, SessionError, SessionToken, TransportError,
 };
@@ -18,20 +19,30 @@ use crate::{Client, SecretStorage};
 /// A token is renewed this long before it expires.
 const TOKEN_RENEW_MARGIN_MS: u64 = 30_000;
 
-/// Errors that may mean the session token was rejected.
+/// Errors that may mean the session token was rejected, or that the hub
+/// needs the user's hosting record first.
 pub(crate) trait AuthFailure {
     fn is_unauthorized(&self) -> bool;
+    fn is_hosting_record_required(&self) -> bool;
 }
 
 impl AuthFailure for TransportError {
     fn is_unauthorized(&self) -> bool {
         matches!(self, Self::Unauthorized)
     }
+
+    fn is_hosting_record_required(&self) -> bool {
+        matches!(self, Self::HostingRecordRequired(_))
+    }
 }
 
 impl AuthFailure for PostError {
     fn is_unauthorized(&self) -> bool {
         matches!(self, Self::Transport(TransportError::Unauthorized))
+    }
+
+    fn is_hosting_record_required(&self) -> bool {
+        matches!(self, Self::Transport(err) if err.is_hosting_record_required())
     }
 }
 
@@ -75,9 +86,32 @@ fn expired(session: &Session) -> bool {
 }
 
 impl<S: StateStore + 'static> Client<S> {
+    /// [`Client::authed_session`], and if the hub answers 403
+    /// `hosting_record_required`, publishes the user's hosting record and
+    /// runs `call` once more (the same request: same `client_id`, same
+    /// Commit bytes). If publishing fails, the 403 is returned.
+    pub(crate) async fn authed<T, E, F, Fut>(&self, call: F) -> Result<T, E>
+    where
+        F: Fn(AccessToken) -> Fut,
+        Fut: Future<Output = Result<T, E>>,
+        E: From<TransportError> + AuthFailure + std::fmt::Display,
+    {
+        match self.authed_session(&call).await {
+            Err(err) if err.is_hosting_record_required() => {
+                tracing::info!(error = %err, "publishing the hosting record and retrying");
+                if let Err(publish) = self.publish_hosting_record(Publish::Now).await {
+                    tracing::warn!(error = %publish, "cannot publish the hosting record");
+                    return Err(err);
+                }
+                self.authed_session(&call).await
+            }
+            result => result,
+        }
+    }
+
     /// Runs `call` with a valid session token: signs in first if the token
     /// expired, and once more if the hub rejects the token.
-    pub(crate) async fn authed<T, E, F, Fut>(&self, call: F) -> Result<T, E>
+    pub(crate) async fn authed_session<T, E, F, Fut>(&self, call: F) -> Result<T, E>
     where
         F: Fn(AccessToken) -> Fut,
         Fut: Future<Output = Result<T, E>>,

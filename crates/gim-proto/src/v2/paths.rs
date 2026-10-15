@@ -75,6 +75,20 @@ pub fn user_recovery_backup(user_id: &str) -> String {
     format!("/v2/users/{}/recovery-backup", segment(user_id))
 }
 
+/// `POST` [`CreateHostingEntryRequest`](super::CreateHostingEntryRequest)
+/// → [`HostingEntry`](super::HostingEntry).
+pub fn user_hosting_entry(user_id: &str) -> String {
+    format!("/v2/users/{}/hosting-entry", segment(user_id))
+}
+
+/// `GET` (no token) → [`HostingRecord`](super::HostingRecord); `PUT`
+/// [`PutHostingRecordRequest`](super::PutHostingRecordRequest) (no token) →
+/// 200/201 [`HostingRecord`](super::HostingRecord), 409
+/// `stale_hosting_record`.
+pub fn user_hosting_record(user_id: &str) -> String {
+    format!("/v2/users/{}/hosting-record", segment(user_id))
+}
+
 /// `GET`/`PUT` (no body) → [`Handle`](super::Handle); `DELETE` → 204.
 pub fn handle(handle: &str) -> String {
     format!("/v2/handles/{}", segment(handle))

@@ -23,7 +23,7 @@ pub use memory::{MemoryStore, MemoryTxn, WriteTarget};
 
 use crate::model::{
     Chat, DepartedMember, GroupCursor, GroupMessage, MediaCacheEntry, MembershipEvent, Message,
-    OutboxEntry, PendingCommit, UserInfo,
+    OutboxEntry, PendingCommit, PendingLeave, UserInfo,
 };
 use crate::{BaseError, StoreError};
 
@@ -75,6 +75,10 @@ pub trait StateReader {
     /// All pending commits, by group id.
     fn pending_commits(&self) -> StoreResult<Vec<PendingCommit>>;
 
+    fn pending_leave(&self, group_id: &GroupId) -> StoreResult<Option<PendingLeave>>;
+    /// All pending leaves, by group id.
+    fn pending_leaves(&self) -> StoreResult<Vec<PendingLeave>>;
+
     /// All departed-member candidates, by group id then device.
     fn departed_members(&self) -> StoreResult<Vec<DepartedMember>>;
 
@@ -97,8 +101,8 @@ pub trait StateReader {
 pub trait StoreTxn: StateReader + CryptoStore {
     fn upsert_chat(&mut self, chat: &Chat) -> StoreResult<()>;
     /// Removes the chat with its messages, outbox entries, cursor, parked
-    /// messages, pending commit, departed-member candidates, membership
-    /// events and self group record.
+    /// messages, pending commit, pending leave, departed-member candidates,
+    /// membership events and self group record.
     fn remove_chat(&mut self, group_id: &GroupId) -> StoreResult<()>;
 
     fn upsert_message(&mut self, message: &Message) -> StoreResult<()>;
@@ -122,6 +126,10 @@ pub trait StoreTxn: StateReader + CryptoStore {
     /// Replaces the group's pending commit, if any.
     fn upsert_pending_commit(&mut self, commit: &PendingCommit) -> StoreResult<()>;
     fn remove_pending_commit(&mut self, group_id: &GroupId) -> StoreResult<()>;
+
+    /// Replaces the group's pending leave, if any.
+    fn upsert_pending_leave(&mut self, leave: &PendingLeave) -> StoreResult<()>;
+    fn remove_pending_leave(&mut self, group_id: &GroupId) -> StoreResult<()>;
 
     /// Records a candidate; recording it again changes nothing.
     fn add_departed_member(&mut self, member: &DepartedMember) -> StoreResult<()>;

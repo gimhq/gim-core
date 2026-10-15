@@ -104,6 +104,10 @@ impl From<gim_sdk::TransportError> for GimError {
             },
             E::TooLarge(_) => Self::InvalidInput { reason },
             E::DeviceNotActive(_) => Self::NotRegistered,
+            E::HostingRecordRequired(_) => Self::Server {
+                status: 403,
+                reason,
+            },
             E::RetryLater {
                 status,
                 retry_after_secs,
@@ -111,6 +115,25 @@ impl From<gim_sdk::TransportError> for GimError {
             } => Self::RetryLater {
                 status,
                 retry_after_secs,
+                reason,
+            },
+            E::PeerUnavailable {
+                retry_after_secs: Some(retry_after_secs),
+                ..
+            } => Self::RetryLater {
+                status: 503,
+                retry_after_secs,
+                reason,
+            },
+            E::PeerUnavailable {
+                retry_after_secs: None,
+                ..
+            } => Self::Server {
+                status: 503,
+                reason,
+            },
+            E::PeerRefused(_) => Self::Server {
+                status: 502,
                 reason,
             },
         }

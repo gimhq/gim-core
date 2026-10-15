@@ -83,6 +83,32 @@ user's signed DeviceList. Handles are optional directory entries pointing at a u
   (they can no longer sign in and peers remove them), `false` keeps them all active. A list that
   lands concurrently is read and rebuilt once. Chats are not rejoined automatically; other members
   (or another own device) must add this device again.
+- **Hosting record** (federation): gim-core keeps the user's hosting record, signed with the root
+  key, on the hub without any app call. `createIdentity` and `restoreFromRecovery` publish one,
+  `waitLink` only if the hub has no valid one; while sync runs it is renewed (7-day lifetime,
+  renewed with less than 3 days left: at `startSync`, daily, and when the hub announces the expiry).
+  Publication failures never fail these calls and are retried by sync. A federated request the
+  hub rejects with 403 `hosting_record_required` publishes the record and is retried once; only if
+  that fails does the call fail with `Server(403, …)`.
+- **Federation**: users are addressed by user id everywhere; a remote user may have no handle and is
+  shown by display name, else a short user id. A chat is created on the own hub, which owns it (the
+  `<hub_id>/` prefix of its id); in chats owned by another hub, messages and member changes of
+  others arrive once the owner has sequenced and delivered them (seconds normally, longer during
+  an outage), and the history starts where the own hub joined.
+  - Invitees whose hub is unreachable when a chat is created or members are added (`unavailable`
+    KeyPackage claims) do not fail the call: the reachable ones are added at once, the others stay
+    pending and are claimed again by sync with backoff (30 s doubling to 15 min) and added when
+    their hub answers. A chat or direct chat with only unreachable invitees is created with the
+    invites pending. After 24 h a pending invite is dropped and reported as a
+    `MembershipChanged(Removed)` change for that user (not stored). Pending invites live in memory:
+    they are lost when the app restarts.
+  - 502 `peer_refused` and 503 `peer_unavailable` on sending to a chat owned by another hub are
+    retried with the same message (same `client_id`): queued messages wait for the hub's
+    `Retry-After` (at most 5 min) instead of the usual backoff. A member change is resubmitted
+    as the very same Commit, within the call when `Retry-After` is at most 10 s; otherwise the call
+    fails (`RetryLater(503, …)` or `Server(502|503, …)`), the Commit stays pending and is
+    resubmitted unchanged before the next sync, send or member change of that chat. Until it is
+    settled, incoming messages of that chat are held back; other chats sync normally.
 - **Devices**: `devices()` lists the user's devices, `userDevices(userId)` another user's, and
   `revokeDevice(deviceId)` revokes another own device (it is removed from every chat and can no
   longer sign in).
@@ -127,7 +153,8 @@ implementations fast and thread-safe.
 | `createDirectChat(userId)` | chat id | Returns the existing direct chat if there is one. |
 | `createGroupChat(name, memberUserIds)` | chat id | The name is shared with the members (and with members added later) in an encrypted group info message. |
 | `chatMembers(chatId)` | `[UserProfile]` | Current members, one entry per user (not per device), including the signed-in user. Names come from the local user directory, filled by `findUser`, registration, and directory lookups the client makes for members of created or joined chats, added members and unknown senders; until a lookup succeeds a user shows as its user id. Resolved names arrive as `ChatListDiff`s and timeline `Set`s. No members listener in M1: re-query when a `ChatListDiff` touches that chat or a `TimelineItem.MembershipChange` arrives. |
-| `addMembers(chatId, userIds)`, `removeMember(chatId, userId)`, `leaveChat(chatId)` | | |
+| `addMembers(chatId, userIds)`, `removeMember(chatId, userId)` | | |
+| `leaveChat(chatId)` | | Submits a leave Proposal and returns once the hub accepted it; another member commits it, then the chat shows the own `Left` change. Until then (also across restarts) sends to the chat fail with `InvalidInput`. |
 | `setGroupInfo(chatId, name?, avatarFilePath?)` | | `null`/`nil` leaves a field unchanged; at least one must be set. The avatar is encrypted and uploaded before the call returns (MIME type from the file extension), then the change is applied locally and sent to the members. `InvalidInput` for direct chats. |
 | `sendText(chatId, body, replyTo?)` | message id | The message appears in the timeline immediately with `SendState.Pending`. |
 | `sendMedia(chatId, filePath, mime, caption?, replyTo?)` | message id | The file is copied before the call returns. |
@@ -218,8 +245,8 @@ The chat list is ordered most recently updated first; a timeline oldest first.
 | `NotFound(reason)` | Unknown chat, message, user or media. | Refresh the screen. |
 | `Crypto(reason)` | MLS or media decryption failure. | Report; show placeholder. |
 | `Storage(reason)` | Local database or file system failure. | Report; may need disk space. |
-| `Server(status, reason)` | Non-success HTTP status from the hub. | Show generic error. |
-| `RetryLater(status, retryAfterSecs, reason)` | The hub throttles a public read (429 `rate_limited`) or a remote hub is unavailable (503 `peer_unavailable`), and gim-core's bounded retries (2 retries, at most 60 s of waiting) are used up. | Retry after `retryAfterSecs`. |
+| `Server(status, reason)` | Non-success HTTP status from the hub; 502 `peer_refused` or 503 `peer_unavailable` (no `Retry-After`) when a remote hub failed. | Show generic error; peer failures are retried by gim-core. |
+| `RetryLater(status, retryAfterSecs, reason)` | The hub throttles a public read (429 `rate_limited`) or a remote hub is unavailable (503 `peer_unavailable`), and gim-core's bounded retries (2 retries, at most 60 s of waiting for reads; see *Federation* for sends and member changes) are used up. | Retry after `retryAfterSecs`. |
 | `Cancelled` | Cancelled by `stopSync`, `signOut` or `cancelSend`. | Ignore. |
 | `NotImplemented` | In the contract but not implemented in this build. | Development builds only. |
 | `Internal(reason)` | Bug, or an unexpected exception thrown by a platform hook. | Report. |

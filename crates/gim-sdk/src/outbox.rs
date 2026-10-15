@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use gim_base::model::{OutboxEntry, OutboxKind, OutboxState};
-use gim_base::{BaseClient, BaseError, StateStore};
+use gim_base::{BaseClient, BaseError, StateReader, StateStore, StoreTxn, MAX_RETRY_DELAY_MS};
 use gim_common::{now_ms, ClientId, MessageId};
 use tokio::task::JoinHandle;
 
@@ -17,6 +17,9 @@ use crate::{Client, ClientError, Result};
 
 /// Sleep of the sender task when nothing is scheduled.
 const IDLE_WAIT: Duration = Duration::from_secs(60);
+/// First retry of a failed outbox pass; doubles per failure up to
+/// [`IDLE_WAIT`].
+const PASS_RETRY: Duration = Duration::from_secs(1);
 
 /// The running outbox sender task; stops when dropped.
 #[derive(Debug)]
@@ -32,16 +35,29 @@ impl Drop for OutboxSender {
 
 impl<S: StateStore + 'static> Client<S> {
     /// Starts the background sender. It runs an outbox pass when woken (by
-    /// an enqueue, a sync that queued receipts, or
-    /// [`Client::network_reachable`]) and when the next retry is due.
+    /// a send, a sync that queued receipts, or
+    /// [`Client::network_reachable`]) and when the next retry is due. A
+    /// pass that fails is retried after [`PASS_RETRY`], doubling up to the
+    /// idle wait.
     pub fn start_outbox_sender(&self) -> OutboxSender {
         let client = self.clone();
         OutboxSender {
             task: tokio::spawn(async move {
+                let mut retry = PASS_RETRY;
                 loop {
                     let wait = match client.flush_outbox().await {
-                        Ok(Some(due_ms)) => Duration::from_millis(due_ms.saturating_sub(now_ms())),
-                        Ok(None) | Err(_) => IDLE_WAIT,
+                        Ok(due) => {
+                            retry = PASS_RETRY;
+                            due.map_or(IDLE_WAIT, |due_ms| {
+                                Duration::from_millis(due_ms.saturating_sub(now_ms()))
+                            })
+                        }
+                        Err(err) => {
+                            tracing::debug!(%err, ?retry, "outbox pass failed");
+                            let wait = retry;
+                            retry = (retry * 2).min(IDLE_WAIT);
+                            wait
+                        }
                     };
                     tokio::select! {
                         () = client.inner.outbox_wake.notified() => {}
@@ -120,8 +136,13 @@ impl<S: StateStore + 'static> Client<S> {
         }
         let group_id = entry.group_id;
         let _guard = self.inner.group_lock.lock().await;
-        // A commit of unknown outcome must be settled before encrypting.
-        if let Err(err) = self.settle_commit(session, &group_id).await {
+        // A commit of unknown outcome must be settled, and pending
+        // Proposals committed, before encrypting.
+        let settled = match self.settle_commit(session, &group_id).await {
+            Ok(()) => self.commit_proposals_before_send(session, &group_id).await,
+            err => err,
+        };
+        if let Err(err) = settled {
             return self.record_failure(&base, &id, err).await;
         }
         let client_id = ClientId::new(id.as_str()).expect("message ids are client ids");
@@ -179,7 +200,9 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Records a failed attempt; retryable errors get a backoff, others make
-    /// the entry `Failed`. Returns whether the chat may go on.
+    /// the entry `Failed`. A peer hub failure's `Retry-After` replaces the
+    /// backoff, capped at [`MAX_RETRY_DELAY_MS`]. Returns whether the chat
+    /// may go on.
     async fn record_failure(
         &self,
         base: &BaseClient,
@@ -191,9 +214,29 @@ impl<S: StateStore + 'static> Client<S> {
             ClientError::Base(BaseError::Store(_)) | ClientError::Task(_) => return Err(err),
             _ => false,
         };
+        let retry_after = match &err {
+            ClientError::Transport(err) if err.is_peer_failure() => err.retry_after(),
+            _ => None,
+        };
         let (id, base, error) = (message_id.clone(), base.clone(), err.to_string());
         let changes = match self
-            .run(move |store, _| base.mark_failed(store, &id, &error, retryable, now_ms()))
+            .run(move |store, _| {
+                let now = now_ms();
+                let changes = base.mark_failed(store, &id, &error, retryable, now)?;
+                if let Some(delay) = retry_after {
+                    let delay = (delay.as_millis() as u64).min(MAX_RETRY_DELAY_MS);
+                    store.transaction(|txn| {
+                        if let Some(mut entry) = txn.outbox_entry(&id)? {
+                            if entry.state == OutboxState::Pending {
+                                entry.next_attempt_at_ms = now + delay;
+                                txn.upsert_outbox(&entry)?;
+                            }
+                        }
+                        Ok(())
+                    })?;
+                }
+                Ok(changes)
+            })
             .await
         {
             Ok(changes) => changes,
@@ -212,8 +255,16 @@ impl<S: StateStore + 'static> Client<S> {
             .run(move |store, _| base.retry(store, &id, now_ms()))
             .await?;
         self.emit(&changes);
-        self.flush_outbox().await?;
-        Ok(())
+        self.flush_and_wake().await
+    }
+
+    /// An outbox pass on behalf of a caller, then wakes the sender task: a
+    /// post that failed was rescheduled, and the sender may be sleeping
+    /// for longer.
+    pub(crate) async fn flush_and_wake(&self) -> Result<()> {
+        let flushed = self.flush_outbox().await;
+        self.wake_outbox();
+        flushed.map(drop)
     }
 
     /// Drops an unsent message, and the copy of its file if it is a media

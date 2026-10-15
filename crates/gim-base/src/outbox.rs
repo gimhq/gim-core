@@ -195,6 +195,16 @@ impl BaseClient {
                     "{message_id} media is not uploaded"
                 )));
             };
+            // Queued before leaving started: not sent any more.
+            if txn
+                .chat(&entry.group_id)?
+                .is_some_and(|c| c.membership == Membership::Leaving)
+            {
+                return Err(BaseError::InvalidState(format!(
+                    "leaving chat {}",
+                    entry.group_id
+                )));
+            }
             let epoch = engine.group_epoch(&*txn, &entry.group_id)?;
             if let Some(prepared) = &entry.prepared {
                 if prepared.epoch == epoch {
@@ -383,6 +393,9 @@ impl BaseClient {
             None => Err(BaseError::NotFound(format!("chat {group_id}"))),
             Some(chat) if chat.membership == Membership::Left => {
                 Err(BaseError::InvalidState(format!("left chat {group_id}")))
+            }
+            Some(chat) if chat.membership == Membership::Leaving => {
+                Err(BaseError::InvalidState(format!("leaving chat {group_id}")))
             }
             Some(_) => Ok(()),
         }
