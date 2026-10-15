@@ -1,5 +1,6 @@
 //! Several clients against one fake server.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use gim_base::model::{ChatKind, Membership, Message, MessageContent, SendState, StateChange};
@@ -9,18 +10,21 @@ use gim_proto::envelope::Content;
 use gim_sdk::testing::{FakeTransport, MemorySecretStorage};
 use gim_sdk::{Client, ClientBuilder, ClientError, SecretStorage, KEY_PACKAGE_BATCH};
 use gim_test::KEY_PACKAGES_LOW_THRESHOLD;
+use tempfile::TempDir;
 
 struct Device {
     client: Client<MemoryStore>,
     store: Arc<MemoryStore>,
     secrets: Arc<MemorySecretStorage>,
+    data_dir: TempDir,
 }
 
 impl Device {
     async fn register(transport: &FakeTransport, handle: &str) -> Self {
         let store = Arc::new(MemoryStore::new());
         let secrets = Arc::new(MemorySecretStorage::new());
-        let client = build(transport, &store, &secrets);
+        let data_dir = tempfile::tempdir().unwrap();
+        let client = build(transport, &store, &secrets, data_dir.path());
         client
             .register(handle, &handle.to_uppercase())
             .await
@@ -29,6 +33,7 @@ impl Device {
             client,
             store,
             secrets,
+            data_dir,
         }
     }
 
@@ -81,13 +86,16 @@ fn build(
     transport: &FakeTransport,
     store: &Arc<MemoryStore>,
     secrets: &Arc<MemorySecretStorage>,
+    data_dir: &Path,
 ) -> Client<MemoryStore> {
     ClientBuilder::new(
         store.clone(),
         Arc::new(transport.clone()),
         secrets.clone() as Arc<dyn SecretStorage>,
     )
+    .data_dir(data_dir)
     .build()
+    .unwrap()
 }
 
 fn text(message: &Message) -> String {
@@ -123,7 +131,12 @@ async fn register_restore_and_find_user() {
     ));
 
     // A new client over the same store and secrets resumes the session.
-    let restored = build(&transport, &alice.store, &alice.secrets);
+    let restored = build(
+        &transport,
+        &alice.store,
+        &alice.secrets,
+        alice.data_dir.path(),
+    );
     assert!(restored.session().is_none());
     assert!(restored.restore_session().await.unwrap());
     assert_eq!(restored.session(), Some(session.clone()));
@@ -133,6 +146,7 @@ async fn register_restore_and_find_user() {
         &transport,
         &Device::register(&transport, "mallory").await.store,
         &alice.secrets,
+        alice.data_dir.path(),
     );
     assert!(matches!(
         other.restore_session().await,
@@ -142,6 +156,7 @@ async fn register_restore_and_find_user() {
         &transport,
         &Arc::new(MemoryStore::new()),
         &Arc::new(MemorySecretStorage::new()),
+        alice.data_dir.path(),
     );
     assert!(!fresh.restore_session().await.unwrap());
     assert!(matches!(

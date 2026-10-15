@@ -37,11 +37,12 @@ impl<S: StateStore + 'static> Client<S> {
         let source = PathBuf::from(&pending.local_path);
         let tmp = encrypted.clone();
         let (encryption, dimensions) = blocking(move || {
-            fs::create_dir_all(tmp.parent().expect("temp files have a parent"))?;
             let dimensions = image_dimensions(&source)?;
             let input = BufReader::new(File::open(&source)?);
+            // Left over from an interrupted attempt.
+            let _ = fs::remove_file(&tmp);
             let encrypted = (|| {
-                let mut output = BufWriter::new(File::create(&tmp)?);
+                let mut output = BufWriter::new(create_private(&tmp)?);
                 let encryption = MediaEncryptor::new()?.encrypt(input, &mut output)?;
                 output.flush()?;
                 Ok::<_, ClientError>(encryption)
@@ -135,14 +136,14 @@ impl<S: StateStore + 'static> Client<S> {
         let partial = self.tmp_dir().join(format!("download-{hex}.part"));
         let (part, size) = (partial.clone(), media.size);
         let (mut have, mut total) = blocking(move || {
-            fs::create_dir_all(part.parent().expect("temp files have a parent"))?;
             let mut header = Vec::new();
-            if let Ok(file) = File::open(&part) {
+            if let Some(file) = open_partial(&part, false)? {
                 file.take(MEDIA_HEADER_LEN as u64)
                     .read_to_end(&mut header)?;
             }
             if header.len() < MEDIA_HEADER_LEN {
-                File::create(&part)?;
+                let _ = fs::remove_file(&part);
+                create_private(&part)?;
                 return Ok((0, None));
             }
             let total = match blob_len(&header, size) {
@@ -184,7 +185,9 @@ impl<S: StateStore + 'static> Client<S> {
             }
             let (part, offset) = (partial.clone(), have);
             blocking(move || {
-                let mut file = OpenOptions::new().write(true).open(&part)?;
+                let mut file = open_partial(&part, true)?.ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::NotFound, "partial file vanished")
+                })?;
                 // Drops anything past `offset` from an earlier run.
                 file.set_len(offset)?;
                 std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(offset))?;
@@ -198,7 +201,10 @@ impl<S: StateStore + 'static> Client<S> {
         blocking(move || {
             let tmp = sibling_tmp(&dest);
             let decrypted = (|| {
-                let input = BufReader::new(File::open(&partial)?);
+                let input = open_partial(&partial, false)?.ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::NotFound, "partial file vanished")
+                })?;
+                let input = BufReader::new(input);
                 let output = BufWriter::new(File::create(&tmp)?);
                 MediaDecryptor::new(key, sha256).decrypt(input, output)?;
                 Ok::<_, ClientError>(fs::rename(&tmp, &dest)?)
@@ -272,6 +278,35 @@ fn image_dimensions(path: &Path) -> std::io::Result<Option<(u32, u32)>> {
             None
         },
     )
+}
+
+/// Creates a new file readable and writable by the owner only (0600 on
+/// Unix); fails if anything exists at `path`.
+fn create_private(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)
+}
+
+/// Opens an existing partial file without following symlinks: anything
+/// but a regular file is removed and treated as missing.
+fn open_partial(path: &Path, write: bool) -> std::io::Result<Option<File>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => {
+            fs::remove_file(path)?;
+            return Ok(None);
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    }
+    OpenOptions::new()
+        .read(!write)
+        .write(write)
+        .open(path)
+        .map(Some)
 }
 
 /// A temporary path next to `dest`, so the final rename stays on one

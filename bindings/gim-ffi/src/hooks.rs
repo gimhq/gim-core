@@ -22,3 +22,23 @@ pub trait PlatformHooks: Send + Sync {
     /// `GimClient::set_network_reachable`.
     fn is_network_reachable(&self) -> bool;
 }
+
+/// gim-sdk [`gim_sdk::SecretStorage`] over the platform keystore hooks.
+pub(crate) struct HookSecrets(pub(crate) std::sync::Arc<dyn PlatformHooks>);
+
+impl gim_sdk::SecretStorage for HookSecrets {
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, gim_sdk::SecretStorageError> {
+        Ok(self.0.secure_store_get(key.to_string()))
+    }
+
+    fn set(&self, key: &str, value: &[u8]) -> Result<(), gim_sdk::SecretStorageError> {
+        self.0
+            .secure_store_set(key.to_string(), value.to_vec())
+            .map_err(gim_sdk::SecretStorageError::new)
+    }
+
+    fn delete(&self, key: &str) -> Result<(), gim_sdk::SecretStorageError> {
+        self.0.secure_store_delete(key.to_string());
+        Ok(())
+    }
+}

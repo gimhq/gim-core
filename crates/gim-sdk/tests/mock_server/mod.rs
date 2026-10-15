@@ -457,6 +457,7 @@ pub fn fast_settings() -> SyncSettings {
 pub struct Peer {
     pub client: Client<MemoryStore>,
     pub store: Arc<MemoryStore>,
+    pub data_dir: tempfile::TempDir,
 }
 
 impl Peer {
@@ -471,15 +472,22 @@ impl Peer {
 
     async fn register(transport: Arc<dyn Transport>, handle: &str, settings: SyncSettings) -> Self {
         let store = Arc::new(MemoryStore::new());
+        let data_dir = tempfile::tempdir().unwrap();
         let client = ClientBuilder::new(
             store.clone(),
             transport,
             Arc::new(MemorySecretStorage::new()) as Arc<dyn SecretStorage>,
         )
+        .data_dir(data_dir.path())
         .sync_settings(settings)
-        .build();
+        .build()
+        .unwrap();
         client.register(handle, handle).await.unwrap();
-        Self { client, store }
+        Self {
+            client,
+            store,
+            data_dir,
+        }
     }
 
     pub fn device(&self) -> DeviceRef {

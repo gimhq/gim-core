@@ -66,21 +66,21 @@ implementations fast and thread-safe.
 | `findUser(handle)` | `UserProfile?` | `null`/`nil` if no such user. |
 | `createDirectChat(userId)` | chat id | Returns the existing direct chat if there is one. |
 | `createGroupChat(name, memberUserIds)` | chat id | |
-| `chatMembers(chatId)` | `[UserProfile]` | Current members, one entry per user (not per device), including the signed-in user. No members listener in M1: re-query when a `ChatListDiff` touches that chat or a `TimelineItem.MembershipChange` arrives. |
+| `chatMembers(chatId)` | `[UserProfile]` | Current members, one entry per user (not per device), including the signed-in user. Names come from the local user directory (filled by `findUser` and registration); unknown users fall back to the user id. No members listener in M1: re-query when a `ChatListDiff` touches that chat or a `TimelineItem.MembershipChange` arrives. |
 | `addMembers(chatId, userIds)`, `removeMember(chatId, userId)`, `leaveChat(chatId)` | | |
-| `setGroupInfo(chatId, name?, avatarFilePath?)` | | `null`/`nil` leaves a field unchanged. |
+| `setGroupInfo(chatId, name?, avatarFilePath?)` | | `null`/`nil` leaves a field unchanged. Not implemented in M1 (`NotImplemented`). |
 | `sendText(chatId, body, replyTo?)` | message id | The message appears in the timeline immediately with `SendState.Pending`. |
 | `sendMedia(chatId, filePath, mime, caption?, replyTo?)` | message id | The file is copied before the call returns. |
 | `editMessage(chatId, messageId, newBody)`, `deleteMessage(chatId, messageId)` | | |
 | `react(chatId, messageId, emoji)`, `unreact(chatId, messageId, emoji)` | | |
 | `retrySend(chatId, messageId)`, `cancelSend(chatId, messageId)` | | For messages in `SendState.Failed`. |
-| `markRead(chatId, upToMessageId)` | | Also sends a read receipt. |
+| `markRead(chatId, upToMessageId)` | | Also sends a read receipt. M1 marks the whole chat read; `upToMessageId` is only validated. |
 | `setTyping(chatId, active)` | | |
 | `fetchMedia(chatId, messageId, destPath)` | file path | Downloads and decrypts the attachment. |
 | `fetchThumbnail(chatId, messageId, destPath)` | file path? | `null`/`nil` if the media has no thumbnail. |
 | `chatList(listener)` | `TaskHandle` | |
 | `timeline(chatId)` | `Timeline` | |
-| `connectionState(listener)` | `TaskHandle` | |
+| `connectionState(listener)` | `TaskHandle` | `Offline` until `startSync` and while unreachable; `Connecting` → `Syncing` (catching up) → `Connected`. |
 | `typing(chatId, listener)` | `TaskHandle` | Reports user ids other than the signed-in user. |
 
 A message id is the client id chosen when the message is queued; it stays the same from local echo
@@ -99,8 +99,9 @@ Encryption keys and blob ids never leave Rust; pass the ids to `fetchMedia` / `f
   diffs) and returns whether more history exists.
 - `chatId()`.
 
-`TimelineItem` is a `Message` (`MessageItem`), a `DateSeparator` (start of a local calendar day) or
-a `MembershipChange` (`Added`, `Removed`, `Left`). `MessageItem.sendState` is set only for own
+`TimelineItem` is a `Message` (`MessageItem`), a `DateSeparator` (start of a calendar day; in M1
+days are UTC days, not local ones) or a `MembershipChange` (`Added`, `Removed`, `Left`; not produced
+in M1). `paginateBackwards` only pages through locally stored history in M1. `MessageItem.sendState` is set only for own
 messages: `Pending → Sent → Delivered → Read`, or `Failed(reason)`.
 
 ## Listeners and threading

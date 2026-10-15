@@ -2,7 +2,6 @@
 // (Apache-2.0).
 
 use std::future::Future;
-use std::sync::Arc;
 
 use tokio::task::JoinHandle;
 
@@ -19,15 +18,6 @@ impl TaskHandle {
         Self {
             handle: tokio::spawn(future),
         }
-    }
-
-    /// A subscription that keeps `listener` alive until cancelled but never
-    /// calls it. Used by API calls that are not wired to a backend yet.
-    pub(crate) fn idle<T: Send + Sync + ?Sized + 'static>(listener: Arc<T>) -> Self {
-        Self::spawn(async move {
-            let _listener = listener;
-            std::future::pending::<()>().await;
-        })
     }
 }
 

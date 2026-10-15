@@ -1,7 +1,7 @@
 //! The async client of one device.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -78,8 +78,8 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
         self
     }
 
-    /// Directory for temporary media files (encrypted uploads, partial
-    /// downloads). Defaults to `gim-sdk` under the system temp directory.
+    /// App-private directory; temporary media files (encrypted uploads,
+    /// partial downloads) go to its `tmp` subdirectory. Required.
     pub fn data_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.data_dir = Some(dir.into());
         self
@@ -87,8 +87,17 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
 
     /// A client without a session; call [`Client::register`] or
     /// [`Client::restore_session`] next.
-    pub fn build(self) -> Client<S> {
-        Client {
+    ///
+    /// Creates the data directory and its `tmp` subdirectory owner-only
+    /// (0700 on Unix). Fails with [`ClientError::InvalidInput`] if no data
+    /// directory was given or if `tmp` is a symlink, not a directory, or
+    /// writable by group or others.
+    pub fn build(self) -> Result<Client<S>> {
+        let data_dir = self
+            .data_dir
+            .ok_or_else(|| ClientError::InvalidInput("data_dir is required".into()))?;
+        create_private_dirs(&data_dir)?;
+        Ok(Client {
             inner: Arc::new(Inner {
                 store: self.store,
                 transport: self.transport,
@@ -97,9 +106,7 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
                 session: RwLock::new(None),
                 changes: broadcast::channel(CHANGES_CAPACITY).0,
                 group_lock: Mutex::new(()),
-                data_dir: self
-                    .data_dir
-                    .unwrap_or_else(|| std::env::temp_dir().join("gim-sdk")),
+                data_dir,
                 flush_lock: Mutex::new(()),
                 outbox_wake: Notify::new(),
                 force_flush: AtomicBool::new(false),
@@ -112,8 +119,39 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
                 connection: std::sync::Mutex::new(ConnectionState::Offline),
                 connection_changes: broadcast::channel(CONNECTION_CAPACITY).0,
             }),
-        }
+        })
     }
+}
+
+/// Creates `data_dir` and `data_dir/tmp` owner-only and checks that `tmp`
+/// is a real directory nobody else can write to.
+fn create_private_dirs(data_dir: &Path) -> Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(data_dir)?;
+    let tmp = data_dir.join("tmp");
+    builder.recursive(false);
+    match builder.create(&tmp) {
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+        created => created?,
+    }
+    let insecure = |reason: &str| {
+        ClientError::InvalidInput(format!("temp directory {}: {reason}", tmp.display()))
+    };
+    let metadata = std::fs::symlink_metadata(&tmp)?;
+    if metadata.file_type().is_symlink() {
+        return Err(insecure("is a symlink"));
+    }
+    if !metadata.is_dir() {
+        return Err(insecure("is not a directory"));
+    }
+    #[cfg(unix)]
+    if std::os::unix::fs::PermissionsExt::mode(&metadata.permissions()) & 0o022 != 0 {
+        return Err(insecure("is writable by group or others"));
+    }
+    Ok(())
 }
 
 /// The client of one device. Cheap to clone; clones share all state.
