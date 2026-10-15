@@ -22,11 +22,11 @@ const EXIT_NOT_FOUND: i32 = 4;
 
 /// A valid 2x2 RGB PNG.
 const PNG: &[u8] = &[
-    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
-    0x52, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x08, 0x02, 0x00, 0x00, 0x00, 0xfd,
-    0xd4, 0x9a, 0x73, 0x00, 0x00, 0x00, 0x11, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8,
-    0xcf, 0x00, 0x04, 0x50, 0xe2, 0xff, 0xff, 0xff, 0x00, 0x23, 0xec, 0x05, 0xfb, 0xd5, 0xaa,
-    0x1e, 0x66, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x08, 0x02, 0x00, 0x00, 0x00, 0xfd, 0xd4, 0x9a,
+    0x73, 0x00, 0x00, 0x00, 0x11, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0x00, 0x04,
+    0x50, 0xe2, 0xff, 0xff, 0xff, 0x00, 0x23, 0xec, 0x05, 0xfb, 0xd5, 0xaa, 0x1e, 0x66, 0x00, 0x00,
+    0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
 ];
 
 fn server_url(test: &str) -> Option<String> {
@@ -65,8 +65,12 @@ fn describe(args: &[&str], out: &Output) -> String {
 }
 
 fn parse(args: &[&str], out: &Output) -> Value {
-    serde_json::from_slice(&out.stdout)
-        .unwrap_or_else(|e| panic!("stdout is not one JSON object ({e}):\n{}", describe(args, out)))
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "stdout is not one JSON object ({e}):\n{}",
+            describe(args, out)
+        )
+    })
 }
 
 /// One profile, in its own temp dir.
@@ -118,7 +122,11 @@ impl Gim {
         let out = self.run(args);
         assert_eq!(out.status.code(), Some(code), "{}", describe(args, &out));
         let value = parse(args, &out);
-        assert!(value["error"]["code"].is_string(), "{}", describe(args, &out));
+        assert!(
+            value["error"]["code"].is_string(),
+            "{}",
+            describe(args, &out)
+        );
         value
     }
 
@@ -210,14 +218,21 @@ fn direct_chat(alice: &Gim, bob: &Gim) {
     let reply = id_of(&bob.ok(&["send", &chat, "See you in Hvar", "--reply", &hello]));
     let got = alice.wait_for(&chat, &["--text", "See you in Hvar", "--from", &bob.handle]);
     assert_eq!(got["id"], reply.as_str(), "{got}");
-    assert_eq!(find(&alice.history(&chat), &reply)["reply_to"], hello.as_str());
+    assert_eq!(
+        find(&alice.history(&chat), &reply)["reply_to"],
+        hello.as_str()
+    );
 
     bob.ok(&["react", &hello, "👍"]);
     let got = alice.wait_for(
         &chat,
         &["--msg", &hello, "--reaction", "👍", "--from", &bob.handle],
     );
-    assert_eq!(got["reactions"][&bob.handle], serde_json::json!(["👍"]), "{got}");
+    assert_eq!(
+        got["reactions"][&bob.handle],
+        serde_json::json!(["👍"]),
+        "{got}"
+    );
 
     alice.ok(&["edit", &hello, "Leaving Split at 07:00"]);
     bob.wait_for(&chat, &["--msg", &hello, "--edited"]);
@@ -258,7 +273,10 @@ fn group_chat(alice: &Gim, bob: &Gim, carol: &Gim) {
     let chat = chat_of(&alice.ok(&["group", "create", "Crew Adriatic", &bob.handle]));
     alice.ok(&["group", "add", &chat, &carol.handle]);
     alice.send(&chat, "Welcome aboard");
-    carol.wait_for(&chat, &["--text", "Welcome aboard", "--from", &alice.handle]);
+    carol.wait_for(
+        &chat,
+        &["--text", "Welcome aboard", "--from", &alice.handle],
+    );
     let hi = carol.send(&chat, "Carol here, ready to sail");
     for gim in [alice, bob] {
         let got = gim.wait_for(&chat, &["--text", "Carol here", "--from", &carol.handle]);
@@ -280,7 +298,14 @@ fn group_chat(alice: &Gim, bob: &Gim, carol: &Gim) {
     alice.send(&chat, "Secret course to Corfu");
     bob.wait_for(&chat, &["--text", "Secret course", "--from", &alice.handle]);
     carol.fail(
-        &["wait-for", &chat, "--text", "Secret course", "--timeout", "3"],
+        &[
+            "wait-for",
+            &chat,
+            "--text",
+            "Secret course",
+            "--timeout",
+            "3",
+        ],
         EXIT_TIMEOUT,
     );
 }
@@ -288,7 +313,15 @@ fn group_chat(alice: &Gim, bob: &Gim, carol: &Gim) {
 /// `listen` in a child process receives a message sent by another profile.
 fn listen(bob: &Gim, carol: &Gim) {
     let chat = chat_of(&carol.ok(&["dm", &bob.handle]));
-    let args = ["listen", "--chat", &chat, "--count", "1", "--timeout", WAIT_SECS];
+    let args = [
+        "listen",
+        "--chat",
+        &chat,
+        "--count",
+        "1",
+        "--timeout",
+        WAIT_SECS,
+    ];
     let mut child = bob
         .command(&args)
         .stdout(Stdio::piped())
