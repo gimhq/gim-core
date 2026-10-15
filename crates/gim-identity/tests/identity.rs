@@ -175,7 +175,10 @@ fn supersedes() {
     let v1 = list_with_two(&root);
     let v2 = v1.revoke(&device(1).public().device_id()).unwrap();
     assert!(v2.supersedes(&v1).unwrap());
-    assert!(!v1.supersedes(&v2).unwrap());
+    assert!(matches!(
+        v1.supersedes(&v2),
+        Err(IdentityError::StaleSeq(1))
+    ));
     assert!(!v2.supersedes(&v2.clone()).unwrap());
 
     // Same seq, different content.
