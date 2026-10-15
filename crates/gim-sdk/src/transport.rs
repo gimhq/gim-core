@@ -160,6 +160,15 @@ pub enum TransportError {
     /// or its keys are broken.
     #[error("device not active: {0}")]
     DeviceNotActive(String),
+    /// 429 `rate_limited` or 503 `peer_unavailable` of a public read that
+    /// kept failing within its retry budget; try again after
+    /// `retry_after_secs`.
+    #[error("retry after {retry_after_secs} s ({status}): {reason}")]
+    RetryLater {
+        status: u16,
+        retry_after_secs: u64,
+        reason: String,
+    },
 }
 
 /// Error of [`Transport::create_session`].
@@ -242,17 +251,21 @@ pub trait Transport: Send + Sync {
         wait: Duration,
     ) -> TransportResult<Option<Vec<u8>>>;
 
-    /// The user's signed DeviceList; `None` if the user is unknown.
+    /// The user's signed DeviceList; `None` if the user is unknown. A
+    /// public read: the token is optional (the hub ignores it), so it works
+    /// before sign-in. 429 and 503 with `Retry-After` are retried within a
+    /// bounded budget, then fail with [`TransportError::RetryLater`].
     async fn device_list(
         &self,
-        token: &AccessToken,
+        token: Option<&AccessToken>,
         user_id: &UserId,
     ) -> TransportResult<Option<Vec<u8>>>;
 
-    /// Looks a user up by id; `None` if there is no such user.
+    /// Looks a user up by id; `None` if there is no such user. A public
+    /// read like [`Transport::device_list`].
     async fn user(
         &self,
-        token: &AccessToken,
+        token: Option<&AccessToken>,
         user_id: &UserId,
     ) -> TransportResult<Option<UserRecord>>;
 

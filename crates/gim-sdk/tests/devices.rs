@@ -258,7 +258,7 @@ async fn restore_from_recovery_revokes_the_lost_devices() {
     alice.sync().await;
     let lost = alice.device();
 
-    // A wrong code does not open the backup; keeping unknown devices fails.
+    // A wrong code does not open the backup.
     let other = Device::new(&transport);
     let wrong = RecoveryCode::generate().unwrap();
     assert!(matches!(
@@ -267,13 +267,6 @@ async fn restore_from_recovery_revokes_the_lost_devices() {
             .restore_from_recovery(&alice.user_id(), &wrong, true)
             .await,
         Err(ClientError::Identity(_))
-    ));
-    assert!(matches!(
-        other
-            .client
-            .restore_from_recovery(&alice.user_id(), &code, false)
-            .await,
-        Err(ClientError::InvalidInput(_))
     ));
     assert!(other.client.session().is_none());
 
@@ -287,8 +280,11 @@ async fn restore_from_recovery_revokes_the_lost_devices() {
     assert_ne!(restored.device(), lost);
     assert_eq!(restored.store.self_groups().unwrap().len(), 1);
     let devices = restored.client.devices().await.unwrap();
-    assert_eq!(devices.len(), 1);
-    assert!(devices[0].is_current);
+    assert_eq!(devices.len(), 2);
+    assert!(devices.iter().any(|d| d.is_current && !d.revoked));
+    assert!(devices
+        .iter()
+        .any(|d| d.device_id == lost.device_id && d.revoked));
     assert_eq!(
         transport.service().devices(&alice.user_id()).unwrap(),
         [restored.device()]

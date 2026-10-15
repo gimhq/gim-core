@@ -1,16 +1,81 @@
-//! gim-ffi `GimClient`s in this process against a real gim-server.
+//! gim-ffi `GimClient`s in this process against a real gim-hub.
 
 use std::collections::BTreeSet;
 use std::fs;
 use std::time::Duration;
 
-use gim_core::{ChatKind, ConnectionState, MessageContent, ReactionGroup, SendState};
+use gim_core::{ChatKind, ConnectionState, GimError, MessageContent, ReactionGroup, SendState};
 use gim_integration_testing::{
-    message, messages, open, server_url, text, timeline, Recorder, TestUser,
+    eventually, member_ids, message, messages, open, server_url, text, timeline, MemoryHooks,
+    Recorder, TestUser,
 };
 
+/// A valid 2x2 RGB PNG.
+const PNG: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x08, 0x02, 0x00, 0x00, 0x00, 0xfd, 0xd4, 0x9a,
+    0x73, 0x00, 0x00, 0x00, 0x11, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0x00, 0x04,
+    0x50, 0xe2, 0xff, 0xff, 0xff, 0x00, 0x23, 0xec, 0x05, 0xfb, 0xd5, 0xaa, 0x1e, 0x66, 0x00, 0x00,
+    0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+];
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "gim-server v1 removed; replaced by gim-hub tests (C2-T6)"]
+#[ignore = "needs a gim-hub: scripts/integration-test.sh"]
+async fn identity_and_sign_in() {
+    let Some(url) = server_url("identity_and_sign_in") else {
+        return;
+    };
+    let alice = TestUser::register(&url, "alice", "Alice").await;
+    assert!(!alice.recovery_code.is_empty());
+    let session = alice.client.session().await.unwrap().unwrap();
+    assert_eq!(session.handle, alice.handle);
+    assert_eq!(session.display_name, "Alice");
+    let devices = alice.client.devices().await.unwrap();
+    assert_eq!(devices.len(), 1);
+    assert!(devices[0].is_current && !devices[0].revoked);
+    assert_eq!(devices[0].device_id, alice.device_id);
+
+    // The handle is taken.
+    let bob = TestUser::register(&url, "bob", "Bob").await;
+    assert!(matches!(
+        bob.client.claim_handle(alice.handle.clone()).await,
+        Err(GimError::Server { status: 409, .. })
+    ));
+
+    // A restarted client signs in again with its device key and syncs.
+    let connection = Recorder::new();
+    alice.client.stop_sync().await.unwrap();
+    let TestUser { client, hooks, .. } = alice;
+    drop(client);
+    let client = open(&url, &hooks).await;
+    assert_eq!(client.session().await.unwrap(), Some(session.clone()));
+    client.start_sync().await.unwrap();
+    let _connection_handle = client.connection_state(connection.clone()).await.unwrap();
+    connection
+        .wait("alice connected", |s| *s == ConnectionState::Connected)
+        .await;
+    let found = client
+        .find_user(bob.handle.clone())
+        .await
+        .unwrap()
+        .expect("bob is in the directory");
+    assert_eq!(found.user_id, bob.user_id);
+    let devices = bob
+        .client
+        .user_devices(session.user_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        devices
+            .iter()
+            .map(|d| d.device_id.as_str())
+            .collect::<Vec<_>>(),
+        [session.device_id.as_str()]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a gim-hub: scripts/integration-test.sh"]
 async fn direct_chat_lifecycle() {
     let Some(url) = server_url("direct_chat_lifecycle") else {
         return;
@@ -25,7 +90,7 @@ async fn direct_chat_lifecycle() {
         .unwrap()
         .expect("bob is in the directory");
     assert_eq!(found.user_id, bob.user_id);
-    assert_eq!(found.display_name, "Bob");
+    assert_eq!(found.handle, bob.handle);
     assert_eq!(
         alice
             .client
@@ -304,7 +369,7 @@ async fn direct_chat_lifecycle() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "gim-server v1 removed; replaced by gim-hub tests (C2-T6)"]
+#[ignore = "needs a gim-hub: scripts/integration-test.sh"]
 async fn media_send_and_fetch() {
     let Some(url) = server_url("media_send_and_fetch") else {
         return;
@@ -359,12 +424,47 @@ async fn media_send_and_fetch() {
         .await
         .unwrap();
     assert_eq!(fs::read(path).unwrap(), data);
+
+    // An image: an encrypted blob plus its MIME type.
+    let source = alice.hooks.path("bay.png");
+    fs::write(&source, PNG).unwrap();
+    let id = alice
+        .client
+        .send_media(
+            chat.clone(),
+            source.to_str().unwrap().to_string(),
+            "image/png".to_string(),
+            Some("Stiniva bay".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+    let items = bob_timeline
+        .wait("image at bob", |items| message(items, &id).is_some())
+        .await;
+    let MessageContent::Image { media, caption, .. } = message(&items, &id).unwrap().content else {
+        panic!("not an image");
+    };
+    assert_eq!(caption.as_deref(), Some("Stiniva bay"));
+    assert_eq!(media.mime, "image/png");
+    assert_eq!(media.size, PNG.len() as u64);
+    let dest = bob.hooks.path("bay.png");
+    let path = bob
+        .client
+        .fetch_media(
+            media.chat_id,
+            media.message_id,
+            dest.to_str().unwrap().to_string(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fs::read(path).unwrap(), PNG);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "gim-server v1 removed; replaced by gim-hub tests (C2-T6)"]
-async fn group_add_then_remove_member() {
-    let Some(url) = server_url("group_add_then_remove_member") else {
+#[ignore = "needs a gim-hub: scripts/integration-test.sh"]
+async fn group_add_remove_leave() {
+    let Some(url) = server_url("group_add_remove_leave") else {
         return;
     };
     let alice = TestUser::register(&url, "alice", "Alice").await;
@@ -455,4 +555,238 @@ async fn group_add_then_remove_member() {
     assert!(messages(&items)
         .iter()
         .all(|m| text(m) != Some("after carol")));
+
+    // Bob leaves: Alice commits his removal and stops sending to him.
+    bob.client.leave_chat(chat.clone()).await.unwrap();
+    let only_alice = BTreeSet::from([alice.user_id.clone()]);
+    eventually("bob removed at alice", || async {
+        (member_ids(&alice.client, &chat).await == only_alice).then_some(())
+    })
+    .await;
+    let alone = alice
+        .client
+        .send_text(chat.clone(), "after bob".to_string(), None)
+        .await
+        .unwrap();
+    let (alice_timeline, _alice_handle) = alice.timeline(&chat).await;
+    alice_timeline
+        .wait("after bob sent", |items| {
+            message(items, &alone).is_some_and(|m| m.send_state != Some(SendState::Pending))
+        })
+        .await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        message(&bob_timeline.get(), &alone).is_none(),
+        "a member who left read a later message"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a gim-hub: scripts/integration-test.sh"]
+async fn link_device_then_revoke() {
+    let Some(url) = server_url("link_device_then_revoke") else {
+        return;
+    };
+    let alice = TestUser::register(&url, "alice", "Alice").await;
+    let bob = TestUser::register(&url, "bob", "Bob").await;
+    let chat = alice
+        .client
+        .create_direct_chat(bob.user_id.clone())
+        .await
+        .unwrap();
+    let (bob_timeline, _bob_handle) = bob.timeline(&chat).await;
+    let before = alice
+        .client
+        .send_text(chat.clone(), "before the tablet".to_string(), None)
+        .await
+        .unwrap();
+    bob_timeline
+        .wait("before at bob", |items| message(items, &before).is_some())
+        .await;
+
+    // Link a tablet: same SAS on both devices, then both accept.
+    let (tablet, sas) = alice.link_device(&url).await;
+    assert_eq!(sas.len(), 7, "SAS format is \"123 456\": {sas}");
+    assert_ne!(tablet.device_id, alice.device_id);
+    let devices = alice.client.devices().await.unwrap();
+    let ids: BTreeSet<&str> = devices.iter().map(|d| d.device_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        BTreeSet::from([alice.device_id.as_str(), tablet.device_id.as_str()])
+    );
+    eventually("tablet in bob's view of alice", || async {
+        let devices = bob
+            .client
+            .user_devices(alice.user_id.clone())
+            .await
+            .unwrap();
+        devices
+            .iter()
+            .any(|d| d.device_id == tablet.device_id && !d.revoked)
+            .then_some(())
+    })
+    .await;
+
+    // The tablet joined the existing chat: it reads Bob's next message and
+    // its own messages reach Bob as Alice's.
+    let (tablet_chats, _tablet_chats_handle) = tablet.chat_list().await;
+    tablet_chats
+        .wait("chat at tablet", |c| c.iter().any(|c| c.chat_id == chat))
+        .await;
+    let (tablet_timeline, _tablet_handle) = tablet.timeline(&chat).await;
+    let hello = bob
+        .client
+        .send_text(chat.clone(), "hello tablet".to_string(), None)
+        .await
+        .unwrap();
+    let items = tablet_timeline
+        .wait("hello at tablet", |items| message(items, &hello).is_some())
+        .await;
+    assert_eq!(
+        text(&message(&items, &hello).unwrap()),
+        Some("hello tablet")
+    );
+    let (alice_timeline, _alice_handle) = alice.timeline(&chat).await;
+    alice_timeline
+        .wait("hello at phone", |items| message(items, &hello).is_some())
+        .await;
+    let from_tablet = tablet
+        .client
+        .send_text(chat.clone(), "sent from the tablet".to_string(), None)
+        .await
+        .unwrap();
+    let items = bob_timeline
+        .wait("tablet message at bob", |items| {
+            message(items, &from_tablet).is_some()
+        })
+        .await;
+    assert_eq!(
+        message(&items, &from_tablet).unwrap().sender.user_id,
+        alice.user_id
+    );
+    alice_timeline
+        .wait("tablet message at phone", |items| {
+            message(items, &from_tablet).is_some_and(|m| m.is_own)
+        })
+        .await;
+
+    // Revoke the tablet from the phone: the hub rejects its credential.
+    alice
+        .client
+        .revoke_device(tablet.device_id.clone())
+        .await
+        .unwrap();
+    let devices = alice.client.devices().await.unwrap();
+    assert!(devices
+        .iter()
+        .any(|d| d.device_id == tablet.device_id && d.revoked));
+    eventually("tablet rejected", || async {
+        match tablet.client.find_user(bob.handle.clone()).await {
+            Err(GimError::NotRegistered) => Some(()),
+            _ => None,
+        }
+    })
+    .await;
+    eventually("tablet revoked in bob's view of alice", || async {
+        let devices = bob
+            .client
+            .user_devices(alice.user_id.clone())
+            .await
+            .unwrap();
+        devices
+            .iter()
+            .all(|d| d.device_id != tablet.device_id || d.revoked)
+            .then_some(())
+    })
+    .await;
+
+    // The chat goes on without it.
+    let after = bob
+        .client
+        .send_text(chat.clone(), "after the revoke".to_string(), None)
+        .await
+        .unwrap();
+    alice_timeline
+        .wait("after at phone", |items| message(items, &after).is_some())
+        .await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        message(&tablet_timeline.get(), &after).is_none(),
+        "a revoked device read a later message"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a gim-hub: scripts/integration-test.sh"]
+async fn restore_from_recovery_code() {
+    let Some(url) = server_url("restore_from_recovery_code") else {
+        return;
+    };
+    let alice = TestUser::register(&url, "alice", "Alice").await;
+    let bob = TestUser::register(&url, "bob", "Bob").await;
+
+    // Alice lost her phone; a fresh install restores her from the code.
+    let hooks = MemoryHooks::new();
+    let restored = open(&url, &hooks).await;
+    restored
+        .restore_from_recovery(alice.user_id.clone(), alice.recovery_code.clone(), true)
+        .await
+        .unwrap();
+    let session = restored.session().await.unwrap().unwrap();
+    assert_eq!(session.user_id, alice.user_id);
+    assert_ne!(session.device_id, alice.device_id);
+    restored.start_sync().await.unwrap();
+
+    // The lost device's credential is rejected.
+    eventually("old device rejected", || async {
+        match alice.client.find_user(bob.handle.clone()).await {
+            Err(GimError::NotRegistered) => Some(()),
+            _ => None,
+        }
+    })
+    .await;
+    eventually("restored device in bob's view of alice", || async {
+        let devices = bob
+            .client
+            .user_devices(alice.user_id.clone())
+            .await
+            .unwrap();
+        let active: Vec<&str> = devices
+            .iter()
+            .filter(|d| !d.revoked)
+            .map(|d| d.device_id.as_str())
+            .collect();
+        (active == [session.device_id.as_str()]).then_some(())
+    })
+    .await;
+
+    // Bob reaches the restored device in a new chat, and back.
+    let chat = bob
+        .client
+        .create_group_chat("Regatta".to_string(), vec![alice.user_id.clone()])
+        .await
+        .unwrap();
+    let (timeline_restored, _handle) = timeline(&restored, &chat).await;
+    let hello = bob
+        .client
+        .send_text(chat.clone(), "welcome back".to_string(), None)
+        .await
+        .unwrap();
+    let items = timeline_restored
+        .wait("hello at restored", |items| {
+            message(items, &hello).is_some()
+        })
+        .await;
+    assert_eq!(
+        text(&message(&items, &hello).unwrap()),
+        Some("welcome back")
+    );
+    let reply = restored
+        .send_text(chat.clone(), "thanks".to_string(), None)
+        .await
+        .unwrap();
+    let (bob_timeline, _bob_handle) = bob.timeline(&chat).await;
+    bob_timeline
+        .wait("reply at bob", |items| message(items, &reply).is_some())
+        .await;
 }

@@ -303,21 +303,21 @@ impl Transport for FakeTransport {
         Ok(self.service.take_link_bundle(link_id))
     }
 
+    /// A public read: the token is ignored, as on the hub.
     async fn device_list(
         &self,
-        token: &AccessToken,
+        _token: Option<&AccessToken>,
         user_id: &UserId,
     ) -> TransportResult<Option<Vec<u8>>> {
-        self.device(token)?;
         Ok(self.service.device_list(user_id))
     }
 
+    /// A public read: the token is ignored, as on the hub.
     async fn user(
         &self,
-        token: &AccessToken,
+        _token: Option<&AccessToken>,
         user_id: &UserId,
     ) -> TransportResult<Option<UserRecord>> {
-        self.device(token)?;
         Ok(self.service.user(user_id).map(|user| UserRecord {
             user_id: user.user_id,
             device_list: user.device_list,

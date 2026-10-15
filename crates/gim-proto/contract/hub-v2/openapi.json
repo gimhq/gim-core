@@ -553,7 +553,7 @@
           "groups"
         ],
         "summary": "Submit an MLS Commit",
-        "description": "`mls_message` is an MLS PublicMessage (Commit or Proposal), so the hub can parse it. The hub reads the epoch from the MLS framing (there is no client epoch field) and accepts the Commit only for the group's current epoch, advancing it by one. Membership changes are derived from the Add/Remove/Update proposals; each added member's gim-core credential (type 0xF001) is validated against their DeviceList, members are identified by user ID + device ID from their credentials, and `group.member_added` / `group.member_removed` events carry the `user_id`. The optional Welcome is delivered as a `welcome` event to `welcome_recipients`.\n\nResubmitting the same Commit (same hash) returns the original result with `duplicate: true` and emits nothing. Any other Commit for a past epoch fails with 409 `stale_epoch`.",
+        "description": "`mls_message` is an MLS PublicMessage (Commit or Proposal), so the hub can parse it. The hub reads the epoch from the MLS framing (there is no client epoch field) and accepts the Commit only for the group's current epoch, advancing it by one. Membership changes are derived from the Add/Remove/Update proposals; each added member's gim-core credential (type 0xF001) is validated against their DeviceList, members are identified by user ID + device ID from their credentials, and `group.member_added` / `group.member_removed` events carry the `user_id`. The optional Welcome is delivered as a `welcome` event to `welcome_recipients`.\n\nResubmitting the same Commit (same hash) returns the original result with `duplicate: true` and emits nothing. Any other Commit for a past epoch fails with 409 `stale_epoch`.\n\nFor a group owned by another hub (federation), this hub forwards the Commit to the owning hub, which sequences it; the response is the owner's result and the local replica already holds the Commit. Added members on other hubs get their Welcome through their own hub. This needs the caller's hosting record listing this hub (403 `hosting_record_required`); when the owning hub refuses the request the result is 502 `peer_refused`, when it cannot be reached 503 `peer_unavailable` with `Retry-After` (retry the same Commit: it is idempotent by hash).",
         "operationId": "submit_commit",
         "parameters": [
           {
@@ -619,7 +619,7 @@
             }
           },
           "403": {
-            "description": "Caller is not a member of the group (`not_member`), or group policy forbids the change (`forbidden`)",
+            "description": "Caller is not a member of the group (`not_member`), group policy forbids the change (`forbidden`), or the group is owned by another hub and the caller has no valid hosting record listing this hub (`hosting_record_required`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -657,6 +657,26 @@
                 }
               }
             }
+          },
+          "502": {
+            "description": "The owning hub of the group refused the request (`peer_refused`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning hub of the group is unreachable (`peer_unavailable`); retry after `Retry-After` seconds",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -672,7 +692,7 @@
           "messages"
         ],
         "summary": "List group messages",
-        "description": "Commits and application messages with `seq >= from_seq`, ascending.",
+        "description": "Commits and application messages with `seq >= from_seq`, ascending. For a group owned by another hub (federation), this hub serves its replica, which holds the log from the Commit that added this hub's first member on: a lower `from_seq` returns messages starting there.",
         "operationId": "list_messages",
         "parameters": [
           {
@@ -774,7 +794,7 @@
           "messages"
         ],
         "summary": "Send an application message",
-        "description": "Stores the opaque MLS message, assigns the next `seq` and emits a `message` event to every member device except the sender. The epoch is read from the MLS framing; a message for another epoch fails with 409 `stale_epoch`.\n\nResending the same `client_id` from the same device returns the stored message with 200 and emits nothing. A decoded message larger than the hub limit (default 262144 bytes) fails with 413.",
+        "description": "Stores the opaque MLS message, assigns the next `seq` and emits a `message` event to every member device except the sender. The epoch is read from the MLS framing; a message for another epoch fails with 409 `stale_epoch`.\n\nResending the same `client_id` from the same device returns the stored message with 200 and emits nothing. A decoded message larger than the hub limit (default 262144 bytes) fails with 413.\n\nFor a group owned by another hub (federation), this hub forwards the message to the owning hub, which assigns the `seq`; the response is the sequenced message. This needs the caller's hosting record listing this hub (403 `hosting_record_required`); when the owning hub refuses the request the result is 502 `peer_refused`, when it cannot be reached 503 `peer_unavailable` with `Retry-After` (retry with the same `client_id`).",
         "operationId": "send_message",
         "parameters": [
           {
@@ -840,7 +860,7 @@
             }
           },
           "403": {
-            "description": "Caller is not a member of the group (`not_member`)",
+            "description": "Caller is not a member of the group (`not_member`), or the group is owned by another hub and the caller has no valid hosting record listing this hub (`hosting_record_required`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -871,6 +891,26 @@
           },
           "413": {
             "description": "Payload too large (`payload_too_large`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The owning hub of the group refused the request (`peer_refused`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The owning hub of the group is unreachable (`peer_unavailable`); retry after `Retry-After` seconds",
             "content": {
               "application/json": {
                 "schema": {
@@ -1147,7 +1187,7 @@
           "keypackages"
         ],
         "summary": "Claim one KeyPackage per active device",
-        "description": "For each target, atomically removes and returns one one-time KeyPackage per active device of the user's DeviceList (or only the given device). The device's last-resort KeyPackage is returned (and kept) only when its one-time packages are exhausted. Emits `keypackages.low` to a device whose one-time count drops below the threshold.",
+        "description": "For each target, atomically removes and returns one one-time KeyPackage per active device of the user's DeviceList (or only the given device). The device's last-resort KeyPackage is returned (and kept) only when its one-time packages are exhausted. Emits `keypackages.low` to a device whose one-time count drops below the threshold.\n\nWith federation, a target hosted on another hub (per its hosting record) is claimed from that hub on the caller's behalf; targets whose hub could not be reached, refused or timed out are listed in `unavailable` (retryable). Claiming from another hub requires the caller to have a valid hosting record listing this hub.",
         "operationId": "claim_key_packages",
         "requestBody": {
           "content": {
@@ -1182,6 +1222,16 @@
           },
           "401": {
             "description": "Missing or invalid bearer token (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A target is on another hub and the caller has no valid hosting record listing this hub (`hosting_record_required`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1560,6 +1610,7 @@
           "identity"
         ],
         "summary": "Get a user",
+        "description": "For a user of another hub, the DeviceList comes from the cache of remote DeviceLists (fetched from the user's hub when missing or stale) and `handle` is absent.",
         "operationId": "get_user",
         "parameters": [
           {
@@ -1603,6 +1654,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "The user's hub is unreachable and no cached copy exists (`peer_unavailable`); retry after `Retry-After` seconds",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -1618,6 +1679,7 @@
           "identity"
         ],
         "summary": "Get a user's DeviceList",
+        "description": "For a user of another hub, the hub answers from its cache of remote DeviceLists, fetching the list from the user's hub when it is not cached or older than `GIM_HUB_DEVICE_LIST_CACHE_HOURS`. A stale cached copy is returned if the user's hub cannot be reached.",
         "operationId": "get_device_list",
         "parameters": [
           {
@@ -1661,6 +1723,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "The user's hub is unreachable and no cached copy exists (`peer_unavailable`); retry after `Retry-After` seconds",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -1674,7 +1746,7 @@
           "identity"
         ],
         "summary": "Upload a signed DeviceList",
-        "description": "No authentication: the DeviceList is self-certifying. The hub verifies the root key signature and that the list's user ID matches `user_id` (derived from the root key). The first upload creates the user on this hub. A later upload with a higher `seq` replaces the stored list; re-uploading the identical list (same `seq`, same bytes) is idempotent and returns 200. Devices revoked by the new list lose their tokens; a `device_list.updated` event is emitted to the user's other active devices and to every active device of users sharing a group with them.",
+        "description": "No authentication: the DeviceList is self-certifying. The hub verifies the root key signature and that the list's user ID matches `user_id` (derived from the root key). The first upload creates the user on this hub. A later upload with a higher `seq` replaces the stored list; re-uploading the identical list (same `seq`, same bytes) is idempotent and returns 200. Devices revoked by the new list lose their tokens; a `device_list.updated` event is emitted to the user's other active devices and to every active device of users sharing a group with them. With federation, a replaced list of a hosted user is pushed to the hubs sharing groups with the user, which emit `device_list.updated` to their users in those groups.",
         "operationId": "put_device_list",
         "parameters": [
           {
@@ -1741,6 +1813,241 @@
           },
           "413": {
             "description": "Payload too large (`payload_too_large`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v2/users/{user_id}/hosting-entry": {
+      "post": {
+        "tags": [
+          "hosting"
+        ],
+        "summary": "Get this hub's signed hosting entry for the caller",
+        "description": "The hub co-signs its `HostingEntry` for the caller's user with its root key. The client puts the entry into its `SignedHostingRecord`, signs the record with the user root key and uploads it with `PUT /v2/users/{user_id}/hosting-record`. Signing is deterministic: repeated calls return identical bytes.",
+        "operationId": "create_hosting_entry",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "description": "The caller's user ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "uciqgytfj5l477ei2pprxmxv2dgxqygyfkj4b6ho7onbwmqrwamhwaaa"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateHostingEntryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Signed entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostingEntry"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`priority` out of 0..=255 or malformed body (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token (`unauthorized`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`user_id` is not the caller's (`forbidden`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v2/users/{user_id}/hosting-record": {
+      "get": {
+        "tags": [
+          "hosting"
+        ],
+        "summary": "Get a user's hosting record",
+        "description": "No authentication. For a user of this hub, the stored record; for any other user, the newest valid record resolved through federation (cached, fetched from the user's hubs or from the DHT). Requests will be rate limited per client address (429 `rate_limited` with `Retry-After`).",
+        "operationId": "get_hosting_record",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "description": "Opaque user ID (format owned by gim-core)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "uciqgytfj5l477ei2pprxmxv2dgxqygyfkj4b6ho7onbwmqrwamhwaaa"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current record",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostingRecord"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No record, or it expired (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Resolution needed a peer hub that did not answer and the DHT had nothing (`peer_unavailable`, with `Retry-After` seconds)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "hosting"
+        ],
+        "summary": "Upload the user's signed hosting record",
+        "description": "No authentication: the record is self-certifying. Checks, in order: the record verifies for `user_id` (gim-core \"Hosting record\" verification; 400 `invalid_hosting_record` naming the gim-core error code); `user_id` is a user of this hub (404); the lifetime `expires_at - now` is between 1 hour and 30 days (400 `invalid_hosting_record`, `lifetime_out_of_range`); the seq rules against the stored record: a lower `seq`, or the same `seq` with a different body, is 409 `stale_hosting_record`, the identical record is 200 unchanged. A record listing this hub is published to the federation DHT. A record that does not list this hub is stored too; the hub then stops acting for the user in federation.",
+        "operationId": "put_hosting_record",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "description": "Opaque user ID (format owned by gim-core)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "uciqgytfj5l477ei2pprxmxv2dgxqygyfkj4b6ho7onbwmqrwamhwaaa"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutHostingRecordRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Record replaced, or identical to the stored one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostingRecord"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "First record of the user stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostingRecord"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid record, user ID mismatch or lifetime out of range (`invalid_hosting_record`), or malformed body (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not a user of this hub (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`seq` is lower than the stored record, or equal with a different body (`stale_hosting_record`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Record larger than 8192 bytes (`payload_too_large`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2100,7 +2407,8 @@
         "description": "Claimed KeyPackages.",
         "required": [
           "key_packages",
-          "missing"
+          "missing",
+          "unavailable"
         ],
         "properties": {
           "key_packages": {
@@ -2115,6 +2423,13 @@
               "$ref": "#/components/schemas/ClaimTarget"
             },
             "description": "Targets that are unknown, have no active device, or have no KeyPackage at all."
+          },
+          "unavailable": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ClaimTarget"
+            },
+            "description": "Targets on another hub that could not be reached, refused, or timed out (retryable)."
           }
         }
       },
@@ -2205,6 +2520,20 @@
         "properties": {
           "kind": {
             "$ref": "#/components/schemas/GroupKind"
+          }
+        }
+      },
+      "CreateHostingEntryRequest": {
+        "type": "object",
+        "description": "Body of POST /v2/users/{user_id}/hosting-entry.",
+        "properties": {
+          "priority": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Priority of this hub in the record; lower is preferred.",
+            "default": 0,
+            "maximum": 255,
+            "minimum": 0
           }
         }
       },
@@ -2372,6 +2701,9 @@
           },
           {
             "$ref": "#/components/schemas/DeviceListUpdatedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/HostingRecordExpiringEvent"
           }
         ],
         "description": "An entry of the calling device's event stream, ordered by `cursor`.",
@@ -2381,6 +2713,7 @@
             "device_list.updated": "#/components/schemas/DeviceListUpdatedEvent",
             "group.member_added": "#/components/schemas/MemberAddedEvent",
             "group.member_removed": "#/components/schemas/MemberRemovedEvent",
+            "hosting_record.expiring": "#/components/schemas/HostingRecordExpiringEvent",
             "keypackages.low": "#/components/schemas/KeyPackagesLowEvent",
             "message": "#/components/schemas/MessageEvent",
             "welcome": "#/components/schemas/WelcomeEvent"
@@ -2547,6 +2880,135 @@
         "enum": [
           "ok"
         ]
+      },
+      "HostingEntry": {
+        "type": "object",
+        "description": "This hub's signed entry for the caller's hosting record.",
+        "required": [
+          "hub_id",
+          "hub_root_pubkey",
+          "priority",
+          "entry"
+        ],
+        "properties": {
+          "entry": {
+            "type": "string",
+            "description": "gim-core CBOR `HostingEntry` `[hub_root_pubkey, priority, hub_sig]`,\nbase64; signing is deterministic, so repeated calls return identical\nbytes.",
+            "contentEncoding": "base64"
+          },
+          "hub_id": {
+            "type": "string",
+            "example": "hciqgrcknldyy6lbu2splf5frcdqeftipgfikjxbzeq6x6y55lggapay"
+          },
+          "hub_root_pubkey": {
+            "type": "string",
+            "description": "The hub's 32-byte Ed25519 root public key, base64.",
+            "contentEncoding": "base64"
+          },
+          "priority": {
+            "type": "integer",
+            "format": "int32",
+            "maximum": 255,
+            "minimum": 0
+          }
+        }
+      },
+      "HostingRecord": {
+        "type": "object",
+        "description": "A user's hosting record.",
+        "required": [
+          "user_id",
+          "hosting_record",
+          "seq",
+          "expires_at",
+          "hosted"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Expiry of the record (ms since the Unix epoch, exclusive).",
+            "example": 1760479200000,
+            "minimum": 0
+          },
+          "hosted": {
+            "type": "boolean",
+            "description": "Whether the user is local to this hub and the record lists this hub."
+          },
+          "hosting_record": {
+            "type": "string",
+            "description": "gim-core CBOR `SignedHostingRecord`, base64.",
+            "contentEncoding": "base64"
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "user_id": {
+            "type": "string",
+            "example": "uciqgytfj5l477ei2pprxmxv2dgxqygyfkj4b6ho7onbwmqrwamhwaaa"
+          }
+        }
+      },
+      "HostingRecordExpiring": {
+        "type": "object",
+        "description": "The receiving user's hosting record expires soon.",
+        "required": [
+          "user_id",
+          "expires_at",
+          "seq"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the stored record expires (ms since the Unix epoch).",
+            "example": 1760479200000,
+            "minimum": 0
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`seq` of the stored record.",
+            "minimum": 0
+          },
+          "user_id": {
+            "type": "string",
+            "example": "uciqgytfj5l477ei2pprxmxv2dgxqygyfkj4b6ho7onbwmqrwamhwaaa"
+          }
+        }
+      },
+      "HostingRecordExpiringEvent": {
+        "type": "object",
+        "description": "Emitted once per record `seq` (at most once per 24 hours per user) to the\nuser's active devices when less than 48 hours remain on the hosting\nrecord listing this hub. Publish a renewed record (new `seq`).",
+        "required": [
+          "cursor",
+          "created_at",
+          "type",
+          "data"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "example": 1760479200000
+          },
+          "cursor": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "data": {
+            "$ref": "#/components/schemas/HostingRecordExpiring"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "hosting_record.expiring"
+            ]
+          }
+        }
       },
       "KeyPackageCount": {
         "type": "object",
@@ -3000,6 +3462,20 @@
           }
         }
       },
+      "PutHostingRecordRequest": {
+        "type": "object",
+        "description": "Body of PUT /v2/users/{user_id}/hosting-record.",
+        "required": [
+          "hosting_record"
+        ],
+        "properties": {
+          "hosting_record": {
+            "type": "string",
+            "description": "gim-core CBOR `SignedHostingRecord`, base64, at most 8192 decoded\nbytes.",
+            "contentEncoding": "base64"
+          }
+        }
+      },
       "PutRecoveryBackupRequest": {
         "type": "object",
         "description": "Store the caller's recovery backup.",
@@ -3344,6 +3820,10 @@
     {
       "name": "push",
       "description": "Push registration"
+    },
+    {
+      "name": "hosting",
+      "description": "Hosting records: which hubs host a user (federation)"
     }
   ]
 }

@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use gim_base::model::{ChatKind, GroupMessage};
 use gim_common::{ClientId, DeviceRef, GroupId, UserId};
 use gim_proto::v2::{self, paths};
-use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, RANGE};
+use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, RANGE, RETRY_AFTER};
 use reqwest::{Body, Method, RequestBuilder, Response, StatusCode};
 use serde::de::DeserializeOwned;
 use tokio_util::io::ReaderStream;
@@ -32,6 +32,10 @@ pub use reqwest::Url;
 
 /// Longest long-poll `wait` the hub accepts.
 pub const MAX_WAIT: Duration = Duration::from_secs(30);
+/// Retries of a public read answered 429 or 503 with `Retry-After`.
+const PUBLIC_READ_RETRIES: u32 = 2;
+/// Longest total `Retry-After` wait of one public read.
+const PUBLIC_READ_MAX_DELAY: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HttpConfig {
@@ -137,6 +141,50 @@ impl HttpTransport {
             Ok(value) => Ok(Some(value)),
             Err(TransportError::NotFound(_)) => Ok(None),
             Err(err) => Err(err),
+        }
+    }
+
+    /// GET of a public read (device list, user): `None` on 404. 429 and 503
+    /// with `Retry-After` (integer seconds) are retried after that delay, at
+    /// most [`PUBLIC_READ_RETRIES`] times and [`PUBLIC_READ_MAX_DELAY`] in
+    /// total; past that budget they fail with
+    /// [`TransportError::RetryLater`].
+    async fn public_read<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        token: Option<&AccessToken>,
+    ) -> TransportResult<Option<T>> {
+        let mut retries = 0;
+        let mut waited = Duration::ZERO;
+        loop {
+            let response = Self::send(self.api(Method::GET, path, token)).await?;
+            let status = response.status();
+            if status.is_success() {
+                return response.json().await.map(Some).map_err(error::from_reqwest);
+            }
+            if status == StatusCode::NOT_FOUND {
+                return Ok(None);
+            }
+            let delay = match status {
+                StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE => response
+                    .headers()
+                    .get(RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.trim().parse::<u64>().ok())
+                    .map(Duration::from_secs),
+                _ => None,
+            };
+            let Some(delay) = delay else {
+                return Err(Self::status_error(response).await);
+            };
+            if retries == PUBLIC_READ_RETRIES || waited + delay > PUBLIC_READ_MAX_DELAY {
+                let body = response.bytes().await.unwrap_or_default();
+                return Err(error::retry_later(status, delay, &body));
+            }
+            tracing::debug!(%status, ?delay, path, "public read throttled; retrying");
+            tokio::time::sleep(delay).await;
+            retries += 1;
+            waited += delay;
         }
     }
 
@@ -285,23 +333,21 @@ impl Transport for HttpTransport {
 
     async fn device_list(
         &self,
-        token: &AccessToken,
+        token: Option<&AccessToken>,
         user_id: &UserId,
     ) -> TransportResult<Option<Vec<u8>>> {
         let path = paths::user_device_list(user_id.as_str());
-        let list: Option<v2::DeviceList> =
-            Self::json_opt(self.api(Method::GET, &path, Some(token))).await?;
+        let list: Option<v2::DeviceList> = self.public_read(&path, token).await?;
         Ok(list.map(|l| l.device_list))
     }
 
     async fn user(
         &self,
-        token: &AccessToken,
+        token: Option<&AccessToken>,
         user_id: &UserId,
     ) -> TransportResult<Option<UserRecord>> {
         let path = paths::user(user_id.as_str());
-        let user: Option<v2::User> =
-            Self::json_opt(self.api(Method::GET, &path, Some(token))).await?;
+        let user: Option<v2::User> = self.public_read(&path, token).await?;
         user.map(|user| {
             Ok(UserRecord {
                 user_id: convert::user_id(&user.user_id)?,
