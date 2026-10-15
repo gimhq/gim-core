@@ -1,4 +1,4 @@
-//! [`Transport`] over the gim-server REST API: reqwest with rustls (ring
+//! [`Transport`] over the gim-hub API v2: reqwest with rustls (ring
 //! provider, webpki roots), bearer auth, JSON bodies and long-poll events.
 //!
 //! Shape follows matrix-rust-sdk's `http_client` (Apache-2.0): one shared
@@ -8,16 +8,14 @@
 mod convert;
 mod error;
 
-use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use gim_base::model::{ChatKind, GroupMessage, IncomingEvent, UserInfo};
-use gim_common::{DeviceId, DeviceRef, GroupId, UserId};
-use gim_proto::dto::{self, paths, EventData};
+use gim_base::model::{ChatKind, GroupMessage};
+use gim_common::{ClientId, DeviceRef, GroupId, UserId};
+use gim_proto::v2::{self, paths};
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, RANGE};
 use reqwest::{Body, Method, RequestBuilder, Response, StatusCode};
 use serde::de::DeserializeOwned;
@@ -25,13 +23,14 @@ use tokio_util::io::ReaderStream;
 
 use crate::stream::ws;
 use crate::transport::{
-    AccessToken, EventBatch, EventStream, GroupInfo, KeyPackageCount, OutgoingMessage, PostError,
-    Registration, Transport, TransportError, TransportResult,
+    AccessToken, Challenge, ClaimedKeyPackage, CommitAccepted, EventBatch, EventStream, GroupInfo,
+    HubEvent, KeyPackageCount, OutgoingCommit, PostError, SessionToken, Transport, TransportError,
+    TransportResult, UserRecord,
 };
 
 pub use reqwest::Url;
 
-/// Longest long-poll `wait` gim-server accepts.
+/// Longest long-poll `wait` the hub accepts.
 pub const MAX_WAIT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,9 +51,8 @@ impl Default for HttpConfig {
     }
 }
 
-/// HTTP [`Transport`] for one gim-server, with the `/v1/stream` WebSocket
-/// as its live event stream. Clones share the connection pool and the
-/// device directory.
+/// HTTP [`Transport`] for one gim-hub, with the `/v2/stream` WebSocket as
+/// its live event stream. Clones share the connection pool.
 #[derive(Debug, Clone)]
 pub struct HttpTransport {
     client: reqwest::Client,
@@ -62,9 +60,11 @@ pub struct HttpTransport {
     base_url: String,
     connect_timeout: Duration,
     request_timeout: Duration,
-    /// Users of the devices seen in responses. Membership events carry
-    /// device ids only; this resolves them to [`DeviceRef`]s.
-    directory: Arc<Mutex<HashMap<DeviceId, UserId>>>,
+}
+
+/// Unix milliseconds from the hub (never negative in practice).
+fn millis(value: i64) -> u64 {
+    u64::try_from(value).unwrap_or(0)
 }
 
 impl HttpTransport {
@@ -83,7 +83,6 @@ impl HttpTransport {
             base_url: base_url.as_str().trim_end_matches('/').to_string(),
             connect_timeout: config.connect_timeout,
             request_timeout: config.request_timeout,
-            directory: Arc::default(),
         })
     }
 
@@ -132,218 +131,167 @@ impl HttpTransport {
             .map_err(error::from_reqwest)
     }
 
-    fn directory(&self) -> MutexGuard<'_, HashMap<DeviceId, UserId>> {
-        self.directory.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn remember<'a>(&self, devices: impl IntoIterator<Item = &'a DeviceRef>) {
-        let mut directory = self.directory();
-        for device in devices {
-            directory.insert(device.device_id.clone(), device.user_id.clone());
+    /// `None` on 404.
+    async fn json_opt<T: DeserializeOwned>(builder: RequestBuilder) -> TransportResult<Option<T>> {
+        match Self::json(builder).await {
+            Ok(value) => Ok(Some(value)),
+            Err(TransportError::NotFound(_)) => Ok(None),
+            Err(err) => Err(err),
         }
     }
 
-    fn lookup(&self, device_id: &DeviceId) -> Option<DeviceRef> {
-        self.directory()
-            .get(device_id)
-            .map(|user_id| DeviceRef::new(user_id.clone(), device_id.clone()))
-    }
-
-    async fn fetch_group(
-        &self,
-        token: &AccessToken,
-        group_id: &GroupId,
-    ) -> TransportResult<GroupInfo> {
-        let group = Self::json(self.api(Method::GET, &paths::group(group_id), Some(token))).await?;
-        let info = convert::group(group);
-        self.remember(&info.members);
-        Ok(info)
-    }
-
-    /// Fills the directory for the devices of membership events it does not
-    /// know yet: from the group's member list, then from `/v1/me` for this
-    /// device. Devices that already left the group may stay unresolved.
-    async fn resolve_members(
-        &self,
-        token: &AccessToken,
-        events: &[dto::Event],
-    ) -> TransportResult<()> {
-        let unknown = |events: &[dto::Event]| -> BTreeSet<GroupId> {
-            events
-                .iter()
-                .filter_map(|event| match &event.data {
-                    EventData::MemberAdded(change) | EventData::MemberRemoved(change) => {
-                        Some(change)
-                    }
-                    _ => None,
-                })
-                .filter(|change| change.device_ids.iter().any(|d| self.lookup(d).is_none()))
-                .map(|change| change.group_id.clone())
-                .collect()
-        };
-        let groups = unknown(events);
-        for group_id in &groups {
-            match self.fetch_group(token, group_id).await {
-                Ok(_) => {}
-                // This device may have been removed: then the group is no
-                // longer visible to it.
-                Err(TransportError::NotFound(_) | TransportError::Server(_)) => {}
-                Err(err) => return Err(err),
-            }
-        }
-        if !groups.is_empty() && !unknown(events).is_empty() {
-            let me: dto::Me = Self::json(self.api(Method::GET, paths::ME, Some(token))).await?;
-            self.remember(&[DeviceRef::new(me.user_id, me.device_id)]);
-        }
-        Ok(())
-    }
-
-    /// Maps stream events onto [`IncomingEvent`]s, resolving the devices of
-    /// membership events; unknown event types are skipped.
-    pub(crate) async fn convert_events(
-        &self,
-        token: &AccessToken,
-        events: Vec<dto::Event>,
-    ) -> TransportResult<Vec<IncomingEvent>> {
-        self.remember(
-            &events
-                .iter()
-                .filter_map(|event| match &event.data {
-                    EventData::Message(m) => Some(DeviceRef::new(
-                        m.sender_user_id.clone(),
-                        m.sender_device_id.clone(),
-                    )),
-                    _ => None,
-                })
-                .collect::<Vec<_>>(),
-        );
-        self.resolve_members(token, &events).await?;
-        Ok(events
-            .into_iter()
-            .flat_map(|event| match event.data {
-                EventData::Message(m) => vec![IncomingEvent::Message(convert::message(m))],
-                EventData::MemberAdded(change) => self.membership(change, |group_id, device| {
-                    IncomingEvent::MemberAdded { group_id, device }
+    /// Like [`Self::json`], with a 409 `stale_epoch` as
+    /// [`PostError::StaleEpoch`].
+    async fn json_post<T: DeserializeOwned>(builder: RequestBuilder) -> Result<T, PostError> {
+        let response = Self::send(builder).await?;
+        if response.status() == StatusCode::CONFLICT {
+            let body = response.bytes().await.unwrap_or_default();
+            return match serde_json::from_slice::<v2::StaleEpochError>(&body) {
+                Ok(e) if e.error.code == v2::STALE_EPOCH => Err(PostError::StaleEpoch {
+                    current_epoch: e.current_epoch,
                 }),
-                EventData::MemberRemoved(change) => self.membership(change, |group_id, device| {
-                    IncomingEvent::MemberRemoved { group_id, device }
-                }),
-                EventData::KeyPackagesLow(_) => vec![IncomingEvent::KeyPackagesLow],
-                EventData::Unknown { event_type, .. } => {
-                    tracing::debug!(%event_type, cursor = event.cursor, "skipping unknown event");
-                    vec![]
-                }
-            })
-            .collect())
+                _ => Err(error::from_status(StatusCode::CONFLICT, &body).into()),
+            };
+        }
+        if !response.status().is_success() {
+            return Err(Self::status_error(response).await.into());
+        }
+        Ok(response.json().await.map_err(error::from_reqwest)?)
     }
 
-    fn membership(
-        &self,
-        change: dto::MembershipChange,
-        event: impl Fn(GroupId, DeviceRef) -> IncomingEvent,
-    ) -> Vec<IncomingEvent> {
-        change
-            .device_ids
-            .iter()
-            .filter_map(|device_id| match self.lookup(device_id) {
-                Some(device) => Some(event(change.group_id.clone(), device)),
-                None => {
-                    tracing::debug!(%device_id, group_id = %change.group_id, "skipping membership event of an unknown device");
-                    None
-                }
-            })
-            .collect()
+    /// Maps stream events onto [`HubEvent`]s.
+    pub(crate) fn convert_events(events: Vec<v2::Event>) -> Vec<HubEvent> {
+        events.into_iter().flat_map(convert::event).collect()
     }
 }
 
 #[async_trait]
 impl Transport for HttpTransport {
-    async fn register_device(
-        &self,
-        handle: &str,
-        display_name: &str,
-    ) -> TransportResult<Registration> {
-        let request = dto::RegisterDeviceRequest {
-            handle: handle.to_string(),
-            display_name: display_name.to_string(),
+    async fn put_device_list(&self, user_id: &UserId, device_list: Vec<u8>) -> TransportResult<()> {
+        let request = v2::PutDeviceListRequest { device_list };
+        let _: v2::DeviceList = Self::json(
+            self.api(
+                Method::PUT,
+                &paths::user_device_list(user_id.as_str()),
+                None,
+            )
+            .json(&request),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn auth_challenge(&self, device: &DeviceRef) -> TransportResult<Challenge> {
+        let request = v2::AuthChallengeRequest {
+            user_id: device.user_id.to_string(),
+            device_id: device.device_id.to_string(),
         };
-        let response: dto::RegisterDeviceResponse =
-            Self::json(self.api(Method::POST, paths::DEVICES, None).json(&request)).await?;
-        let device = DeviceRef::new(response.user_id, response.device_id);
-        self.remember([&device]);
-        Ok(Registration {
-            device,
-            token: AccessToken::new(response.token),
-            cursor: response.cursor,
+        let challenge: v2::AuthChallenge = Self::json(
+            self.api(Method::POST, paths::AUTH_CHALLENGE, None)
+                .json(&request),
+        )
+        .await?;
+        Ok(Challenge {
+            challenge: challenge.challenge,
+            hub_id: challenge.hub_id,
         })
     }
 
-    async fn find_user(
+    async fn create_session(&self, response: Vec<u8>) -> TransportResult<SessionToken> {
+        let request = v2::CreateSessionRequest { response };
+        let result = Self::json::<v2::Session>(
+            self.api(Method::POST, paths::AUTH_SESSION, None)
+                .json(&request),
+        )
+        .await;
+        let session = match result {
+            // A rejected response (403) is a rejected sign-in.
+            Err(TransportError::Server(reason)) if reason.starts_with("403") => {
+                return Err(TransportError::Unauthorized)
+            }
+            session => session?,
+        };
+        Ok(SessionToken {
+            token: AccessToken::new(session.token),
+            expires_at_ms: millis(session.expires_at),
+        })
+    }
+
+    async fn put_recovery_backup(
         &self,
         token: &AccessToken,
-        handle: &str,
-    ) -> TransportResult<Option<UserInfo>> {
-        let query = dto::UsersQuery {
-            handle: handle.to_string(),
-        };
-        let request = self
-            .api(Method::GET, paths::USERS, Some(token))
-            .query(&query);
-        match Self::json::<dto::User>(request).await {
-            Ok(user) => Ok(Some(UserInfo {
-                user_id: user.user_id,
-                handle: user.handle,
-                display_name: user.display_name,
-            })),
-            Err(TransportError::NotFound(_)) => Ok(None),
-            Err(err) => Err(err),
-        }
+        user_id: &UserId,
+        backup: Vec<u8>,
+    ) -> TransportResult<()> {
+        let request = v2::PutRecoveryBackupRequest { backup };
+        let path = paths::user_recovery_backup(user_id.as_str());
+        let _: v2::RecoveryBackup =
+            Self::json(self.api(Method::PUT, &path, Some(token)).json(&request)).await?;
+        Ok(())
+    }
+
+    async fn device_list(
+        &self,
+        token: &AccessToken,
+        user_id: &UserId,
+    ) -> TransportResult<Option<Vec<u8>>> {
+        let path = paths::user_device_list(user_id.as_str());
+        let list: Option<v2::DeviceList> =
+            Self::json_opt(self.api(Method::GET, &path, Some(token))).await?;
+        Ok(list.map(|l| l.device_list))
     }
 
     async fn user(
         &self,
         token: &AccessToken,
         user_id: &UserId,
-    ) -> TransportResult<Option<UserInfo>> {
-        let request = self.api(Method::GET, &paths::user(user_id), Some(token));
-        match Self::json::<dto::User>(request).await {
-            Ok(user) => Ok(Some(UserInfo {
-                user_id: user.user_id,
+    ) -> TransportResult<Option<UserRecord>> {
+        let path = paths::user(user_id.as_str());
+        let user: Option<v2::User> =
+            Self::json_opt(self.api(Method::GET, &path, Some(token))).await?;
+        user.map(|user| {
+            Ok(UserRecord {
+                user_id: convert::user_id(&user.user_id)?,
+                device_list: user.device_list,
                 handle: user.handle,
-                display_name: user.display_name,
-            })),
-            Err(TransportError::NotFound(_)) => Ok(None),
-            Err(err) => Err(err),
-        }
+                display_name: None,
+            })
+        })
+        .transpose()
     }
 
-    async fn list_devices(
+    async fn find_handle(
         &self,
         token: &AccessToken,
-        user_id: &UserId,
-    ) -> TransportResult<Vec<DeviceRef>> {
-        let list: dto::UserDevices =
-            Self::json(self.api(Method::GET, &paths::user_devices(user_id), Some(token))).await?;
-        let devices: Vec<_> = list
-            .devices
-            .into_iter()
-            .map(|d| DeviceRef::new(user_id.clone(), d.device_id))
-            .collect();
-        self.remember(&devices);
-        Ok(devices)
+        handle: &str,
+    ) -> TransportResult<Option<UserId>> {
+        let found: Option<v2::Handle> =
+            Self::json_opt(self.api(Method::GET, &paths::handle(handle), Some(token))).await?;
+        found.map(|h| convert::user_id(&h.user_id)).transpose()
+    }
+
+    async fn claim_handle(&self, token: &AccessToken, handle: &str) -> TransportResult<()> {
+        let _: v2::Handle =
+            Self::json(self.api(Method::PUT, &paths::handle(handle), Some(token))).await?;
+        Ok(())
+    }
+
+    async fn release_handle(&self, token: &AccessToken, handle: &str) -> TransportResult<()> {
+        Self::send_ok(self.api(Method::DELETE, &paths::handle(handle), Some(token))).await?;
+        Ok(())
     }
 
     async fn upload_key_packages(
         &self,
         token: &AccessToken,
         key_packages: Vec<Vec<u8>>,
-        last_resort: Option<Vec<u8>>,
+        last_resort: bool,
     ) -> TransportResult<()> {
-        let request = dto::UploadKeyPackagesRequest {
+        let request = v2::UploadKeyPackagesRequest {
             key_packages,
             last_resort,
         };
-        let _: dto::KeyPackageCount = Self::json(
+        let _: v2::KeyPackageCount = Self::json(
             self.api(Method::POST, paths::KEY_PACKAGES, Some(token))
                 .json(&request),
         )
@@ -352,23 +300,29 @@ impl Transport for HttpTransport {
     }
 
     async fn key_package_count(&self, token: &AccessToken) -> TransportResult<KeyPackageCount> {
-        let count: dto::KeyPackageCount =
+        let count: v2::KeyPackageCount =
             Self::json(self.api(Method::GET, paths::KEY_PACKAGES_COUNT, Some(token))).await?;
         Ok(KeyPackageCount {
-            available: count.available,
+            available: u64::from(count.available),
             has_last_resort: count.has_last_resort,
         })
     }
 
-    async fn claim_key_package(
+    async fn claim_key_packages(
         &self,
         token: &AccessToken,
-        device: &DeviceRef,
-    ) -> TransportResult<Vec<u8>> {
-        let request = dto::ClaimKeyPackagesRequest {
-            device_ids: vec![device.device_id.clone()],
+        users: &[UserId],
+    ) -> TransportResult<Vec<ClaimedKeyPackage>> {
+        let request = v2::ClaimKeyPackagesRequest {
+            targets: users
+                .iter()
+                .map(|user_id| v2::ClaimTarget {
+                    user_id: user_id.to_string(),
+                    device_id: None,
+                })
+                .collect(),
         };
-        let response: dto::ClaimKeyPackagesResponse = Self::json(
+        let response: v2::ClaimKeyPackagesResponse = Self::json(
             self.api(Method::POST, paths::KEY_PACKAGES_CLAIM, Some(token))
                 .json(&request),
         )
@@ -376,30 +330,25 @@ impl Transport for HttpTransport {
         response
             .key_packages
             .into_iter()
-            .find(|claimed| claimed.device_id == device.device_id)
-            .map(|claimed| claimed.key_package)
-            .ok_or_else(|| TransportError::NotFound(format!("no key package for {device}")))
+            .map(|claimed| {
+                Ok(ClaimedKeyPackage {
+                    device: convert::device(&claimed.user_id, &claimed.device_id)?,
+                    key_package: claimed.key_package,
+                })
+            })
+            .collect()
     }
 
-    async fn create_group(
-        &self,
-        token: &AccessToken,
-        kind: ChatKind,
-        members: &[DeviceRef],
-    ) -> TransportResult<GroupId> {
-        self.remember(members);
-        let request = dto::CreateGroupRequest {
+    async fn create_group(&self, token: &AccessToken, kind: ChatKind) -> TransportResult<GroupId> {
+        let request = v2::CreateGroupRequest {
             kind: convert::group_kind(kind),
-            member_device_ids: members.iter().map(|d| d.device_id.clone()).collect(),
         };
-        let group: dto::Group = Self::json(
+        let group: v2::Group = Self::json(
             self.api(Method::POST, paths::GROUPS, Some(token))
                 .json(&request),
         )
         .await?;
-        let info = convert::group(group);
-        self.remember(&info.members);
-        Ok(info.group_id)
+        convert::group_id(&group.gid)
     }
 
     async fn group_info(
@@ -407,88 +356,59 @@ impl Transport for HttpTransport {
         token: &AccessToken,
         group_id: &GroupId,
     ) -> TransportResult<GroupInfo> {
-        self.fetch_group(token, group_id).await
+        let path = paths::group(group_id.as_str());
+        convert::group(Self::json(self.api(Method::GET, &path, Some(token))).await?)
     }
 
     async fn list_groups(&self, token: &AccessToken) -> TransportResult<Vec<GroupInfo>> {
-        let list: dto::GroupList =
+        let list: v2::GroupList =
             Self::json(self.api(Method::GET, paths::GROUPS, Some(token))).await?;
-        let groups: Vec<GroupInfo> = list.groups.into_iter().map(convert::group).collect();
-        self.remember(groups.iter().flat_map(|g| &g.members));
-        Ok(groups)
+        list.groups.into_iter().map(convert::group).collect()
     }
 
-    async fn add_group_members(
+    async fn submit_commit(
         &self,
         token: &AccessToken,
         group_id: &GroupId,
-        devices: &[DeviceRef],
-    ) -> TransportResult<()> {
-        self.remember(devices);
-        let request = dto::AddMembersRequest {
-            device_ids: devices.iter().map(|d| d.device_id.clone()).collect(),
+        commit: OutgoingCommit,
+    ) -> Result<CommitAccepted, PostError> {
+        let request = v2::SubmitCommitRequest {
+            client_id: commit.client_id.to_string(),
+            mls_message: commit.mls_message,
+            welcome_recipients: commit.welcome.is_some().then(|| {
+                commit
+                    .welcome_recipients
+                    .iter()
+                    .map(convert::member)
+                    .collect()
+            }),
+            welcome: commit.welcome,
+            ratchet_tree: None,
         };
-        let _: dto::Group = Self::json(
-            self.api(Method::POST, &paths::group_members(group_id), Some(token))
-                .json(&request),
-        )
-        .await?;
-        Ok(())
-    }
-
-    async fn remove_group_members(
-        &self,
-        token: &AccessToken,
-        group_id: &GroupId,
-        devices: &[DeviceRef],
-    ) -> TransportResult<()> {
-        self.remember(devices);
-        for device in devices {
-            let path = paths::group_member(group_id, &device.device_id);
-            let _: dto::Group = Self::json(self.api(Method::DELETE, &path, Some(token))).await?;
-        }
-        Ok(())
+        let path = paths::group_commits(group_id.as_str());
+        let result: v2::CommitResult =
+            Self::json_post(self.api(Method::POST, &path, Some(token)).json(&request)).await?;
+        Ok(CommitAccepted {
+            seq: result.seq,
+            epoch: result.epoch,
+            duplicate: result.duplicate,
+        })
     }
 
     async fn post_message(
         &self,
         token: &AccessToken,
         group_id: &GroupId,
-        message: OutgoingMessage,
+        client_id: ClientId,
+        mls_message: Vec<u8>,
     ) -> Result<u64, PostError> {
-        self.remember(&message.recipients);
-        let commit_epoch = message.epoch;
-        let request = dto::SendMessageRequest {
-            client_id: message.client_id,
-            epoch: message.epoch,
-            kind: convert::message_kind(message.kind),
-            payload: message.payload,
-            recipients: (!message.recipients.is_empty()).then(|| {
-                message
-                    .recipients
-                    .into_iter()
-                    .map(|d| d.device_id)
-                    .collect()
-            }),
+        let request = v2::SendMessageRequest {
+            client_id: client_id.to_string(),
+            mls_message,
         };
-        let response = Self::send(
-            self.api(Method::POST, &paths::group_messages(group_id), Some(token))
-                .json(&request),
-        )
-        .await?;
-        if response.status() == StatusCode::CONFLICT {
-            let body = response.bytes().await.unwrap_or_default();
-            return match serde_json::from_slice::<dto::ErrorResponse>(&body) {
-                Ok(e) if e.error.code == dto::STALE_EPOCH => {
-                    Err(PostError::EpochConflict { commit_epoch })
-                }
-                _ => Err(error::from_status(StatusCode::CONFLICT, &body).into()),
-            };
-        }
-        if !response.status().is_success() {
-            return Err(Self::status_error(response).await.into());
-        }
-        let stored: dto::Message = response.json().await.map_err(error::from_reqwest)?;
+        let path = paths::group_messages(group_id.as_str());
+        let stored: v2::Message =
+            Self::json_post(self.api(Method::POST, &path, Some(token)).json(&request)).await?;
         Ok(stored.seq)
     }
 
@@ -499,19 +419,19 @@ impl Transport for HttpTransport {
         wait: Duration,
     ) -> TransportResult<EventBatch> {
         let wait = wait.min(MAX_WAIT);
-        let query = dto::EventsQuery {
+        let query = v2::EventsQuery {
             cursor,
             wait: Some(wait.as_secs() as u32),
             limit: None,
         };
-        let list: dto::EventList = Self::json(
+        let list: v2::EventList = Self::json(
             self.request(Method::GET, paths::EVENTS, Some(token))
                 .timeout(self.request_timeout + wait)
                 .query(&query),
         )
         .await?;
         Ok(EventBatch {
-            events: self.convert_events(token, list.events).await?,
+            events: Self::convert_events(list.events),
             next_cursor: list.next_cursor,
         })
     }
@@ -521,33 +441,50 @@ impl Transport for HttpTransport {
         token: &AccessToken,
         cursor: Option<u64>,
     ) -> TransportResult<Option<Box<dyn EventStream>>> {
-        let url = ws::stream_url(&self.base_url, cursor)?;
+        let url = ws::stream_url(&self.base_url, cursor, token)?;
         let timeout = self.connect_timeout + self.request_timeout;
-        let stream = ws::WsEventStream::connect(self.clone(), token.clone(), url, timeout).await?;
+        let stream = ws::WsEventStream::connect(url, timeout).await?;
         Ok(stream.map(|s| Box::new(s) as Box<dyn EventStream>))
     }
 
-    fn seed_device_directory(&self, devices: &[DeviceRef]) {
-        self.remember(devices);
+    async fn pending_welcomes(
+        &self,
+        token: &AccessToken,
+        limit: u32,
+    ) -> TransportResult<Vec<GroupMessage>> {
+        let query = v2::PendingWelcomesQuery { limit: Some(limit) };
+        let list: v2::PendingWelcomeList = Self::json(
+            self.api(Method::GET, paths::WELCOMES_PENDING, Some(token))
+                .query(&query),
+        )
+        .await?;
+        list.welcomes
+            .into_iter()
+            .map(|pending| convert::welcome(pending.welcome))
+            .collect()
+    }
+
+    async fn ack_welcome(&self, token: &AccessToken, group_id: &GroupId) -> TransportResult<()> {
+        let path = paths::welcome_ack(group_id.as_str());
+        Self::send_ok(self.api(Method::POST, &path, Some(token))).await?;
+        Ok(())
     }
 
     async fn group_messages(
         &self,
         token: &AccessToken,
         group_id: &GroupId,
-        after_seq: u64,
+        from_seq: u64,
         limit: u32,
     ) -> TransportResult<Vec<GroupMessage>> {
-        let query = dto::MessagesQuery {
-            after_seq: Some(after_seq),
+        let query = v2::MessagesQuery {
+            from_seq: Some(from_seq.max(1)),
             limit: Some(limit),
         };
-        let list: dto::MessageList = Self::json(
-            self.api(Method::GET, &paths::group_messages(group_id), Some(token))
-                .query(&query),
-        )
-        .await?;
-        Ok(list.messages.into_iter().map(convert::message).collect())
+        let path = paths::group_messages(group_id.as_str());
+        let list: v2::MessageList =
+            Self::json(self.api(Method::GET, &path, Some(token)).query(&query)).await?;
+        list.messages.into_iter().map(convert::message).collect()
     }
 
     async fn upload_blob(&self, token: &AccessToken, file: &Path) -> TransportResult<String> {
@@ -556,7 +493,7 @@ impl Transport for HttpTransport {
         };
         let file = tokio::fs::File::open(file).await.map_err(local)?;
         let size = file.metadata().await.map_err(local)?.len();
-        let created: dto::BlobCreated = Self::json(
+        let created: v2::BlobCreated = Self::json(
             self.request(Method::POST, paths::BLOBS, Some(token))
                 .header(CONTENT_TYPE, "application/octet-stream")
                 .header(CONTENT_LENGTH, size)
@@ -583,7 +520,7 @@ impl Transport for HttpTransport {
         let partial = response.status() == StatusCode::PARTIAL_CONTENT;
         let body = response.bytes().await.map_err(error::from_reqwest)?;
         match range {
-            // The server ignored the range and sent the whole blob.
+            // The hub ignored the range and sent the whole blob.
             Some(range) if !partial => usize::try_from(range.start)
                 .ok()
                 .zip(usize::try_from(range.end).ok())

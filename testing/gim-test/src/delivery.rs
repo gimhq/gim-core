@@ -542,8 +542,7 @@ impl FakeDeliveryService {
         creator: &DeviceRef,
     ) -> Result<GroupId, DeliveryError> {
         let id = self.lock().next_id();
-        let group_id =
-            GroupId::new(format!("{}/g{id:024}", self.hub_id)).expect("valid group id");
+        let group_id = GroupId::new(format!("{}/g{id:024}", self.hub_id)).expect("valid group id");
         self.create(&group_id, kind, creator)?;
         Ok(group_id)
     }
@@ -753,7 +752,8 @@ impl FakeDeliveryService {
         })
     }
 
-    /// Accepts an application message; returns its `seq`.
+    /// Accepts an application message for the current epoch (or a resend
+    /// of the same `client_id`); returns its `seq`.
     pub fn post_message(
         &self,
         group_id: &GroupId,
@@ -771,6 +771,12 @@ impl FakeDeliveryService {
         let key = (sender.clone(), client_id.clone());
         if let Some(&seq) = group.seq_by_client_id.get(&key) {
             return Ok(seq);
+        }
+        if epoch != group.epoch {
+            return Err(DeliveryError::StaleEpoch {
+                commit_epoch: epoch,
+                current_epoch: group.epoch,
+            });
         }
         let seq = group.history.len() as u64 + 1;
         group.seq_by_client_id.insert(key, seq);
@@ -1090,9 +1096,15 @@ mod tests {
         assert_eq!(post(&a, "m1"), Ok(2));
         assert_eq!(post(&b[0], "m1"), Ok(3));
         let outsider = device("x", "d1");
-        assert_eq!(post(&outsider, "m2"), Err(DeliveryError::NotAMember(outsider)));
+        assert_eq!(
+            post(&outsider, "m2"),
+            Err(DeliveryError::NotAMember(outsider))
+        );
         let history = ds.messages(&g, 1, 10).unwrap();
-        assert_eq!(history.iter().map(|m| m.seq).collect::<Vec<_>>(), vec![2, 3]);
+        assert_eq!(
+            history.iter().map(|m| m.seq).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
         let (events, next) = ds.events(&b[0], 0, 10);
         assert_eq!(events.len(), 3);
         assert_eq!(ds.events(&b[0], next, 10), (vec![], next));
@@ -1122,10 +1134,10 @@ mod tests {
         ds.upload_key_packages(&a[0], packages, false);
         ds.upload_key_packages(&a[0], vec![b"last".to_vec()], true);
         ds.upload_key_packages(&a[1], vec![b"two".to_vec()], false);
-        let (claimed, missing) = ds.claim_key_packages(&[user_id.clone()]);
+        let (claimed, missing) = ds.claim_key_packages(std::slice::from_ref(&user_id));
         assert!(missing.is_empty());
         assert_eq!(claimed.len(), 2);
-        let (claimed, _) = ds.claim_key_packages(&[user_id.clone()]);
+        let (claimed, _) = ds.claim_key_packages(std::slice::from_ref(&user_id));
         assert_eq!(claimed.len(), 1);
         assert_eq!(ds.key_package_count(&a[0]), KEY_PACKAGES_LOW_THRESHOLD - 1);
 

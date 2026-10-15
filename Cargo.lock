@@ -1299,6 +1299,7 @@ dependencies = [
  "gim-base",
  "gim-common",
  "gim-crypto",
+ "gim-identity",
  "gim-proto",
  "gim-sdk",
  "gim-sqlite",
@@ -1315,6 +1316,7 @@ dependencies = [
  "tracing",
  "webpki-roots 1.0.9",
  "wiremock",
+ "zeroize",
 ]
 
 [[package]]

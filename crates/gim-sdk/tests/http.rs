@@ -1,11 +1,15 @@
-//! `HttpTransport` against an in-process mock gim-server: request shapes,
+//! `HttpTransport` against an in-process mock hub (API v2): request shapes,
 //! response mapping and error mapping.
 
 use std::time::Duration;
 
 use gim_base::model::{ChatKind, IncomingEvent, MessageKind};
 use gim_common::{ClientId, DeviceRef, GroupId, UserId};
-use gim_sdk::transport::{AccessToken, OutgoingMessage, PostError, Transport, TransportError};
+use gim_identity::{DeviceSigningKey, RootKey};
+use gim_sdk::transport::{
+    AccessToken, ClaimedKeyPackage, CommitAccepted, HubEvent, OutgoingCommit, PostError, Transport,
+    TransportError,
+};
 use gim_sdk::{HttpConfig, HttpTransport};
 use serde_json::{json, Value};
 use wiremock::matchers::{body_bytes, body_json, header, method, path, query_param};
@@ -26,8 +30,25 @@ fn transport_at(uri: &str) -> HttpTransport {
     HttpTransport::new(uri.parse().unwrap()).unwrap()
 }
 
-fn device(user: &str, device: &str) -> DeviceRef {
-    DeviceRef::parse(user, device).unwrap()
+/// A device id of the gim-identity formats: device `n` of user `n`.
+fn device(n: u8) -> DeviceRef {
+    let user_id = RootKey::from_seed(&[n; 32]).public().user_id();
+    let device_id = DeviceSigningKey::from_seed(&[n + 100; 32])
+        .public()
+        .device_id();
+    DeviceRef::new(user_id, device_id)
+}
+
+fn user(n: u8) -> UserId {
+    device(n).user_id
+}
+
+fn uid(n: u8) -> String {
+    user(n).to_string()
+}
+
+fn did(n: u8) -> String {
+    device(n).device_id.to_string()
 }
 
 fn gid(id: &str) -> GroupId {
@@ -38,31 +59,44 @@ fn error_body(code: &str) -> Value {
     json!({ "error": { "code": code, "message": "nope" } })
 }
 
-fn group_json(id: &str, kind: &str, members: &[(&str, &str)]) -> Value {
+fn group_json(id: &str, kind: &str, members: &[u8]) -> Value {
     json!({
-        "group_id": id,
+        "gid": id,
         "kind": kind,
         "epoch": 3,
-        "created_by_device_id": "d_a",
+        "last_seq": 9,
+        "created_by_user_id": uid(1),
+        "created_by_device_id": did(1),
         "created_at": 1,
         "members": members
             .iter()
-            .map(|(u, d)| json!({ "user_id": u, "device_id": d }))
+            .map(|n| json!({ "user_id": uid(*n), "device_id": did(*n) }))
             .collect::<Vec<_>>(),
     })
 }
 
 fn message_json(seq: u64, kind: &str) -> Value {
     json!({
-        "group_id": "g_1",
+        "gid": "g/1",
         "seq": seq,
-        "sender_device_id": "d_b",
-        "sender_user_id": "u_b",
+        "sender_user_id": uid(2),
+        "sender_device_id": did(2),
         "client_id": "c1",
         "kind": kind,
         "epoch": 2,
-        "payload": "AQID",
+        "mls_message": "AQID",
         "created_at": 5,
+    })
+}
+
+fn welcome_json(seq: u64) -> Value {
+    json!({
+        "gid": "g/1",
+        "sender_user_id": uid(2),
+        "sender_device_id": did(2),
+        "epoch": 3,
+        "seq": seq,
+        "welcome": "BAU=",
     })
 }
 
@@ -76,244 +110,308 @@ async fn mount(server: &MockServer, verb: &str, route: &str, response: ResponseT
 }
 
 #[tokio::test]
-async fn register_device() {
+async fn put_device_list_without_token() {
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/v1/devices"))
-        .and(body_json(
-            json!({ "handle": "alice", "display_name": "Alice" }),
-        ))
-        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
-            "user_id": "u_a", "device_id": "d_a", "token": TOKEN, "cursor": 42,
-        })))
-        .mount(&server)
-        .await;
-    let registration = transport(&server)
-        .register_device("alice", "Alice")
-        .await
-        .unwrap();
-    assert_eq!(registration.device, device("u_a", "d_a"));
-    assert_eq!(registration.token, token());
-    assert_eq!(registration.cursor, 42);
-    let request = &server.received_requests().await.unwrap()[0];
-    assert!(request.headers.get("authorization").is_none());
-}
-
-#[tokio::test]
-async fn find_user() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/v1/users"))
-        .and(query_param("handle", "bob"))
-        .and(header("authorization", BEARER))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "user_id": "u_b", "handle": "bob", "display_name": "Bob",
-        })))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/v1/users"))
-        .and(query_param("handle", "nobody"))
-        .respond_with(ResponseTemplate::new(404).set_body_json(error_body("not_found")))
-        .mount(&server)
-        .await;
-    let http = transport(&server);
-    let user = http.find_user(&token(), "bob").await.unwrap().unwrap();
-    assert_eq!(user.user_id, UserId::new("u_b").unwrap());
-    assert_eq!(user.display_name, "Bob");
-    assert_eq!(http.find_user(&token(), "nobody").await, Ok(None));
-}
-
-#[tokio::test]
-async fn list_devices() {
-    let server = MockServer::start().await;
-    let body = json!({ "devices": [
-        { "device_id": "d_1", "created_at": 1 },
-        { "device_id": "d_2", "created_at": 2 },
-    ]});
-    mount(
-        &server,
-        "GET",
-        "/v1/users/u_b/devices",
-        ResponseTemplate::new(200).set_body_json(body),
-    )
-    .await;
-    let devices = transport(&server)
-        .list_devices(&token(), &UserId::new("u_b").unwrap())
-        .await
-        .unwrap();
-    assert_eq!(devices, vec![device("u_b", "d_1"), device("u_b", "d_2")]);
-}
-
-#[tokio::test]
-async fn upload_key_packages() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/v1/keypackages"))
-        .and(header("authorization", BEARER))
-        .and(body_json(
-            json!({ "key_packages": ["AQ==", "Ag=="], "last_resort": "Aw==" }),
-        ))
+    let route = format!("/v2/users/{}/device-list", uid(1));
+    Mock::given(method("PUT"))
+        .and(path(route.as_str()))
+        .and(body_json(json!({ "device_list": "AQI=" })))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(json!({ "available": 2, "has_last_resort": true })),
+            ResponseTemplate::new(201)
+                .set_body_json(json!({ "user_id": uid(1), "device_list": "AQI=" })),
         )
         .expect(1)
         .mount(&server)
         .await;
     transport(&server)
-        .upload_key_packages(&token(), vec![vec![1], vec![2]], Some(vec![3]))
+        .put_device_list(&user(1), vec![1, 2])
+        .await
+        .unwrap();
+    let request = &server.received_requests().await.unwrap()[0];
+    assert!(request.headers.get("authorization").is_none());
+}
+
+#[tokio::test]
+async fn sign_in_requests() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v2/auth/challenge"))
+        .and(body_json(json!({ "user_id": uid(1), "device_id": did(1) })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "challenge": "AQID", "expires_at": 1000, "hub_id": "hub.example",
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v2/auth/session"))
+        .and(body_json(json!({ "response": "BAU=" })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "token": TOKEN, "expires_at": 5000 })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v2/auth/session"))
+        .and(body_json(json!({ "response": "Bg==" })))
+        .respond_with(ResponseTemplate::new(403).set_body_json(error_body("forbidden")))
+        .mount(&server)
+        .await;
+    let http = transport(&server);
+    let challenge = http.auth_challenge(&device(1)).await.unwrap();
+    assert_eq!(challenge.challenge, vec![1, 2, 3]);
+    assert_eq!(challenge.hub_id, "hub.example");
+    let session = http.create_session(vec![4, 5]).await.unwrap();
+    assert_eq!(session.token, token());
+    assert_eq!(session.expires_at_ms, 5000);
+    // A rejected response is a rejected sign-in.
+    assert_eq!(
+        http.create_session(vec![6]).await,
+        Err(TransportError::Unauthorized)
+    );
+}
+
+#[tokio::test]
+async fn users_and_handles() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "GET",
+        &format!("/v2/users/{}", uid(2)),
+        ResponseTemplate::new(200).set_body_json(json!({
+            "user_id": uid(2), "device_list": "AQI=", "handle": "bob",
+        })),
+    )
+    .await;
+    mount(
+        &server,
+        "GET",
+        &format!("/v2/users/{}", uid(3)),
+        ResponseTemplate::new(404).set_body_json(error_body("not_found")),
+    )
+    .await;
+    mount(
+        &server,
+        "GET",
+        "/v2/handles/bob",
+        ResponseTemplate::new(200).set_body_json(json!({ "handle": "bob", "user_id": uid(2) })),
+    )
+    .await;
+    mount(
+        &server,
+        "GET",
+        "/v2/handles/nobody",
+        ResponseTemplate::new(404).set_body_json(error_body("not_found")),
+    )
+    .await;
+    mount(
+        &server,
+        "PUT",
+        "/v2/handles/al%20ice",
+        ResponseTemplate::new(200).set_body_json(json!({ "handle": "al ice", "user_id": uid(1) })),
+    )
+    .await;
+    mount(
+        &server,
+        "DELETE",
+        "/v2/handles/al%20ice",
+        ResponseTemplate::new(204),
+    )
+    .await;
+    let http = transport(&server);
+    let record = http.user(&token(), &user(2)).await.unwrap().unwrap();
+    assert_eq!(record.user_id, user(2));
+    assert_eq!(record.device_list, vec![1, 2]);
+    assert_eq!(record.handle.as_deref(), Some("bob"));
+    assert_eq!(http.user(&token(), &user(3)).await, Ok(None));
+    assert_eq!(http.find_handle(&token(), "bob").await, Ok(Some(user(2))));
+    assert_eq!(http.find_handle(&token(), "nobody").await, Ok(None));
+    http.claim_handle(&token(), "al ice").await.unwrap();
+    http.release_handle(&token(), "al ice").await.unwrap();
+}
+
+#[tokio::test]
+async fn upload_key_packages() {
+    let server = MockServer::start().await;
+    for (body, last_resort) in [
+        (json!({ "key_packages": ["AQ==", "Ag=="] }), false),
+        (
+            json!({ "key_packages": ["Aw=="], "last_resort": true }),
+            true,
+        ),
+    ] {
+        Mock::given(method("POST"))
+            .and(path("/v2/keypackages"))
+            .and(header("authorization", BEARER))
+            .and(body_json(body))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "available": 2, "has_last_resort": last_resort })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let http = transport(&server);
+    http.upload_key_packages(&token(), vec![vec![1], vec![2]], false)
+        .await
+        .unwrap();
+    http.upload_key_packages(&token(), vec![vec![3]], true)
         .await
         .unwrap();
 }
 
 #[tokio::test]
-async fn claim_key_package() {
+async fn claim_key_packages_by_user() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/v1/keypackages/claim"))
+        .and(path("/v2/keypackages/claim"))
         .and(header("authorization", BEARER))
-        .and(body_json(json!({ "device_ids": ["d_b"] })))
+        .and(body_json(json!({
+            "targets": [{ "user_id": uid(2) }, { "user_id": uid(3) }],
+        })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "key_packages": [{ "device_id": "d_b", "key_package": "BAU=", "last_resort": false }],
-            "missing": [],
+            "key_packages": [{
+                "user_id": uid(2), "device_id": did(2), "key_package": "BAU=", "last_resort": false,
+            }],
+            "missing": [{ "user_id": uid(3) }],
         })))
         .mount(&server)
         .await;
-    Mock::given(method("POST"))
-        .and(path("/v1/keypackages/claim"))
-        .and(body_json(json!({ "device_ids": ["d_c"] })))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(json!({ "key_packages": [], "missing": ["d_c"] })),
-        )
-        .mount(&server)
-        .await;
-    let http = transport(&server);
-    let kp = http
-        .claim_key_package(&token(), &device("u_b", "d_b"))
+    let claimed = transport(&server)
+        .claim_key_packages(&token(), &[user(2), user(3)])
         .await
         .unwrap();
-    assert_eq!(kp, vec![4, 5]);
-    assert!(matches!(
-        http.claim_key_package(&token(), &device("u_c", "d_c"))
-            .await,
-        Err(TransportError::NotFound(_))
-    ));
+    assert_eq!(
+        claimed,
+        vec![ClaimedKeyPackage {
+            device: device(2),
+            key_package: vec![4, 5],
+        }]
+    );
 }
 
 #[tokio::test]
 async fn create_group_and_group_info() {
     let server = MockServer::start().await;
-    let group = group_json("g_1", "direct", &[("u_a", "d_a"), ("u_b", "d_b")]);
+    // The hub assigns the gid; '/' is percent-encoded in paths.
+    let group = group_json("hub.example/g1", "direct", &[1, 2]);
     Mock::given(method("POST"))
-        .and(path("/v1/groups"))
+        .and(path("/v2/groups"))
         .and(header("authorization", BEARER))
-        .and(body_json(
-            json!({ "kind": "direct", "member_device_ids": ["d_b"] }),
-        ))
+        .and(body_json(json!({ "kind": "direct" })))
         .respond_with(ResponseTemplate::new(201).set_body_json(&group))
         .mount(&server)
         .await;
     mount(
         &server,
         "GET",
-        "/v1/groups/g_1",
+        "/v2/groups/hub.example%2Fg1",
         ResponseTemplate::new(200).set_body_json(&group),
     )
     .await;
+    mount(
+        &server,
+        "GET",
+        "/v2/groups",
+        ResponseTemplate::new(200).set_body_json(json!({ "groups": [group] })),
+    )
+    .await;
     let http = transport(&server);
-    let group_id = http
-        .create_group(&token(), ChatKind::Direct, &[device("u_b", "d_b")])
-        .await
-        .unwrap();
-    assert_eq!(group_id, gid("g_1"));
+    let group_id = http.create_group(&token(), ChatKind::Direct).await.unwrap();
+    assert_eq!(group_id, gid("hub.example/g1"));
     let info = http.group_info(&token(), &group_id).await.unwrap();
     assert_eq!(info.kind, ChatKind::Direct);
     assert_eq!(info.epoch, 3);
-    assert_eq!(
-        info.members,
-        vec![device("u_a", "d_a"), device("u_b", "d_b")]
-    );
+    assert_eq!(info.last_seq, 9);
+    assert_eq!(info.members, vec![device(1), device(2)]);
+    assert_eq!(http.list_groups(&token()).await.unwrap(), vec![info]);
 }
 
 #[tokio::test]
-async fn add_and_remove_members() {
+async fn submit_commit() {
     let server = MockServer::start().await;
-    let group = group_json("g_1", "group", &[("u_a", "d_a")]);
     Mock::given(method("POST"))
-        .and(path("/v1/groups/g_1/members"))
+        .and(path("/v2/groups/g%2F1/commits"))
         .and(header("authorization", BEARER))
-        .and(body_json(json!({ "device_ids": ["d_b", "d_c"] })))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&group))
-        .expect(1)
+        .and(body_json(json!({
+            "client_id": "c1", "mls_message": "AQID", "welcome": "BAU=",
+            "welcome_recipients": [{ "user_id": uid(2), "device_id": did(2) }],
+        })))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .set_body_json(json!({ "seq": 7, "epoch": 3, "duplicate": false })),
+        )
         .mount(&server)
         .await;
-    for d in ["d_b", "d_c"] {
-        Mock::given(method("DELETE"))
-            .and(path(format!("/v1/groups/g_1/members/{d}")))
-            .and(header("authorization", BEARER))
-            .respond_with(ResponseTemplate::new(200).set_body_json(&group))
-            .expect(1)
-            .mount(&server)
-            .await;
-    }
+    Mock::given(method("POST"))
+        .and(path("/v2/groups/g%2F1/commits"))
+        .and(body_json(
+            json!({ "client_id": "c2", "mls_message": "AQID" }),
+        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "seq": 8, "epoch": 4, "duplicate": true })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v2/groups/g%2F1/commits"))
+        .and(body_json(
+            json!({ "client_id": "c3", "mls_message": "AQID" }),
+        ))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+            "error": { "code": "stale_epoch", "message": "stale" }, "current_epoch": 5,
+        })))
+        .mount(&server)
+        .await;
     let http = transport(&server);
-    let devices = [device("u_b", "d_b"), device("u_c", "d_c")];
-    http.add_group_members(&token(), &gid("g_1"), &devices)
-        .await
-        .unwrap();
-    http.remove_group_members(&token(), &gid("g_1"), &devices)
-        .await
-        .unwrap();
-}
-
-fn outgoing(kind: MessageKind, recipients: Vec<DeviceRef>) -> OutgoingMessage {
-    OutgoingMessage {
-        client_id: ClientId::new("c1").unwrap(),
-        epoch: 2,
-        kind,
-        payload: vec![1, 2, 3],
-        recipients,
-    }
+    let commit = |client_id: &str, welcome: bool| OutgoingCommit {
+        client_id: ClientId::new(client_id).unwrap(),
+        mls_message: vec![1, 2, 3],
+        welcome: welcome.then(|| vec![4, 5]),
+        welcome_recipients: if welcome { vec![device(2)] } else { vec![] },
+    };
+    let g = gid("g/1");
+    assert_eq!(
+        http.submit_commit(&token(), &g, commit("c1", true)).await,
+        Ok(CommitAccepted {
+            seq: 7,
+            epoch: 3,
+            duplicate: false
+        })
+    );
+    assert_eq!(
+        http.submit_commit(&token(), &g, commit("c2", false)).await,
+        Ok(CommitAccepted {
+            seq: 8,
+            epoch: 4,
+            duplicate: true
+        })
+    );
+    assert_eq!(
+        http.submit_commit(&token(), &g, commit("c3", false)).await,
+        Err(PostError::StaleEpoch { current_epoch: 5 })
+    );
 }
 
 #[tokio::test]
 async fn post_message() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/v1/groups/g_1/messages"))
+        .and(path("/v2/groups/g%2F1/messages"))
         .and(header("authorization", BEARER))
-        .and(body_json(json!({
-            "client_id": "c1", "epoch": 2, "kind": "welcome", "payload": "AQID",
-            "recipients": ["d_b"],
-        })))
-        .respond_with(ResponseTemplate::new(201).set_body_json(message_json(7, "welcome")))
+        .and(body_json(
+            json!({ "client_id": "c1", "mls_message": "AQID" }),
+        ))
+        .respond_with(ResponseTemplate::new(201).set_body_json(message_json(8, "application")))
         .mount(&server)
         .await;
-    Mock::given(method("POST"))
-        .and(path("/v1/groups/g_1/messages"))
-        .and(body_json(json!({
-            "client_id": "c1", "epoch": 2, "kind": "application", "payload": "AQID",
-        })))
-        .respond_with(ResponseTemplate::new(200).set_body_json(message_json(8, "application")))
-        .mount(&server)
-        .await;
-    let http = transport(&server);
-    let seq = http
+    let seq = transport(&server)
         .post_message(
             &token(),
-            &gid("g_1"),
-            outgoing(MessageKind::Welcome, vec![device("u_b", "d_b")]),
-        )
-        .await
-        .unwrap();
-    assert_eq!(seq, 7);
-    let seq = http
-        .post_message(
-            &token(),
-            &gid("g_1"),
-            outgoing(MessageKind::Application, vec![]),
+            &gid("g/1"),
+            ClientId::new("c1").unwrap(),
+            vec![1, 2, 3],
         )
         .await
         .unwrap();
@@ -324,19 +422,19 @@ async fn post_message() {
 async fn post_message_conflicts() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/v1/groups/g_1/messages"))
+        .and(path("/v2/groups/g_1/messages"))
         .respond_with(ResponseTemplate::new(409).set_body_json(json!({
             "error": { "code": "stale_epoch", "message": "stale" }, "current_epoch": 3,
         })))
         .mount(&server)
         .await;
     Mock::given(method("POST"))
-        .and(path("/v1/groups/g_2/messages"))
+        .and(path("/v2/groups/g_2/messages"))
         .respond_with(ResponseTemplate::new(409).set_body_json(error_body("conflict")))
         .mount(&server)
         .await;
     Mock::given(method("POST"))
-        .and(path("/v1/groups/g_3/messages"))
+        .and(path("/v2/groups/g_3/messages"))
         .respond_with(ResponseTemplate::new(403).set_body_json(error_body("forbidden")))
         .mount(&server)
         .await;
@@ -344,13 +442,13 @@ async fn post_message_conflicts() {
     let post = |g: &'static str| {
         let http = &http;
         async move {
-            http.post_message(&token(), &gid(g), outgoing(MessageKind::Commit, vec![]))
+            http.post_message(&token(), &gid(g), ClientId::new("c1").unwrap(), vec![1])
                 .await
         }
     };
     assert_eq!(
         post("g_1").await,
-        Err(PostError::EpochConflict { commit_epoch: 2 })
+        Err(PostError::StaleEpoch { current_epoch: 3 })
     );
     assert!(matches!(
         post("g_2").await,
@@ -365,18 +463,27 @@ async fn post_message_conflicts() {
 #[tokio::test]
 async fn fetch_events_long_poll() {
     let server = MockServer::start().await;
+    let membership = json!({
+        "gid": "g/1", "user_id": uid(2), "device_ids": [did(2)],
+        "by_user_id": uid(1), "by_device_id": did(1), "epoch": 3, "seq": 5,
+    });
     let body = json!({
         "events": [
             { "cursor": 11, "created_at": 1, "type": "message", "data": message_json(4, "application") },
-            { "cursor": 12, "created_at": 1, "type": "group.member_added",
-              "data": { "group_id": "g_1", "device_ids": ["d_b"], "by_device_id": "d_a" } },
+            { "cursor": 12, "created_at": 1, "type": "group.member_added", "data": membership },
             { "cursor": 13, "created_at": 1, "type": "keypackages.low", "data": { "available": 1 } },
             { "cursor": 14, "created_at": 1, "type": "future.thing", "data": { "x": 1 } },
+            { "cursor": 15, "created_at": 1, "type": "welcome", "data": welcome_json(5) },
+            { "cursor": 16, "created_at": 1, "type": "device_list.updated",
+              "data": { "user_id": uid(2), "device_list": "AQI=" } },
+            // Not a gim-identity user id: skipped.
+            { "cursor": 17, "created_at": 1, "type": "device_list.updated",
+              "data": { "user_id": "u_b", "device_list": "AQI=" } },
         ],
-        "next_cursor": 14,
+        "next_cursor": 17,
     });
     Mock::given(method("GET"))
-        .and(path("/v1/events"))
+        .and(path("/v2/events"))
         .and(header("authorization", BEARER))
         .and(query_param("cursor", "10"))
         .and(query_param("wait", "25"))
@@ -387,25 +494,41 @@ async fn fetch_events_long_poll() {
         .fetch_events(&token(), Some(10), Duration::from_secs(25))
         .await
         .unwrap();
-    assert_eq!(batch.next_cursor, 14);
-    assert_eq!(batch.events.len(), 3);
-    let IncomingEvent::Message(message) = &batch.events[0] else {
+    assert_eq!(batch.next_cursor, 17);
+    assert_eq!(batch.events.len(), 5);
+    let HubEvent::Group(IncomingEvent::Message(message)) = &batch.events[0] else {
         panic!("expected a message: {:?}", batch.events[0]);
     };
+    assert_eq!(message.group_id, gid("g/1"));
     assert_eq!(message.seq, 4);
-    assert_eq!(message.sender, device("u_b", "d_b"));
+    assert_eq!(message.sender, device(2));
     assert_eq!(message.kind, MessageKind::Application);
     assert_eq!(message.payload, vec![1, 2, 3]);
     assert_eq!(message.client_id, Some(ClientId::new("c1").unwrap()));
-    // The sender of event 11 resolved the device of event 12.
     assert_eq!(
         batch.events[1],
-        IncomingEvent::MemberAdded {
-            group_id: gid("g_1"),
-            device: device("u_b", "d_b")
+        HubEvent::Group(IncomingEvent::MemberAdded {
+            group_id: gid("g/1"),
+            device: device(2)
+        })
+    );
+    assert_eq!(
+        batch.events[2],
+        HubEvent::Group(IncomingEvent::KeyPackagesLow)
+    );
+    let HubEvent::Group(IncomingEvent::Message(welcome)) = &batch.events[3] else {
+        panic!("expected a welcome: {:?}", batch.events[3]);
+    };
+    assert_eq!(welcome.kind, MessageKind::Welcome);
+    assert_eq!(welcome.seq, 5);
+    assert_eq!(welcome.payload, vec![4, 5]);
+    assert_eq!(
+        batch.events[4],
+        HubEvent::DeviceListUpdated {
+            user_id: user(2),
+            device_list: vec![1, 2]
         }
     );
-    assert_eq!(batch.events[2], IncomingEvent::KeyPackagesLow);
 }
 
 #[tokio::test]
@@ -414,7 +537,7 @@ async fn fetch_events_without_cursor_clamps_wait() {
     mount(
         &server,
         "GET",
-        "/v1/events",
+        "/v2/events",
         ResponseTemplate::new(200).set_body_json(json!({ "events": [], "next_cursor": 0 })),
     )
     .await;
@@ -428,61 +551,12 @@ async fn fetch_events_without_cursor_clamps_wait() {
 }
 
 #[tokio::test]
-async fn fetch_events_resolves_removed_devices() {
-    let server = MockServer::start().await;
-    let body = json!({
-        "events": [
-            { "cursor": 2, "created_at": 1, "type": "group.member_removed",
-              "data": { "group_id": "g_1", "device_ids": ["d_c", "d_a", "d_x"], "by_device_id": "d_b" } },
-        ],
-        "next_cursor": 2,
-    });
-    mount(
-        &server,
-        "GET",
-        "/v1/events",
-        ResponseTemplate::new(200).set_body_json(body),
-    )
-    .await;
-    // d_c is still listed; d_a (this device) only shows up in /v1/me.
-    mount(
-        &server,
-        "GET",
-        "/v1/groups/g_1",
-        ResponseTemplate::new(200).set_body_json(group_json("g_1", "group", &[("u_c", "d_c")])),
-    )
-    .await;
-    mount(
-        &server,
-        "GET",
-        "/v1/me",
-        ResponseTemplate::new(200).set_body_json(json!({
-            "user_id": "u_a", "device_id": "d_a", "handle": "alice", "display_name": "Alice",
-        })),
-    )
-    .await;
-    let batch = transport(&server)
-        .fetch_events(&token(), Some(1), Duration::ZERO)
-        .await
-        .unwrap();
-    let removed = |u, d| IncomingEvent::MemberRemoved {
-        group_id: gid("g_1"),
-        device: device(u, d),
-    };
-    // d_x cannot be resolved and is skipped.
-    assert_eq!(
-        batch.events,
-        vec![removed("u_c", "d_c"), removed("u_a", "d_a")]
-    );
-}
-
-#[tokio::test]
 async fn fetch_events_cursor_expired() {
     let server = MockServer::start().await;
     mount(
         &server,
         "GET",
-        "/v1/events",
+        "/v2/events",
         ResponseTemplate::new(410).set_body_json(json!({
             "error": { "code": "cursor_expired", "message": "pruned" }, "cursor": 99,
         })),
@@ -497,12 +571,41 @@ async fn fetch_events_cursor_expired() {
 }
 
 #[tokio::test]
-async fn group_messages() {
+async fn pending_welcomes_and_ack() {
+    let server = MockServer::start().await;
+    let mut pending = welcome_json(5);
+    pending["created_at"] = json!(1);
+    Mock::given(method("GET"))
+        .and(path("/v2/welcomes/pending"))
+        .and(header("authorization", BEARER))
+        .and(query_param("limit", "50"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "welcomes": [pending] })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v2/welcomes/g%2F1/ack"))
+        .and(header("authorization", BEARER))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let http = transport(&server);
+    let welcomes = http.pending_welcomes(&token(), 50).await.unwrap();
+    assert_eq!(welcomes.len(), 1);
+    assert_eq!(welcomes[0].group_id, gid("g/1"));
+    assert_eq!(welcomes[0].kind, MessageKind::Welcome);
+    assert_eq!(welcomes[0].sender, device(2));
+    assert_eq!(welcomes[0].seq, 5);
+    http.ack_welcome(&token(), &gid("g/1")).await.unwrap();
+}
+
+#[tokio::test]
+async fn group_messages_from_seq_inclusive() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/v1/groups/g_1/messages"))
+        .and(path("/v2/groups/g%2F1/messages"))
         .and(header("authorization", BEARER))
-        .and(query_param("after_seq", "3"))
+        .and(query_param("from_seq", "4"))
         .and(query_param("limit", "50"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "messages": [message_json(4, "commit"), message_json(5, "application")],
@@ -511,7 +614,7 @@ async fn group_messages() {
         .mount(&server)
         .await;
     let messages = transport(&server)
-        .group_messages(&token(), &gid("g_1"), 3, 50)
+        .group_messages(&token(), &gid("g/1"), 4, 50)
         .await
         .unwrap();
     assert_eq!(
@@ -526,7 +629,7 @@ async fn upload_blob_streams_file() {
     let server = MockServer::start().await;
     let data: Vec<u8> = (0..200_000u32).map(|i| i as u8).collect();
     Mock::given(method("POST"))
-        .and(path("/v1/blobs"))
+        .and(path("/v2/blobs"))
         .and(header("authorization", BEARER))
         .and(header("content-type", "application/octet-stream"))
         .and(header("content-length", "200000"))
@@ -550,7 +653,7 @@ async fn upload_blob_streams_file() {
 async fn download_blob_with_range() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/v1/blobs/b_1"))
+        .and(path("/v2/blobs/b_1"))
         .and(header("authorization", BEARER))
         .and(header("range", "bytes=2-4"))
         .respond_with(ResponseTemplate::new(206).set_body_bytes(vec![2u8, 3, 4]))
@@ -559,7 +662,7 @@ async fn download_blob_with_range() {
     mount(
         &server,
         "GET",
-        "/v1/blobs/b_1",
+        "/v2/blobs/b_1",
         ResponseTemplate::new(200).set_body_bytes(vec![0u8, 1, 2, 3, 4, 5]),
     )
     .await;
@@ -582,7 +685,7 @@ async fn download_blob_range_ignored_by_server() {
     mount(
         &server,
         "GET",
-        "/v1/blobs/b_1",
+        "/v2/blobs/b_1",
         ResponseTemplate::new(200).set_body_bytes(vec![0u8, 1, 2, 3, 4, 5]),
     )
     .await;
@@ -611,7 +714,7 @@ async fn status_mapping() {
     ];
     for (status, code) in cases {
         Mock::given(method("GET"))
-            .and(path(format!("/v1/groups/g_{status}")))
+            .and(path(format!("/v2/groups/g_{status}")))
             .respond_with(ResponseTemplate::new(status).set_body_json(error_body(code)))
             .mount(&server)
             .await;
@@ -652,7 +755,7 @@ async fn invalid_json_is_a_server_error() {
     mount(
         &server,
         "GET",
-        "/v1/groups/g_1",
+        "/v2/groups/g_1",
         ResponseTemplate::new(200).set_body_string("not json"),
     )
     .await;
@@ -668,7 +771,7 @@ async fn timeouts_and_connect_failures_are_network_errors() {
     mount(
         &server,
         "GET",
-        "/v1/groups/g_1",
+        "/v2/groups/g_1",
         ResponseTemplate::new(200)
             .set_body_json(group_json("g_1", "group", &[]))
             .set_delay(Duration::from_secs(2)),
@@ -703,7 +806,7 @@ async fn base_url_path_prefix_is_kept() {
     mount(
         &server,
         "GET",
-        "/api/v1/groups/g_1",
+        "/api/v2/groups/g_1",
         ResponseTemplate::new(200).set_body_json(group_json("g_1", "group", &[])),
     )
     .await;

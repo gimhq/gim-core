@@ -55,12 +55,15 @@ pub fn message_epoch(message: &[u8]) -> Result<u64, CryptoError> {
 
 /// Parses an MLSMessage carrying a Commit or Proposal as PublicMessage.
 pub fn inspect_handshake(message: &[u8]) -> Result<HandshakeInfo, CryptoError> {
-    let malformed = |e: &dyn std::fmt::Display| CryptoError::invalid(format!("malformed handshake: {e}"));
+    let malformed =
+        |e: &dyn std::fmt::Display| CryptoError::invalid(format!("malformed handshake: {e}"));
     let mut bytes = message;
     let version = read_u16(&mut bytes)?;
     let wire_format = read_u16(&mut bytes)?;
     if version != MLS10 || wire_format != PUBLIC_MESSAGE {
-        return Err(CryptoError::invalid("message is not an MLS 1.0 PublicMessage"));
+        return Err(CryptoError::invalid(
+            "message is not an MLS 1.0 PublicMessage",
+        ));
     }
     let group_id = MlsGroupId::tls_deserialize(&mut bytes).map_err(|e| malformed(&e))?;
     let epoch = GroupEpoch::tls_deserialize(&mut bytes).map_err(|e| malformed(&e))?;

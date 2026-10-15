@@ -8,9 +8,9 @@ use gim_crypto::{decrypt_to_envelope, CryptoError, DecryptedMessage, MlsEngine, 
 use gim_proto::envelope::{Content, Envelope, ReceiptKind};
 
 use crate::model::{
-    to_message_id, Chat, ChatKind, ChatMember, DepartedMember, GroupMessage,
-    IncomingEvent, Membership, MembershipChangeKind, MembershipEvent, Message, MessageContent,
-    MessageKind, PendingCommit, SendState, StateChange,
+    to_message_id, Chat, ChatKind, ChatMember, DepartedMember, GroupMessage, IncomingEvent,
+    Membership, MembershipChangeKind, MembershipEvent, Message, MessageContent, MessageKind,
+    PendingCommit, SendState, StateChange,
 };
 use crate::{Result, StateReader, StateStore, StoreTxn};
 

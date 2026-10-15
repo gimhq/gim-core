@@ -1,4 +1,4 @@
-//! Sync against an in-process mock gim-server: per-group seq gap backfill,
+//! Sync against an in-process mock hub: per-group seq gap backfill,
 //! holes the server confirms as empty, and expired-cursor (410 / close
 //! 4410) recovery, including events lost with the pruned window
 //! (`KeyPackagesLow`, Welcomes).
@@ -120,7 +120,7 @@ async fn seq_gap_is_backfilled_before_later_events() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn hole_of_a_welcome_to_another_device_is_confirmed_once() {
+async fn welcome_to_another_device_leaves_no_seq_hole() {
     let s = setup().await;
     let carol = Peer::fake(&s.transport, "carol").await;
     s.alice
@@ -128,22 +128,13 @@ async fn hole_of_a_welcome_to_another_device_is_confirmed_once() {
         .add_members(&s.group_id, &[carol.user_id()])
         .await
         .unwrap();
-    // The Welcome to Carol takes a seq Bob never gets.
+    // The Welcome to Carol shares the seq of its Commit.
     s.alice.send_text(&s.group_id, "m1").await;
     s.bob.client.sync_once().await.unwrap();
     assert_eq!(s.bob.texts(&s.group_id), ["m1"]);
-    assert_eq!(s.history_requests().len(), 1);
+    assert!(s.history_requests().is_empty());
     let cursor = s.bob.store.group_cursor(&s.group_id).unwrap();
     assert!(cursor.ahead.is_empty(), "{cursor:?}");
-
-    s.alice.send_text(&s.group_id, "m2").await;
-    s.bob.client.sync_once().await.unwrap();
-    assert_eq!(s.bob.texts(&s.group_id), ["m1", "m2"]);
-    assert_eq!(
-        s.history_requests().len(),
-        1,
-        "the hole is not looked up again"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -214,7 +205,7 @@ async fn expired_cursor_tops_up_key_packages_whose_low_event_was_pruned() {
     let bob = s.bob.device();
     let claims = service.key_package_count(&bob) - 5;
     for _ in 0..claims {
-        service.claim_key_package(&bob).unwrap();
+        service.claim_key_packages(std::slice::from_ref(&bob.user_id));
     }
     assert_eq!(service.key_package_count(&bob), 5);
 
@@ -242,10 +233,14 @@ async fn expired_cursor_joins_group_whose_welcome_was_pruned() {
     s.alice.send_text(&group_id, "w1").await;
     s.alice.send_text(&s.group_id, "m1").await;
 
+    // Joined from the pending Welcomes, which are acknowledged.
+    let service = s.transport.service();
+    assert_eq!(service.pending_welcomes(&s.bob.device(), 10).len(), 1);
     s.expire_bob_cursor();
     s.bob.client.sync_once().await.unwrap();
     let chat = s.bob.store.chat(&group_id).unwrap().unwrap();
     assert_eq!(chat.membership, Membership::Joined);
+    assert!(service.pending_welcomes(&s.bob.device(), 10).is_empty());
     assert_eq!(s.bob.texts(&group_id), ["w1"]);
     assert_eq!(s.bob.texts(&s.group_id), ["m1"]);
 
@@ -261,17 +256,11 @@ async fn expired_cursor_joins_group_whose_welcome_was_pruned() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn expired_cursor_surfaces_group_without_a_usable_welcome() {
     let s = setup().await;
-    let carol = Peer::fake(&s.transport, "carol").await;
+    // On the hub roster with Bob, but no Welcome to Bob exists.
     let group_id = s
-        .alice
-        .client
-        .create_group_chat(None, &[carol.user_id()])
-        .await
-        .unwrap();
-    // On Bob's fan-out list, but no Welcome to Bob exists.
-    s.transport
+        .transport
         .service()
-        .add_member(&group_id, &s.bob.device())
+        .create_group_with(gim_test::GroupKind::Group, &s.bob.device())
         .unwrap();
 
     let mut changes = s.bob.client.subscribe_changes();

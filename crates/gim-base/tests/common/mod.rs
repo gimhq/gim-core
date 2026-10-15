@@ -70,7 +70,9 @@ impl Device {
         let me = id.device.clone();
         let engine = MlsEngine::new();
         let store = MemoryStore::new();
-        engine.create_identity_v2(&store, &id.device_key, id.root.public(), id.cert.clone()).unwrap();
+        engine
+            .create_identity_v2(&store, &id.device_key, id.root.public(), id.cert.clone())
+            .unwrap();
         Self {
             client: BaseClient::new(me.clone()),
             me,

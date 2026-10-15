@@ -88,7 +88,12 @@ impl Device {
         store
             .transaction(|txn| {
                 if txn.load_identity()?.is_none() {
-                    engine.create_identity_v2(&*txn, &id.device_key, id.root.public(), id.cert.clone())?;
+                    engine.create_identity_v2(
+                        &*txn,
+                        &id.device_key,
+                        id.root.public(),
+                        id.cert.clone(),
+                    )?;
                 }
                 Ok(())
             })

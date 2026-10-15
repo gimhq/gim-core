@@ -18,8 +18,12 @@ fn dev(user: &str) -> Dev {
 }
 
 fn create_identity(dev: &Dev, id: &TestIdentity) -> Result<()> {
-    dev.engine
-        .create_identity_v2(&dev.store, &id.device_key, id.root.public(), id.cert.clone())
+    dev.engine.create_identity_v2(
+        &dev.store,
+        &id.device_key,
+        id.root.public(),
+        id.cert.clone(),
+    )
 }
 
 fn gid(id: &str) -> GroupId {

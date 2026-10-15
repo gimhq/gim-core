@@ -1,7 +1,7 @@
 //! Async `Client` (tokio): HTTP (reqwest, rustls), WebSocket + long-poll, sync
 //! loop, outbox sender, media upload/download.
 //!
-//! The client talks to gim-server through the [`Transport`] trait; the
+//! The client talks to gim-hub (API v2) through the [`Transport`] trait; the
 //! store is generic ([`gim_base::StateStore`]), so gim-ffi picks the SQLite
 //! store and tests the in-memory one.
 //!
@@ -11,10 +11,12 @@
 
 #![forbid(unsafe_code)]
 
+mod auth;
 mod client;
 mod error;
 mod history;
 pub mod http;
+mod identity;
 mod media;
 mod outbox;
 mod secrets;
@@ -26,10 +28,11 @@ pub mod testing;
 pub mod transport;
 
 pub use client::{
-    Client, ClientBuilder, Session, COMMIT_POST_ATTEMPTS, KEY_PACKAGE_BATCH, MAX_COMMIT_RETRIES,
-    SESSION_SECRET_KEY,
+    Client, ClientBuilder, Session, COMMIT_POST_ATTEMPTS, DEVICE_KEY_SECRET_KEY, KEY_PACKAGE_BATCH,
+    MAX_COMMIT_RETRIES, ROOT_KEY_SECRET_KEY, SESSION_SECRET_KEY,
 };
 pub use error::{ClientError, Result};
+pub use gim_identity::recovery::RecoveryCode;
 pub use history::Backfill;
 pub use http::{HttpConfig, HttpTransport};
 pub use media::{DOWNLOAD_PIECE, OUTGOING_DIR};

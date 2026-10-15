@@ -15,10 +15,12 @@ struct Device {
 
 fn device(user: &str) -> Device {
     let id = gim_test::TestIdentity::new(user);
-        let me = id.device.clone();
+    let me = id.device.clone();
     let engine = MlsEngine::new();
     let store = MemoryCryptoStore::new();
-    engine.create_identity_v2(&store, &id.device_key, id.root.public(), id.cert.clone()).unwrap();
+    engine
+        .create_identity_v2(&store, &id.device_key, id.root.public(), id.cert.clone())
+        .unwrap();
     Device { me, engine, store }
 }
 

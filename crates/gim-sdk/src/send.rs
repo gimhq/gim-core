@@ -11,7 +11,6 @@ use gim_crypto::encrypt_envelope;
 use gim_proto::envelope::{Content, Envelope};
 
 use crate::client::new_client_id;
-use crate::transport::OutgoingMessage;
 use crate::{Client, ClientError, Result};
 
 /// Minimum interval between two "typing" notifications of a chat while the
@@ -76,7 +75,7 @@ impl<S: StateStore + 'static> Client<S> {
         name: Option<String>,
         avatar: Option<(PathBuf, String)>,
     ) -> Result<MessageId> {
-        let session = self.require_session()?;
+        self.require_session()?;
         if name.is_none() && avatar.is_none() {
             return Err(ClientError::InvalidInput("nothing to change".into()));
         }
@@ -104,10 +103,7 @@ impl<S: StateStore + 'static> Client<S> {
                     mime,
                     caption: None,
                 };
-                Some(
-                    self.upload_media(&session, &new_message_id()?, pending)
-                        .await?,
-                )
+                Some(self.upload_media(&new_message_id()?, pending).await?)
             }
             None => None,
         };
@@ -246,28 +242,25 @@ impl<S: StateStore + 'static> Client<S> {
         self.settle_commit(session, group_id).await?;
         let envelope = Envelope::new(new_message_id()?, now_ms(), Content::Typing { active });
         let gid = group_id.clone();
-        let (epoch, payload) = self
+        let payload = self
             .run(move |store, engine| {
                 if store.chat(&gid)?.is_none() {
                     return Err(BaseError::NotFound(format!("chat {gid}")));
                 }
-                store.transaction(|txn| {
-                    let epoch = engine.group_epoch(&*txn, &gid)?;
-                    Ok((epoch, encrypt_envelope(engine, &*txn, &gid, &envelope)?))
-                })
+                store.transaction(|txn| Ok(encrypt_envelope(engine, &*txn, &gid, &envelope)?))
             })
             .await?;
-        let message = OutgoingMessage {
-            client_id: new_client_id()?,
-            epoch,
-            kind: gim_base::model::MessageKind::Application,
-            payload,
-            recipients: vec![],
-        };
+        let client_id = new_client_id()?;
         let seq = self
-            .inner
-            .transport
-            .post_message(&session.token, group_id, message)
+            .authed(|t| {
+                let (client_id, payload) = (client_id.clone(), payload.clone());
+                async move {
+                    self.inner
+                        .transport
+                        .post_message(&t, group_id, client_id, payload)
+                        .await
+                }
+            })
             .await?;
         self.mark_applied(group_id, seq).await
     }

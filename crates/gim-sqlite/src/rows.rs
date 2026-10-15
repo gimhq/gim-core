@@ -5,8 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use gim_base::model::{
-    ChatKind, ChatMember, Membership, MessageContent, MessageKind, OutboxKind,
-    PendingCommit, PendingMedia, PendingWelcome, PreparedPayload, SendState,
+    ChatKind, ChatMember, Membership, MessageContent, MessageKind, OutboxKind, PendingCommit,
+    PendingMedia, PendingWelcome, PreparedPayload, SendState,
 };
 use gim_base::StoreError;
 use gim_common::{ClientId, DeviceRef, GroupId, MessageId, UserId};

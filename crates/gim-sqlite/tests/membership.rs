@@ -91,7 +91,12 @@ fn commits_and_welcomes_record_membership_changes() {
     let welcome_bob = event(add_bob, "bob", "alice", Kind::Added);
     assert_eq!(
         events(&bob, &g),
-        [welcome_bob, added_carol.clone(), added_dave, removed_bob.clone()]
+        [
+            welcome_bob,
+            added_carol.clone(),
+            added_dave,
+            removed_bob.clone()
+        ]
     );
     let welcome_carol = event(add_carol, "carol", "alice", Kind::Added);
     assert_eq!(events(&carol, &g), [welcome_carol, removed_bob, left_dave]);
