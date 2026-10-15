@@ -1,27 +1,28 @@
 #!/usr/bin/env bash
 # Runs the gim CLI-to-CLI interop test (apps/gim-cli/tests/interop.rs)
-# against a disposable gim-server container.
+# against a disposable gim-hub container.
 #
-# Starts the server with scripts/gim-server-dev.sh (stopped on exit) and runs
-# the test in a rust:1 container on the same network.
+# Starts the hub with scripts/gim-hub-dev.sh (stopped on exit) and runs the
+# test in a rust:1 container on the same network.
 #
-# Env: GIM_SERVER_SRC, GIM_SERVER_BUILD (see scripts/gim-server-dev.sh).
+# Env: GIM_HUB_SRC, GIM_HUB_REV, GIM_HUB_BUILD (see scripts/gim-hub-dev.sh).
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-server=ai-agent-gim-server-cli-$(git -C "$repo" rev-parse --short HEAD)
+hub=ai-agent-gim-hub-cli-$(git -C "$repo" rev-parse --short HEAD)
 cargo_cache=/srv/.tmp/cache/cargo
 
 cleanup() {
-    "$repo/scripts/gim-server-dev.sh" stop "$server"
+    "$repo/scripts/gim-hub-dev.sh" stop "$hub"
 }
 trap cleanup EXIT
 
-"$repo/scripts/gim-server-dev.sh" start "$server" >/dev/null
+"$repo/scripts/gim-hub-dev.sh" start "$hub" >/dev/null
+echo "gim-hub commit under test: $("$repo/scripts/gim-hub-dev.sh" commit "$hub")"
 
 mkdir -p "$cargo_cache"
 docker run --rm --label ai-agent=true --network traefik \
     -v "$repo:$repo" -w "$repo" \
     -v "$cargo_cache:/cache/cargo" -e CARGO_HOME=/cache/cargo \
-    -e GIM_SERVER_URL="http://$server:8080" \
+    -e GIM_HUB_URL="http://$hub:8080" \
     rust:1 cargo test -p gim-cli --test interop -- --nocapture

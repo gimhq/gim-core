@@ -1,7 +1,7 @@
 //! `HttpTransport` against an in-process mock hub (API v2): request shapes,
 //! response mapping and error mapping.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gim_base::model::{ChatKind, IncomingEvent, MessageKind};
 use gim_common::{ClientId, DeviceRef, GroupId, UserId};
@@ -238,11 +238,11 @@ async fn users_and_handles() {
     )
     .await;
     let http = transport(&server);
-    let record = http.user(&token(), &user(2)).await.unwrap().unwrap();
+    let record = http.user(Some(&token()), &user(2)).await.unwrap().unwrap();
     assert_eq!(record.user_id, user(2));
     assert_eq!(record.device_list, vec![1, 2]);
     assert_eq!(record.handle.as_deref(), Some("bob"));
-    assert_eq!(http.user(&token(), &user(3)).await, Ok(None));
+    assert_eq!(http.user(Some(&token()), &user(3)).await, Ok(None));
     assert_eq!(http.find_handle(&token(), "bob").await, Ok(Some(user(2))));
     assert_eq!(http.find_handle(&token(), "nobody").await, Ok(None));
     http.claim_handle(&token(), "al ice").await.unwrap();
@@ -294,6 +294,7 @@ async fn claim_key_packages_by_user() {
                 "user_id": uid(2), "device_id": did(2), "key_package": "BAU=", "last_resort": false,
             }],
             "missing": [{ "user_id": uid(3) }],
+            "unavailable": [],
         })))
         .mount(&server)
         .await;
@@ -654,6 +655,68 @@ async fn group_messages_from_seq_inclusive() {
 }
 
 #[tokio::test]
+async fn group_messages_skip_proposal_and_unknown_kinds() {
+    let server = MockServer::start().await;
+    let page = |from: &str, messages: Vec<Value>| {
+        Mock::given(method("GET"))
+            .and(path("/v2/groups/g%2F1/messages"))
+            .and(query_param("from_seq", from))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "messages": messages,
+                "has_more": false,
+            })))
+    };
+    // A page of skipped kinds only is followed by the next one.
+    page(
+        "4",
+        vec![message_json(4, "proposal"), message_json(5, "foo")],
+    )
+    .mount(&server)
+    .await;
+    page(
+        "6",
+        vec![message_json(6, "application"), message_json(7, "proposal")],
+    )
+    .mount(&server)
+    .await;
+    page("8", vec![]).mount(&server).await;
+    let http = transport(&server);
+    let messages = http
+        .group_messages(&token(), &gid("g/1"), 4, 2)
+        .await
+        .unwrap();
+    assert_eq!(messages.iter().map(|m| m.seq).collect::<Vec<_>>(), vec![6]);
+    let messages = http
+        .group_messages(&token(), &gid("g/1"), 8, 2)
+        .await
+        .unwrap();
+    assert!(messages.is_empty());
+
+    // Message events of those kinds are dropped.
+    Mock::given(method("GET"))
+        .and(path("/v2/events"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "events": [
+                {"cursor": 1, "created_at": 0, "type": "message", "data": message_json(4, "proposal")},
+                {"cursor": 2, "created_at": 0, "type": "message", "data": message_json(5, "foo")},
+                {"cursor": 3, "created_at": 0, "type": "message", "data": message_json(6, "application")},
+            ],
+            "next_cursor": 3,
+        })))
+        .mount(&server)
+        .await;
+    let batch = http
+        .fetch_events(&token(), Some(0), Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(batch.next_cursor, 3);
+    assert!(matches!(
+        batch.events.as_slice(),
+        [HubEvent::Group(IncomingEvent::Message(m))] if m.seq == 6
+    ));
+}
+
+#[tokio::test]
 async fn upload_blob_streams_file() {
     let server = MockServer::start().await;
     let data: Vec<u8> = (0..200_000u32).map(|i| i as u8).collect();
@@ -972,8 +1035,110 @@ async fn get_device_list() {
     .await;
     let http = transport(&server);
     assert_eq!(
-        http.device_list(&token(), &user(2)).await,
+        http.device_list(Some(&token()), &user(2)).await,
         Ok(Some(vec![1, 2]))
     );
-    assert_eq!(http.device_list(&token(), &user(3)).await, Ok(None));
+    assert_eq!(http.device_list(Some(&token()), &user(3)).await, Ok(None));
+}
+
+#[tokio::test]
+async fn public_reads_send_no_token_when_signed_out() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/users/{}/device-list", uid(2))))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "user_id": uid(2), "device_list": "AQI=" })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/users/{}", uid(2))))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "user_id": uid(2), "device_list": "AQI=" })),
+        )
+        .mount(&server)
+        .await;
+    let http = transport(&server);
+    assert_eq!(http.device_list(None, &user(2)).await, Ok(Some(vec![1, 2])));
+    let record = http.user(None, &user(2)).await.unwrap().unwrap();
+    assert_eq!(record.device_list, vec![1, 2]);
+    assert_eq!(record.handle, None);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests
+        .iter()
+        .all(|r| r.headers.get("authorization").is_none()));
+}
+
+/// A 429/503 reply of a public read with `Retry-After: retry_after`.
+fn throttled(status: u16, code: &str, retry_after: &str) -> ResponseTemplate {
+    ResponseTemplate::new(status)
+        .insert_header("retry-after", retry_after)
+        .set_body_json(error_body(code))
+}
+
+#[tokio::test]
+async fn public_read_waits_for_retry_after() {
+    let server = MockServer::start().await;
+    let route = format!("/v2/users/{}/device-list", uid(2));
+    Mock::given(method("GET"))
+        .and(path(route.as_str()))
+        .respond_with(throttled(429, "rate_limited", "1"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(route.as_str()))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "user_id": uid(2), "device_list": "AQI=" })),
+        )
+        .mount(&server)
+        .await;
+    let http = transport(&server);
+    let started = Instant::now();
+    assert_eq!(http.device_list(None, &user(2)).await, Ok(Some(vec![1, 2])));
+    assert!(started.elapsed() >= Duration::from_secs(1));
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn public_read_gives_up_after_the_retry_budget() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/users/{}/device-list", uid(2))))
+        .respond_with(throttled(429, "rate_limited", "1"))
+        .mount(&server)
+        .await;
+    // A delay beyond the total budget is not waited for.
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/users/{}", uid(3))))
+        .respond_with(throttled(503, "peer_unavailable", "61"))
+        .mount(&server)
+        .await;
+    let http = transport(&server);
+    let started = Instant::now();
+    assert_eq!(
+        http.device_list(None, &user(2)).await,
+        Err(TransportError::RetryLater {
+            status: 429,
+            retry_after_secs: 1,
+            reason: "rate_limited: nope".into(),
+        })
+    );
+    assert!(started.elapsed() >= Duration::from_secs(2));
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
+
+    assert_eq!(
+        http.user(None, &user(3)).await,
+        Err(TransportError::RetryLater {
+            status: 503,
+            retry_after_secs: 61,
+            reason: "peer_unavailable: nope".into(),
+        })
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 4);
 }

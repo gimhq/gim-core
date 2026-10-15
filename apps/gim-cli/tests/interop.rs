@@ -1,6 +1,6 @@
 //! CLI-to-CLI interop: three `gim` profiles (alice, bob, carol) talk to each
 //! other through the real binary against the hub named by
-//! `GIM_SERVER_URL` (see `testing/gim-cli-interop.sh`). Without it the test
+//! `GIM_HUB_URL` (see `testing/gim-cli-interop.sh`). Without it the test
 //! prints a notice and passes, so the default `cargo test` stays offline.
 //!
 //! Black box: only the CLI's `--json` output and exit codes are checked.
@@ -30,10 +30,10 @@ const PNG: &[u8] = &[
 ];
 
 fn server_url(test: &str) -> Option<String> {
-    match std::env::var("GIM_SERVER_URL") {
+    match std::env::var("GIM_HUB_URL") {
         Ok(url) if !url.is_empty() => Some(url),
         _ => {
-            eprintln!("skipping {test}: GIM_SERVER_URL is not set");
+            eprintln!("skipping {test}: GIM_HUB_URL is not set");
             None
         }
     }

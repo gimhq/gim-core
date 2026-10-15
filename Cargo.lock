@@ -1272,9 +1272,14 @@ dependencies = [
 name = "gim-integration-testing"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "gim-base",
+ "gim-common",
  "gim-ffi",
+ "gim-sdk",
  "tempfile",
  "tokio",
+ "url",
 ]
 
 [[package]]

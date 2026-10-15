@@ -2,15 +2,16 @@
 //
 // Carried over the libp2p request-response protocol `/gim/s2s/1.0.0`: every
 // stream holds exactly one S2sRequest and one S2sResponse. The calling hub is
-// authenticated by its libp2p PeerID (Noise handshake); see docs/s2s.md for
-// the per-operation authorization rules, idempotency and ordering.
+// authenticated by its libp2p PeerID (Noise handshake), which a Hello binds to
+// its hub_id; see docs/s2s.md for the per-operation authorization rules,
+// idempotency and ordering.
 //
 // Identity objects (DeviceList, UserHostingRecord, ...) are owned by gim-core
 // and are carried here only as opaque CBOR `[tbs, sig]` encodings.
 //
 // user_id and device_id are opaque strings whose format is owned by gim-core.
-// gid has the form "<owner_peer_id>/<random_128 base32>"; the owning hub is
-// the hub whose PeerID prefixes the gid.
+// gid has the form "<owner hub_id>/<random_128 base32>"; the owning hub is
+// the hub whose hub_id prefixes the gid.
 
 syntax = "proto3";
 
@@ -37,6 +38,9 @@ message S2sRequest {
     // 18-29: reserved for multi-homing (M2c) operations, e.g. hub
     //        add/remove and migration hand-off.
     // 30-39: reserved for push (P) operations, e.g. collapse-id coordination.
+    // 40-49: federation (M2b).
+    HelloRequest hello = 40;
+    NotifyDeviceListRequest notify_device_list = 41;
   }
 
   reserved 18 to 39;
@@ -58,6 +62,8 @@ message S2sResponse {
     GetDeviceListResponse get_device_list = 16;
     GetHostingRecordResponse get_hosting_record = 17;
     // 18-39: reserved, mirroring S2sRequest.op.
+    HelloResponse hello = 40;
+    NotifyDeviceListResponse notify_device_list = 41;
   }
 
   reserved 18 to 39;
@@ -87,12 +93,44 @@ enum ErrorCode {
   ERROR_CODE_INVALID = 7;
   // Unexpected failure on the responding hub; retry with backoff.
   ERROR_CODE_INTERNAL = 8;
+  // The calling PeerID is not bound to a hub_id yet (no valid Hello on this
+  // PeerID, or its runtime certificate expired). Send Hello, then retry once.
+  ERROR_CODE_HELLO_REQUIRED = 9;
 }
 
 message Error {
   ErrorCode code = 1;
   // Human-readable diagnostic; not for programmatic use.
   string message = 2;
+  // STALE_EPOCH / CONFLICT: the group's current epoch at the owning hub.
+  optional uint64 current_epoch = 3;
+  // Client API error code the member hub should surface, when the owning hub
+  // rejected on behalf of group policy or validation, e.g. "not_member",
+  // "forbidden", "validation_failed". Empty otherwise.
+  string client_code = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Peer binding
+// ---------------------------------------------------------------------------
+
+// First op on a connection: binds the caller's PeerID to its hub_id.
+message HelloRequest {
+  // gim-core SignedHubRuntimeCert (CBOR [tbs, sig]) for the caller's PeerID.
+  bytes runtime_cert = 1;
+  // Advertised listen addresses, binary multiaddrs.
+  repeated bytes listen_addrs = 2;
+}
+
+message HelloResponse {
+  bytes runtime_cert = 1;
+  repeated bytes listen_addrs = 2;
+}
+
+// DHT value under /gim/hub/<hub_id>.
+message HubLocator {
+  bytes runtime_cert = 1;
+  repeated bytes multiaddrs = 2;
 }
 
 // ---------------------------------------------------------------------------
@@ -122,10 +160,13 @@ message SubmitCommitRequest {
 
 message SubmitCommitResponse {
   uint64 seq = 1;
+  // Epoch after the Commit (the group's new epoch), as in the client API.
   uint64 epoch = 2;
   // True when the same Commit (by hash) was already sequenced; seq/epoch are
   // the originally assigned values.
   bool duplicate = 3;
+  // The sequenced Commit as it will appear in Deliver / FetchLog.
+  SequencedMessage message = 4;
 }
 
 // Submit an MLS application message for sequencing.
@@ -148,6 +189,7 @@ message SubmitMessageResponse {
   // True when (sender_device_id, client_id) was already sequenced; seq/epoch
   // are the originally assigned values.
   bool duplicate = 3;
+  SequencedMessage message = 4;
 }
 
 // ---------------------------------------------------------------------------
@@ -159,7 +201,8 @@ enum MessageKind {
   MESSAGE_KIND_COMMIT = 1;
   MESSAGE_KIND_APPLICATION = 2;
   MESSAGE_KIND_PROPOSAL = 3;
-  // Hub-generated membership notices; payload may be empty.
+  // Deprecated, never sent: membership changes are carried by the COMMIT
+  // entry (SequencedMessage.added_members / removed_members).
   MESSAGE_KIND_MEMBER_ADDED = 4;
   MESSAGE_KIND_MEMBER_REMOVED = 5;
 }
@@ -179,11 +222,21 @@ message SequencedMessage {
   string message_id = 9;
   // Sequencing time, unix milliseconds.
   uint64 created_at = 10;
-  // Users added or removed (MEMBER_ADDED / MEMBER_REMOVED, Commits).
+  // Users added or removed by a COMMIT (union of the member lists below).
   repeated string affected_user_ids = 11;
 
   // 12-19 reserved for multi-homing (M2c) / push (P) metadata.
   reserved 12 to 19;
+
+  // COMMIT only: devices added / removed by this Commit, as derived by the
+  // owning hub from the parsed proposals.
+  repeated Member added_members = 20;
+  repeated Member removed_members = 21;
+}
+
+message Member {
+  string user_id = 1;
+  string device_id = 2;
 }
 
 // Batch of sequenced messages, one copy per member hub. Messages may belong
@@ -217,6 +270,21 @@ message DeliverWelcomeRequest {
 
   // 8-15 reserved for multi-homing (M2c) / push (P).
   reserved 8 to 15;
+
+  // Group state right after the Commit that produced this Welcome; lets the
+  // invitee's hub create its replica.
+  GroupSnapshot group = 16;
+  string sender_device_id = 17;
+}
+
+message GroupSnapshot {
+  string kind = 1;                 // "direct" | "group"
+  string created_by_user_id = 2;
+  string created_by_device_id = 3;
+  uint64 created_at = 4;           // unix ms
+  uint64 epoch = 5;                // epoch after the Commit
+  uint64 seq = 6;                  // seq of the Commit
+  repeated Member members = 7;     // roster after the Commit
 }
 
 message DeliverWelcomeResponse {}
@@ -274,3 +342,14 @@ message GetHostingRecordRequest {
 message GetHostingRecordResponse {
   bytes hosting_record_cbor = 1; // gim-core UserHostingRecord, CBOR [tbs, sig]
 }
+
+// ---------------------------------------------------------------------------
+// Identity propagation (user's hub -> hubs sharing groups with the user)
+// ---------------------------------------------------------------------------
+
+message NotifyDeviceListRequest {
+  string user_id = 1;
+  bytes device_list_cbor = 2;      // gim-core DeviceList, CBOR [tbs, sig]
+}
+
+message NotifyDeviceListResponse {}

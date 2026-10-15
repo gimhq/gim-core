@@ -5,7 +5,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -65,6 +65,9 @@ pub struct Controls {
     pub polls: Mutex<Vec<(Option<u64>, Option<u32>)>>,
     /// `(group, from_seq - 1)` of every history request.
     pub history: Mutex<Vec<(GroupId, Option<u64>)>>,
+    /// Messages (group, seq) served with this kind instead of their own,
+    /// in events and history.
+    pub relabeled: Mutex<BTreeMap<(GroupId, u64), v2::MessageKind>>,
 }
 
 #[derive(Clone)]
@@ -242,8 +245,21 @@ impl AppState {
                 _ => true,
             })
             .map(event_dto)
+            .map(|mut e| {
+                if let EventData::Message(m) = &mut e.data {
+                    self.relabel(m);
+                }
+                e
+            })
             .collect();
         (events, next)
+    }
+
+    fn relabel(&self, m: &mut v2::Message) {
+        let key = (group_id(&m.gid).unwrap(), m.seq);
+        if let Some(kind) = self.controls.relabeled.lock().unwrap().get(&key) {
+            m.kind = *kind;
+        }
     }
 
     fn head(&self, device: &DeviceRef) -> u64 {
@@ -389,14 +405,11 @@ async fn put_device_list(
     reply(result)
 }
 
-async fn device_list(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(user): Path<String>,
-) -> Response {
+/// A public read: any bearer token is ignored, as on the hub.
+async fn device_list(State(state): State<AppState>, Path(user): Path<String>) -> Response {
     let result = async {
-        let (token, user) = (state.token(&headers)?, user_id(&user)?);
-        let list = state.transport.device_list(&token, &user).await?;
+        let user = user_id(&user)?;
+        let list = state.transport.device_list(None, &user).await?;
         let list = list.ok_or_else(|| TransportError::NotFound(user.to_string()))?;
         Ok(v2::DeviceList {
             user_id: user.to_string(),
@@ -430,14 +443,11 @@ async fn put_recovery_backup(
     reply(result)
 }
 
-async fn user(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(user): Path<String>,
-) -> Response {
+/// A public read: any bearer token is ignored, as on the hub.
+async fn user(State(state): State<AppState>, Path(user): Path<String>) -> Response {
     let result = async {
-        let (token, user) = (state.token(&headers)?, user_id(&user)?);
-        let record = state.transport.user(&token, &user).await?;
+        let user = user_id(&user)?;
+        let record = state.transport.user(None, &user).await?;
         let record = record.ok_or_else(|| TransportError::NotFound(user.to_string()))?;
         Ok(v2::User {
             user_id: record.user_id.to_string(),
@@ -567,6 +577,7 @@ async fn claim_key_packages(
                 })
                 .collect(),
             missing,
+            unavailable: Vec::new(),
         })
     }
     .await;
@@ -720,7 +731,14 @@ async fn messages(
         )?;
         assert_eq!(readable.len(), messages.len());
         Ok(v2::MessageList {
-            messages: messages.into_iter().map(message_dto).collect(),
+            messages: messages
+                .into_iter()
+                .map(message_dto)
+                .map(|mut m| {
+                    state.relabel(&mut m);
+                    m
+                })
+                .collect(),
             has_more: false,
         })
     }

@@ -41,6 +41,9 @@ pub struct ClaimKeyPackagesResponse {
     pub key_packages: Vec<ClaimedKeyPackage>,
     /// Targets that are unknown or have no KeyPackage at all.
     pub missing: Vec<ClaimTarget>,
+    /// Targets on another hub that could not be reached, refused or timed
+    /// out (federation; retryable).
+    pub unavailable: Vec<ClaimTarget>,
 }
 
 /// `ClaimedKeyPackage`.
