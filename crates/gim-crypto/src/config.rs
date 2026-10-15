@@ -25,17 +25,15 @@ pub const MAX_PAST_EPOCHS: usize = 3;
 pub const PADDING_SIZE: usize = 32;
 
 /// Leaf node capabilities of every KeyPackage and group leaf. Lists the
-/// LastResort extension so last-resort KeyPackages validate. Identities with
-/// a gim credential support only [`GIM_CREDENTIAL_TYPE`]; legacy identities
-/// keep the OpenMLS default (basic).
-pub(crate) fn leaf_capabilities(gim_credential: bool) -> Capabilities {
-    let gim = [CredentialType::Other(GIM_CREDENTIAL_TYPE)];
+/// LastResort extension so last-resort KeyPackages validate, and
+/// [`GIM_CREDENTIAL_TYPE`] as the only credential type.
+pub(crate) fn leaf_capabilities() -> Capabilities {
     Capabilities::new(
         None,
         None,
         Some(&[ExtensionType::LastResort]),
         None,
-        gim_credential.then_some(gim.as_slice()),
+        Some(&[CredentialType::Other(GIM_CREDENTIAL_TYPE)]),
     )
 }
 
@@ -66,7 +64,7 @@ pub(crate) fn group_create_config(capabilities: Capabilities) -> MlsGroupCreateC
 /// Group configuration used when joining from a Welcome; identical runtime
 /// parameters to [`group_create_config`].
 pub(crate) fn group_join_config() -> MlsGroupJoinConfig {
-    group_create_config(leaf_capabilities(false))
+    group_create_config(leaf_capabilities())
         .join_config()
         .clone()
 }

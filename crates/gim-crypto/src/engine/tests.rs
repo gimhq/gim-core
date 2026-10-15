@@ -1,3 +1,5 @@
+use gim_test::TestIdentity;
+
 use super::*;
 use crate::MemoryCryptoStore;
 
@@ -11,10 +13,13 @@ fn dev(user: &str) -> Dev {
         engine: MlsEngine::new(),
         store: MemoryCryptoStore::new(),
     };
-    dev.engine
-        .create_identity(&dev.store, DeviceRef::parse(user, "phone").unwrap())
-        .unwrap();
+    create_identity(&dev, &TestIdentity::new(user)).unwrap();
     dev
+}
+
+fn create_identity(dev: &Dev, id: &TestIdentity) -> Result<()> {
+    dev.engine
+        .create_identity_v2(&dev.store, &id.device_key, id.root.public(), id.cert.clone())
 }
 
 fn gid(id: &str) -> GroupId {
@@ -76,13 +81,12 @@ fn pair() -> (Dev, Dev) {
 #[test]
 fn identity() {
     let alice = dev("alice");
-    assert_eq!(alice.me(), DeviceRef::parse("alice", "phone").unwrap());
+    let id = TestIdentity::new("alice");
+    assert_eq!(alice.me(), id.device);
     let pk = alice.engine.signature_public_key(&alice.store).unwrap();
-    assert_eq!(pk.len(), 32);
+    assert_eq!(pk, id.device_key.public().as_bytes().to_vec());
     assert!(matches!(
-        alice
-            .engine
-            .create_identity(&alice.store, DeviceRef::parse("x", "y").unwrap()),
+        create_identity(&alice, &TestIdentity::new("x")),
         Err(CryptoError::InvalidInput { .. })
     ));
     let empty = MemoryCryptoStore::new();
@@ -210,7 +214,7 @@ fn store_export_import_keeps_groups_usable() {
         engine: MlsEngine::new(),
         store: MemoryCryptoStore::import(&bob.store.export().unwrap()).unwrap(),
     };
-    assert_eq!(bob.me().user_id.as_str(), "bob");
+    assert_eq!(bob.me(), TestIdentity::new("bob").device);
     assert_eq!(bob.epoch("g"), 1);
     assert_eq!(bob.decrypt("g", &alice.encrypt("g", b"after")), b"after");
     assert_eq!(alice.decrypt("g", &bob.encrypt("g", b"reply")), b"reply");

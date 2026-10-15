@@ -54,12 +54,13 @@ impl Device {
 
     /// A device on `store`, creating its identity unless the store has one.
     pub fn with_store(user: &str, store: SqliteStore) -> Self {
-        let me = DeviceRef::parse(user, "phone").unwrap();
+        let id = gim_test::TestIdentity::new(user);
+        let me = id.device.clone();
         let engine = MlsEngine::new();
         store
             .transaction(|txn| {
                 if txn.load_identity()?.is_none() {
-                    engine.create_identity(&*txn, me.clone())?;
+                    engine.create_identity_v2(&*txn, &id.device_key, id.root.public(), id.cert.clone())?;
                 }
                 Ok(())
             })

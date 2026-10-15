@@ -1,5 +1,5 @@
 //! Groups of devices with gim credentials: lifecycle, and rejection of
-//! forged, mismatched, revoked and basic credentials.
+//! forged, mismatched and revoked credentials.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -240,7 +240,7 @@ fn create_identity_v2_checks_chain_and_key() {
     let identity = store.load_identity().unwrap().unwrap();
     assert_eq!(
         identity.credential,
-        Some(GimCredential::new(root.public(), cert.clone()).encode())
+        GimCredential::new(root.public(), cert.clone()).encode()
     );
     assert!(engine
         .create_identity_v2(&store, &key, root.public(), cert)
@@ -257,7 +257,7 @@ fn forged_device(seed: u8) -> Device {
             device: DeviceRef::new(root.public().user_id(), key.public().device_id()),
             signature_private_key: key.to_seed().to_vec(),
             signature_public_key: key.public().as_bytes().to_vec(),
-            credential: Some(GimCredential::new(root.public(), cert).encode()),
+            credential: GimCredential::new(root.public(), cert).encode(),
         }
     })
 }
@@ -303,7 +303,7 @@ fn leaf_key_mismatch_rejected() {
             device: DeviceRef::new(root.public().user_id(), certified.device_id()),
             signature_private_key: key.to_seed().to_vec(),
             signature_public_key: key.public().as_bytes().to_vec(),
-            credential: Some(GimCredential::new(root.public(), cert).encode()),
+            credential: GimCredential::new(root.public(), cert).encode(),
         }
     });
     alice.engine.create_group(&alice.store, &g).unwrap();
@@ -377,22 +377,4 @@ fn welcome_from_revoked_device_rejected() {
     let (_, welcome) = alice.add(&g, &[&bob]);
     assert_invalid_credential(bob.join(&welcome));
     assert!(!bob.engine.has_group(&bob.store, &g).unwrap());
-}
-
-#[test]
-fn basic_key_package_rejected_by_v2_group() {
-    let g = group();
-    let alice = Device::new(1);
-    let legacy = MlsEngine::new();
-    let legacy_store = MemoryCryptoStore::new();
-    legacy
-        .create_identity(&legacy_store, DeviceRef::parse("bob", "phone").unwrap())
-        .unwrap();
-    let kp = legacy
-        .generate_key_packages(&legacy_store, 1)
-        .unwrap()
-        .remove(0);
-    alice.engine.create_group(&alice.store, &g).unwrap();
-    assert_invalid_credential(alice.engine.add_members(&alice.store, &g, &[kp]));
-    assert_eq!(alice.epoch(&g), 0);
 }

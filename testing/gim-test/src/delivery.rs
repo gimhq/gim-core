@@ -1,28 +1,42 @@
-//! Synchronous, in-memory model of gim-server (§4.1 semantics):
+//! Synchronous, in-memory model of gim-hub API v2 (semantics of
+//! `crates/gim-proto/contract/hub-v2/api-v2.md`):
 //!
-//! - devices register by handle (a user may own several devices) and get a
-//!   bearer token; users are looked up by handle;
-//! - KeyPackages are uploaded per device; claiming consumes a one-time
-//!   package, falling back to the never-consumed last-resort package, and
-//!   pushes `keypackages.low` to the device once fewer than
+//! - users exist once their DeviceList was uploaded; a list with a higher
+//!   `seq` replaces it, the identical list is a no-op, anything else is
+//!   [`DeliveryError::StaleDeviceList`]. Replacing a list pushes
+//!   `device_list.updated` to the user's devices and to every device sharing
+//!   a group with the user, drops the sessions and KeyPackages of devices no
+//!   longer active, and removes nothing from groups (members commit that);
+//! - devices sign in with a single-use challenge and get a bearer token
+//!   while they are active in their user's list;
+//! - handles are an optional directory (one handle per user);
+//! - KeyPackages are uploaded per device; a claim for a user takes one per
+//!   active device: a one-time package, else the never-consumed last-resort
+//!   one, and pushes `keypackages.low` once fewer than
 //!   [`KEY_PACKAGES_LOW_THRESHOLD`] one-time packages remain;
-//! - every accepted message gets the next per-group `seq` (1, 2, ...);
-//! - posts are idempotent on `client_id` (a repeat returns the first `seq`);
-//! - a commit is accepted only if its `epoch` equals the group's current
-//!   epoch, otherwise it fails with [`DeliveryError::Conflict409`]; an
-//!   accepted commit advances the epoch;
-//! - commits and application messages fan out to every member device except
-//!   the sender; Welcomes go only to the listed recipients;
-//! - membership changes push `group.member_added|removed` to the members
-//!   (a removed device included);
-//! - each device has an event log with a server-wide monotonic cursor
+//! - groups get a hub-assigned `gid = <hub_id>/<n>`; the roster is a list of
+//!   MLS leaves driven by the handshakes posted to
+//!   [`FakeDeliveryService::submit_commit`]: removals blank their leaves,
+//!   additions take the leftmost blank leaf or a new one (RFC 9420 order);
+//! - a Commit is accepted only for the current epoch (else
+//!   [`DeliveryError::StaleEpoch`]) and advances it; resending the same
+//!   Commit (same bytes) returns its result with `duplicate`;
+//! - every accepted message gets the next per-group `seq`; application
+//!   messages are idempotent on the sender's `client_id`;
+//! - handshakes and application messages fan out to every member device
+//!   except the sender (devices removed by the Commit included); Welcomes
+//!   go to their recipients as `welcome` events and stay pending until
+//!   acknowledged; membership events carry the user and its devices;
+//! - each device has an event log with a hub-wide monotonic cursor
 //!   ([`FakeDeliveryService::events`]), and every group keeps its message
 //!   history by `seq` ([`FakeDeliveryService::messages`]);
 //! - blobs are stored opaque and downloadable by byte range.
 //!
-//! Payloads are opaque bytes.
+//! MLS messages and identity objects are opaque bytes: callers verify
+//! DeviceLists and auth responses and parse the MLS framing (gim-crypto),
+//! and pass the results in.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::sync::{Mutex, MutexGuard};
 
@@ -33,23 +47,12 @@ pub const KEY_PACKAGES_LOW_THRESHOLD: usize = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageKind {
+    /// A Commit or a standalone Proposal.
     Commit,
-    Welcome,
     Application,
 }
 
-/// Body of a post, mirroring the gim-server request.
-#[derive(Debug, Clone)]
-pub struct OutgoingMessage {
-    pub client_id: ClientId,
-    pub epoch: u64,
-    pub kind: MessageKind,
-    pub payload: Vec<u8>,
-    /// Welcome recipients; ignored for other kinds.
-    pub recipients: Vec<DeviceRef>,
-}
-
-/// A message as it appears in a device inbox.
+/// A message as it appears in a device inbox and in the group history.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Delivered {
     pub group_id: GroupId,
@@ -59,8 +62,32 @@ pub struct Delivered {
     pub kind: MessageKind,
     pub epoch: u64,
     pub payload: Vec<u8>,
-    /// Welcome recipients; empty for other kinds.
-    pub recipients: Vec<DeviceRef>,
+}
+
+/// A handshake to post, with what the hub reads from its framing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmitCommit {
+    pub client_id: ClientId,
+    pub mls_message: Vec<u8>,
+    /// Epoch from the framing.
+    pub epoch: u64,
+    /// A standalone Proposal rather than a Commit.
+    pub proposal: bool,
+    /// Devices of the inline Add proposals.
+    pub added: Vec<DeviceRef>,
+    /// Leaves of the inline Remove proposals.
+    pub removed_leaves: Vec<u32>,
+    pub welcome: Option<Vec<u8>>,
+    pub welcome_recipients: Vec<DeviceRef>,
+}
+
+/// Result of an accepted [`SubmitCommit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommitResult {
+    pub seq: u64,
+    /// Epoch after the Commit.
+    pub epoch: u64,
+    pub duplicate: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,43 +96,61 @@ pub enum GroupKind {
     Group,
 }
 
-/// Delivery-service view of a group.
+/// Hub view of a group.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupInfo {
     pub group_id: GroupId,
     pub kind: GroupKind,
     pub epoch: u64,
+    pub last_seq: u64,
     pub members: Vec<DeviceRef>,
 }
 
+/// A user as returned by the directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct User {
     pub user_id: UserId,
-    pub handle: String,
-    pub display_name: String,
+    pub device_list: Vec<u8>,
+    pub handle: Option<String>,
+    /// Not part of hub API v2: a test-only profile name, see
+    /// [`FakeDeliveryService::set_display_name`].
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Registration {
-    pub device: DeviceRef,
-    pub token: String,
-    /// Head cursor at registration; the device's events start after it.
-    pub cursor: u64,
+pub struct MembershipChange {
+    pub group_id: GroupId,
+    pub user_id: UserId,
+    pub device_ids: Vec<DeviceId>,
+    pub by: DeviceRef,
+    /// Epoch after the Commit.
+    pub epoch: u64,
+    pub seq: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Welcome {
+    pub group_id: GroupId,
+    pub sender: DeviceRef,
+    /// Epoch the Welcome joins.
+    pub epoch: u64,
+    /// Seq of the Commit that produced it.
+    pub seq: u64,
+    pub welcome: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     Message(Delivered),
-    MemberAdded {
-        group_id: GroupId,
-        device: DeviceRef,
-    },
-    MemberRemoved {
-        group_id: GroupId,
-        device: DeviceRef,
-    },
+    MemberAdded(MembershipChange),
+    MemberRemoved(MembershipChange),
+    Welcome(Welcome),
     KeyPackagesLow {
         available: usize,
+    },
+    DeviceListUpdated {
+        user_id: UserId,
+        device_list: Vec<u8>,
     },
 }
 
@@ -116,13 +161,27 @@ pub struct StreamEvent {
     pub event: Event,
 }
 
+/// A claimed KeyPackage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Claimed {
+    pub device: DeviceRef,
+    pub key_package: Vec<u8>,
+    pub last_resort: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DeliveryError {
-    #[error("409 conflict: commit epoch {commit_epoch}, group epoch {current_epoch}")]
-    Conflict409 {
+    #[error("409 stale_epoch: commit epoch {commit_epoch}, group epoch {current_epoch}")]
+    StaleEpoch {
         commit_epoch: u64,
         current_epoch: u64,
     },
+    #[error("409 stale_device_list")]
+    StaleDeviceList,
+    #[error("409 handle {0} is taken")]
+    HandleTaken(String),
+    #[error("400 validation_failed: {0}")]
+    ValidationFailed(String),
     #[error("unknown group {0}")]
     UnknownGroup(GroupId),
     #[error("group {0} already exists")]
@@ -133,8 +192,6 @@ pub enum DeliveryError {
     Unauthorized,
     #[error("unknown user {0}")]
     UnknownUser(UserId),
-    #[error("no key package for {0}")]
-    NoKeyPackage(DeviceRef),
     #[error("unknown blob {0}")]
     UnknownBlob(String),
     #[error("range {start}..{end} outside blob of {len} bytes")]
@@ -144,10 +201,28 @@ pub enum DeliveryError {
 #[derive(Debug)]
 struct Group {
     kind: GroupKind,
-    members: BTreeSet<DeviceRef>,
+    /// MLS leaves; `None` is a blank leaf.
+    leaves: Vec<Option<DeviceRef>>,
     epoch: u64,
-    seq_by_client_id: HashMap<ClientId, u64>,
+    seq_by_client_id: HashMap<(DeviceRef, ClientId), u64>,
+    /// Accepted Commit bytes → (seq, epoch after).
+    commits: HashMap<Vec<u8>, (u64, u64)>,
     history: Vec<Delivered>,
+}
+
+impl Group {
+    fn members(&self) -> BTreeSet<DeviceRef> {
+        self.leaves.iter().flatten().cloned().collect()
+    }
+}
+
+#[derive(Debug)]
+struct UserState {
+    device_list: Vec<u8>,
+    seq: u64,
+    active: BTreeSet<DeviceId>,
+    display_name: Option<String>,
+    recovery_backup: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Default)]
@@ -165,63 +240,173 @@ struct KeyPackages {
 
 #[derive(Debug, Default)]
 struct State {
-    users: HashMap<UserId, User>,
-    devices: BTreeSet<DeviceRef>,
+    users: HashMap<UserId, UserState>,
+    handles: BTreeMap<String, UserId>,
     tokens: HashMap<String, DeviceRef>,
+    challenges: HashSet<Vec<u8>>,
     key_packages: HashMap<DeviceRef, KeyPackages>,
     groups: HashMap<GroupId, Group>,
     inboxes: HashMap<DeviceRef, Inbox>,
+    pending_welcomes: HashMap<DeviceRef, Vec<Welcome>>,
     blobs: HashMap<String, Vec<u8>>,
     /// Last assigned event cursor.
     head: u64,
-    /// Counter for server-assigned ids.
+    /// Counter for hub-assigned ids.
     next_id: u64,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct FakeDeliveryService {
+    hub_id: String,
     state: Mutex<State>,
+}
+
+impl Default for FakeDeliveryService {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FakeDeliveryService {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_hub_id(crate::fake_hub_id())
     }
 
-    /// Registers a device. A known handle gets a new device of the same
-    /// user; the display name is kept from the first registration.
-    pub fn register_device(&self, handle: &str, display_name: &str) -> Registration {
-        let mut state = self.lock();
-        let existing = state
-            .users
-            .values()
-            .find(|u| u.handle == handle)
-            .map(|u| u.user_id.clone());
-        let user_id = match existing {
-            Some(user_id) => user_id,
-            None => {
-                let user_id = UserId::new(format!("u{}", state.next_id())).expect("valid id");
-                state.users.insert(
-                    user_id.clone(),
-                    User {
-                        user_id: user_id.clone(),
-                        handle: handle.to_string(),
-                        display_name: display_name.to_string(),
-                    },
-                );
-                user_id
-            }
-        };
-        let id = state.next_id();
-        let device = DeviceRef::new(user_id, DeviceId::new(format!("d{id}")).expect("valid id"));
-        let token = format!("token-{id}");
-        state.devices.insert(device.clone());
-        state.tokens.insert(token.clone(), device.clone());
-        Registration {
-            device,
-            token,
-            cursor: state.head,
+    pub fn with_hub_id(hub_id: impl Into<String>) -> Self {
+        Self {
+            hub_id: hub_id.into(),
+            state: Mutex::default(),
         }
+    }
+
+    /// This hub's `hub_id`: the audience of its challenges and the prefix
+    /// of its group ids.
+    pub fn hub_id(&self) -> &str {
+        &self.hub_id
+    }
+
+    /// Stores a verified DeviceList of `user_id` with its `seq`, signed
+    /// `bytes` and active devices. Returns whether it changed anything.
+    pub fn put_device_list(
+        &self,
+        user_id: &UserId,
+        seq: u64,
+        bytes: Vec<u8>,
+        active: BTreeSet<DeviceId>,
+    ) -> Result<bool, DeliveryError> {
+        let mut state = self.lock();
+        if let Some(stored) = state.users.get(user_id) {
+            if stored.seq == seq && stored.device_list == bytes {
+                return Ok(false);
+            }
+            if stored.seq >= seq {
+                return Err(DeliveryError::StaleDeviceList);
+            }
+        }
+        let user = state
+            .users
+            .entry(user_id.clone())
+            .or_insert_with(|| UserState {
+                device_list: Vec::new(),
+                seq,
+                active: BTreeSet::new(),
+                display_name: None,
+                recovery_backup: None,
+            });
+        let gone: Vec<DeviceId> = user.active.difference(&active).cloned().collect();
+        let first = user.device_list.is_empty();
+        user.device_list = bytes.clone();
+        user.seq = seq;
+        user.active = active.clone();
+        for device_id in gone {
+            let device = DeviceRef::new(user_id.clone(), device_id);
+            state.tokens.retain(|_, d| *d != device);
+            state.key_packages.remove(&device);
+        }
+        if !first {
+            let mut watchers: BTreeSet<DeviceRef> = active
+                .iter()
+                .map(|d| DeviceRef::new(user_id.clone(), d.clone()))
+                .collect();
+            for group in state.groups.values() {
+                let members = group.members();
+                if members.iter().any(|m| &m.user_id == user_id) {
+                    watchers.extend(members);
+                }
+            }
+            let event = Event::DeviceListUpdated {
+                user_id: user_id.clone(),
+                device_list: bytes,
+            };
+            for device in &watchers {
+                state.push_event(device, event.clone());
+            }
+        }
+        Ok(true)
+    }
+
+    /// The signed DeviceList of a user.
+    pub fn device_list(&self, user_id: &UserId) -> Option<Vec<u8>> {
+        self.lock()
+            .users
+            .get(user_id)
+            .map(|u| u.device_list.clone())
+    }
+
+    /// Devices active in the user's DeviceList.
+    pub fn devices(&self, user_id: &UserId) -> Result<Vec<DeviceRef>, DeliveryError> {
+        let state = self.lock();
+        let user = state
+            .users
+            .get(user_id)
+            .ok_or_else(|| DeliveryError::UnknownUser(user_id.clone()))?;
+        Ok(user
+            .active
+            .iter()
+            .map(|d| DeviceRef::new(user_id.clone(), d.clone()))
+            .collect())
+    }
+
+    pub fn user(&self, user_id: &UserId) -> Option<User> {
+        let state = self.lock();
+        let user = state.users.get(user_id)?;
+        Some(User {
+            user_id: user_id.clone(),
+            device_list: user.device_list.clone(),
+            handle: state.handle_of(user_id),
+            display_name: user.display_name.clone(),
+        })
+    }
+
+    /// Test-only profile: hub API v2 has no display names.
+    pub fn set_display_name(&self, user_id: &UserId, name: &str) -> Result<(), DeliveryError> {
+        self.lock()
+            .users
+            .get_mut(user_id)
+            .ok_or_else(|| DeliveryError::UnknownUser(user_id.clone()))?
+            .display_name = Some(name.to_string());
+        Ok(())
+    }
+
+    /// Records an issued challenge; it can be redeemed once.
+    pub fn issue_challenge(&self, challenge: Vec<u8>) {
+        self.lock().challenges.insert(challenge);
+    }
+
+    /// Consumes an issued challenge; `false` if unknown or used.
+    pub fn redeem_challenge(&self, challenge: &[u8]) -> bool {
+        self.lock().challenges.remove(challenge)
+    }
+
+    /// A new bearer token for a device active in its user's list.
+    pub fn create_session(&self, device: &DeviceRef) -> Result<String, DeliveryError> {
+        let mut state = self.lock();
+        if !state.is_active(device) {
+            return Err(DeliveryError::Unauthorized);
+        }
+        let token = format!("token-{}", state.next_id());
+        state.tokens.insert(token.clone(), device.clone());
+        Ok(token)
     }
 
     /// The device a bearer token belongs to.
@@ -233,60 +418,95 @@ impl FakeDeliveryService {
             .ok_or(DeliveryError::Unauthorized)
     }
 
-    pub fn find_user(&self, handle: &str) -> Option<User> {
+    /// Drops every session of `device` (as after their expiry).
+    pub fn expire_sessions(&self, device: &DeviceRef) {
+        self.lock().tokens.retain(|_, d| d != device);
+    }
+
+    pub fn claim_handle(&self, user_id: &UserId, handle: &str) -> Result<(), DeliveryError> {
+        let mut state = self.lock();
+        match state.handles.get(handle) {
+            Some(owner) if owner == user_id => return Ok(()),
+            Some(_) => return Err(DeliveryError::HandleTaken(handle.to_string())),
+            None => {}
+        }
+        state.handles.retain(|_, owner| owner != user_id);
+        state.handles.insert(handle.to_string(), user_id.clone());
+        Ok(())
+    }
+
+    pub fn release_handle(&self, user_id: &UserId, handle: &str) {
+        let mut state = self.lock();
+        if state.handles.get(handle) == Some(user_id) {
+            state.handles.remove(handle);
+        }
+    }
+
+    pub fn find_handle(&self, handle: &str) -> Option<UserId> {
+        self.lock().handles.get(handle).cloned()
+    }
+
+    pub fn put_recovery_backup(
+        &self,
+        user_id: &UserId,
+        backup: Vec<u8>,
+    ) -> Result<(), DeliveryError> {
         self.lock()
             .users
-            .values()
-            .find(|u| u.handle == handle)
-            .cloned()
+            .get_mut(user_id)
+            .ok_or_else(|| DeliveryError::UnknownUser(user_id.clone()))?
+            .recovery_backup = Some(backup);
+        Ok(())
     }
 
-    /// Registered devices of a user.
-    pub fn devices(&self, user_id: &UserId) -> Result<Vec<DeviceRef>, DeliveryError> {
-        let state = self.lock();
-        if !state.users.contains_key(user_id) {
-            return Err(DeliveryError::UnknownUser(user_id.clone()));
-        }
-        Ok(state
-            .devices
-            .iter()
-            .filter(|d| &d.user_id == user_id)
-            .cloned()
-            .collect())
+    pub fn recovery_backup(&self, user_id: &UserId) -> Option<Vec<u8>> {
+        self.lock()
+            .users
+            .get(user_id)
+            .and_then(|u| u.recovery_backup.clone())
     }
 
-    /// Appends one-time KeyPackages; `last_resort` replaces the previous one.
+    /// Appends one-time KeyPackages, or replaces the last-resort one with
+    /// the single package given.
     pub fn upload_key_packages(
         &self,
         device: &DeviceRef,
-        key_packages: Vec<Vec<u8>>,
-        last_resort: Option<Vec<u8>>,
+        mut key_packages: Vec<Vec<u8>>,
+        last_resort: bool,
     ) {
         let mut state = self.lock();
         let stored = state.key_packages.entry(device.clone()).or_default();
-        stored.one_time.extend(key_packages);
-        if last_resort.is_some() {
-            stored.last_resort = last_resort;
+        if last_resort {
+            stored.last_resort = key_packages.pop();
+        } else {
+            stored.one_time.extend(key_packages);
         }
     }
 
-    /// Claims a KeyPackage of `device`: a one-time one if left, else the
-    /// last-resort one.
-    pub fn claim_key_package(&self, device: &DeviceRef) -> Result<Vec<u8>, DeliveryError> {
+    /// Claims one KeyPackage per active device of each user. Returns the
+    /// claimed packages and the users without any.
+    pub fn claim_key_packages(&self, users: &[UserId]) -> (Vec<Claimed>, Vec<UserId>) {
         let mut state = self.lock();
-        let no_key_package = || DeliveryError::NoKeyPackage(device.clone());
-        let stored = state
-            .key_packages
-            .get_mut(device)
-            .ok_or_else(no_key_package)?;
-        if let Some(key_package) = stored.one_time.pop_front() {
-            let available = stored.one_time.len();
-            if available < KEY_PACKAGES_LOW_THRESHOLD {
-                state.push_event(device, Event::KeyPackagesLow { available });
+        let mut claimed = Vec::new();
+        let mut missing = Vec::new();
+        for user_id in users {
+            let devices: Vec<DeviceRef> = state.users.get(user_id).map_or(vec![], |u| {
+                u.active
+                    .iter()
+                    .map(|d| DeviceRef::new(user_id.clone(), d.clone()))
+                    .collect()
+            });
+            let before = claimed.len();
+            for device in devices {
+                if let Some(c) = state.claim(&device) {
+                    claimed.push(c);
+                }
             }
-            return Ok(key_package);
+            if claimed.len() == before {
+                missing.push(user_id.clone());
+            }
         }
-        stored.last_resort.clone().ok_or_else(no_key_package)
+        (claimed, missing)
     }
 
     /// Unclaimed one-time KeyPackages of `device`.
@@ -305,10 +525,33 @@ impl FakeDeliveryService {
             .is_some_and(|k| k.last_resort.is_some())
     }
 
-    /// Registers a group (epoch 0) with its creator as the only member.
+    /// Registers a group with a caller-chosen id (epoch 0); the creator
+    /// holds leaf 0.
     pub fn create_group(
         &self,
         group_id: &GroupId,
+        creator: &DeviceRef,
+    ) -> Result<(), DeliveryError> {
+        self.create(group_id, GroupKind::Group, creator)
+    }
+
+    /// Creates a group with a hub-assigned `gid`.
+    pub fn create_group_with(
+        &self,
+        kind: GroupKind,
+        creator: &DeviceRef,
+    ) -> Result<GroupId, DeliveryError> {
+        let id = self.lock().next_id();
+        let group_id =
+            GroupId::new(format!("{}/g{id:024}", self.hub_id)).expect("valid group id");
+        self.create(&group_id, kind, creator)?;
+        Ok(group_id)
+    }
+
+    fn create(
+        &self,
+        group_id: &GroupId,
+        kind: GroupKind,
         creator: &DeviceRef,
     ) -> Result<(), DeliveryError> {
         let mut state = self.lock();
@@ -318,78 +561,38 @@ impl FakeDeliveryService {
         state.groups.insert(
             group_id.clone(),
             Group {
-                kind: GroupKind::Group,
-                members: BTreeSet::from([creator.clone()]),
+                kind,
+                leaves: vec![Some(creator.clone())],
                 epoch: 0,
                 seq_by_client_id: HashMap::new(),
+                commits: HashMap::new(),
                 history: Vec::new(),
             },
         );
         Ok(())
     }
 
-    /// Creates a group with a server-assigned id; the creator and `members`
-    /// form the fan-out list.
-    pub fn create_group_with(
-        &self,
-        kind: GroupKind,
-        creator: &DeviceRef,
-        members: &[DeviceRef],
-    ) -> Result<GroupId, DeliveryError> {
-        let group_id = GroupId::new(format!("g{}", self.lock().next_id())).expect("valid id");
-        self.create_group(&group_id, creator)?;
-        self.lock().group_mut(&group_id)?.kind = kind;
-        for device in members {
-            self.add_member(&group_id, device)?;
-        }
-        Ok(group_id)
-    }
-
     pub fn group(&self, group_id: &GroupId) -> Result<GroupInfo, DeliveryError> {
         let mut state = self.lock();
         let group = state.group_mut(group_id)?;
-        Ok(GroupInfo {
-            group_id: group_id.clone(),
-            kind: group.kind,
-            epoch: group.epoch,
-            members: group.members.iter().cloned().collect(),
-        })
+        Ok(info(group_id, group))
     }
 
-    /// The groups whose fan-out list has `device`.
+    /// The groups whose roster has `device`.
     pub fn groups_of(&self, device: &DeviceRef) -> Vec<GroupInfo> {
-        self.lock()
+        let state = self.lock();
+        let mut groups: Vec<GroupInfo> = state
             .groups
             .iter()
-            .filter(|(_, group)| group.members.contains(device))
-            .map(|(group_id, group)| GroupInfo {
-                group_id: group_id.clone(),
-                kind: group.kind,
-                epoch: group.epoch,
-                members: group.members.iter().cloned().collect(),
-            })
-            .collect()
+            .filter(|(_, group)| group.members().contains(device))
+            .map(|(group_id, group)| info(group_id, group))
+            .collect();
+        groups.sort_by(|a, b| a.group_id.cmp(&b.group_id));
+        groups
     }
 
-    /// Adds a device to the server-side fan-out list.
-    pub fn add_member(&self, group_id: &GroupId, device: &DeviceRef) -> Result<(), DeliveryError> {
-        let mut state = self.lock();
-        let group = state.group_mut(group_id)?;
-        if !group.members.insert(device.clone()) {
-            return Ok(());
-        }
-        let members: Vec<DeviceRef> = group.members.iter().cloned().collect();
-        let event = Event::MemberAdded {
-            group_id: group_id.clone(),
-            device: device.clone(),
-        };
-        for member in &members {
-            state.push_event(member, event.clone());
-        }
-        Ok(())
-    }
-
-    /// Removes a device from the server-side fan-out list.
+    /// Hub-side removal of a device from the roster, without a Commit (as
+    /// after a hub policy action).
     pub fn remove_member(
         &self,
         group_id: &GroupId,
@@ -397,96 +600,209 @@ impl FakeDeliveryService {
     ) -> Result<(), DeliveryError> {
         let mut state = self.lock();
         let group = state.group_mut(group_id)?;
-        if !group.members.remove(device) {
+        let Some(leaf) = group.leaves.iter_mut().find(|l| l.as_ref() == Some(device)) else {
             return Ok(());
-        }
-        let members: Vec<DeviceRef> = group.members.iter().cloned().collect();
-        let event = Event::MemberRemoved {
-            group_id: group_id.clone(),
-            device: device.clone(),
         };
+        *leaf = None;
+        let change = MembershipChange {
+            group_id: group_id.clone(),
+            user_id: device.user_id.clone(),
+            device_ids: vec![device.device_id.clone()],
+            by: device.clone(),
+            epoch: group.epoch,
+            seq: group.history.len() as u64,
+        };
+        let members = group.members();
         for member in members.iter().chain([device]) {
-            state.push_event(member, event.clone());
+            state.push_event(member, Event::MemberRemoved(change.clone()));
         }
         Ok(())
     }
 
-    /// Current epoch as tracked by the server.
+    /// Current epoch as tracked by the hub.
     pub fn epoch(&self, group_id: &GroupId) -> Result<u64, DeliveryError> {
         Ok(self.lock().group_mut(group_id)?.epoch)
     }
 
-    /// Accepts a message and returns its `seq`.
-    pub fn post(
+    /// Accepts a Commit or Proposal of a member.
+    pub fn submit_commit(
         &self,
         group_id: &GroupId,
         sender: &DeviceRef,
-        message: OutgoingMessage,
-    ) -> Result<u64, DeliveryError> {
+        commit: SubmitCommit,
+    ) -> Result<CommitResult, DeliveryError> {
         let mut state = self.lock();
+        let active: HashMap<UserId, BTreeSet<DeviceId>> = state
+            .users
+            .iter()
+            .map(|(id, u)| (id.clone(), u.active.clone()))
+            .collect();
         let group = state.group_mut(group_id)?;
-        if !group.members.contains(sender) {
+        let before = group.members();
+        if !before.contains(sender) {
             return Err(DeliveryError::NotAMember(sender.clone()));
         }
-        if let Some(&seq) = group.seq_by_client_id.get(&message.client_id) {
-            return Ok(seq);
+        if let Some(&(seq, epoch)) = group.commits.get(&commit.mls_message) {
+            return Ok(CommitResult {
+                seq,
+                epoch,
+                duplicate: true,
+            });
         }
-        if message.kind == MessageKind::Commit {
-            if message.epoch != group.epoch {
-                return Err(DeliveryError::Conflict409 {
-                    commit_epoch: message.epoch,
-                    current_epoch: group.epoch,
-                });
+        if commit.epoch != group.epoch {
+            return Err(DeliveryError::StaleEpoch {
+                commit_epoch: commit.epoch,
+                current_epoch: group.epoch,
+            });
+        }
+        let invalid = |reason: String| Err(DeliveryError::ValidationFailed(reason));
+        for device in &commit.added {
+            if !active
+                .get(&device.user_id)
+                .is_some_and(|a| a.contains(&device.device_id))
+            {
+                return invalid(format!("{device} is not an active device"));
+            }
+        }
+        let recipients: BTreeSet<&DeviceRef> = commit.welcome_recipients.iter().collect();
+        if commit.welcome.is_some() != !commit.added.is_empty()
+            || recipients != commit.added.iter().collect()
+        {
+            return invalid("Welcome does not match the added devices".into());
+        }
+        let mut removed = BTreeSet::new();
+        if !commit.proposal {
+            for &leaf in &commit.removed_leaves {
+                let Some(device) = group.leaves.get_mut(leaf as usize).and_then(Option::take)
+                else {
+                    return invalid(format!("leaf {leaf} is not a member"));
+                };
+                removed.insert(device);
+            }
+            for device in &commit.added {
+                match group.leaves.iter_mut().find(|l| l.is_none()) {
+                    Some(blank) => *blank = Some(device.clone()),
+                    None => group.leaves.push(Some(device.clone())),
+                }
             }
             group.epoch += 1;
         }
         let seq = group.history.len() as u64 + 1;
-        group
-            .seq_by_client_id
-            .insert(message.client_id.clone(), seq);
-        let welcome = message.kind == MessageKind::Welcome;
-        let fan_out: Vec<DeviceRef> = if welcome {
-            message.recipients.clone()
-        } else {
-            group
-                .members
-                .iter()
-                .filter(|d| *d != sender)
-                .cloned()
-                .collect()
-        };
         let delivered = Delivered {
             group_id: group_id.clone(),
             seq,
             sender: sender.clone(),
-            client_id: message.client_id,
-            kind: message.kind,
-            epoch: message.epoch,
-            payload: message.payload,
-            recipients: if welcome { message.recipients } else { vec![] },
+            client_id: commit.client_id.clone(),
+            kind: MessageKind::Commit,
+            epoch: commit.epoch,
+            payload: commit.mls_message.clone(),
         };
         group.history.push(delivered.clone());
-        for device in &fan_out {
+        group
+            .seq_by_client_id
+            .insert((sender.clone(), commit.client_id), seq);
+        let epoch = group.epoch;
+        if !commit.proposal {
+            group.commits.insert(commit.mls_message, (seq, epoch));
+        }
+        let after = group.members();
+        for device in before.iter().filter(|d| *d != sender) {
+            state.push_event(device, Event::Message(delivered.clone()));
+        }
+        let change = |user_id: &UserId, devices: Vec<DeviceId>| MembershipChange {
+            group_id: group_id.clone(),
+            user_id: user_id.clone(),
+            device_ids: devices,
+            by: sender.clone(),
+            epoch,
+            seq,
+        };
+        for (user_id, devices) in by_user(commit.added.iter()) {
+            let event = Event::MemberAdded(change(&user_id, devices));
+            for device in &after {
+                state.push_event(device, event.clone());
+            }
+        }
+        for (user_id, devices) in by_user(removed.iter()) {
+            let event = Event::MemberRemoved(change(&user_id, devices));
+            for device in after.iter().chain(&removed) {
+                state.push_event(device, event.clone());
+            }
+        }
+        if let Some(welcome) = commit.welcome {
+            let welcome = Welcome {
+                group_id: group_id.clone(),
+                sender: sender.clone(),
+                epoch,
+                seq,
+                welcome,
+            };
+            for device in &commit.welcome_recipients {
+                state.push_event(device, Event::Welcome(welcome.clone()));
+                state
+                    .pending_welcomes
+                    .entry(device.clone())
+                    .or_default()
+                    .push(welcome.clone());
+            }
+        }
+        Ok(CommitResult {
+            seq,
+            epoch,
+            duplicate: false,
+        })
+    }
+
+    /// Accepts an application message; returns its `seq`.
+    pub fn post_message(
+        &self,
+        group_id: &GroupId,
+        sender: &DeviceRef,
+        client_id: ClientId,
+        epoch: u64,
+        mls_message: Vec<u8>,
+    ) -> Result<u64, DeliveryError> {
+        let mut state = self.lock();
+        let group = state.group_mut(group_id)?;
+        let members = group.members();
+        if !members.contains(sender) {
+            return Err(DeliveryError::NotAMember(sender.clone()));
+        }
+        let key = (sender.clone(), client_id.clone());
+        if let Some(&seq) = group.seq_by_client_id.get(&key) {
+            return Ok(seq);
+        }
+        let seq = group.history.len() as u64 + 1;
+        group.seq_by_client_id.insert(key, seq);
+        let delivered = Delivered {
+            group_id: group_id.clone(),
+            seq,
+            sender: sender.clone(),
+            client_id,
+            kind: MessageKind::Application,
+            epoch,
+            payload: mls_message,
+        };
+        group.history.push(delivered.clone());
+        for device in members.iter().filter(|d| *d != sender) {
             state.push_event(device, Event::Message(delivered.clone()));
         }
         Ok(seq)
     }
 
-    /// Returns the device's messages not returned by an earlier `pull`, in
+    /// Returns the device's events not returned by an earlier `pull`, in
     /// delivery order. Independent of [`FakeDeliveryService::events`].
-    pub fn pull(&self, device: &DeviceRef) -> Vec<Delivered> {
+    pub fn pull(&self, device: &DeviceRef) -> Vec<Event> {
         let mut state = self.lock();
         let Some(inbox) = state.inboxes.get_mut(device) else {
             return Vec::new();
         };
-        let new = &inbox.events[inbox.pulled..];
+        let new = inbox.events[inbox.pulled..]
+            .iter()
+            .map(|e| e.event.clone())
+            .collect();
         inbox.pulled = inbox.events.len();
-        new.iter()
-            .filter_map(|e| match &e.event {
-                Event::Message(delivered) => Some(delivered.clone()),
-                _ => None,
-            })
-            .collect()
+        new
     }
 
     /// Up to `limit` events of the device after `cursor`, and the cursor to
@@ -508,6 +824,27 @@ impl FakeDeliveryService {
             .unwrap_or_default();
         let next = events.last().map_or(cursor, |e| e.cursor);
         (events, next)
+    }
+
+    /// Hub-wide head cursor.
+    pub fn head(&self) -> u64 {
+        self.lock().head
+    }
+
+    /// Up to `limit` unacknowledged Welcomes of the device, oldest first.
+    pub fn pending_welcomes(&self, device: &DeviceRef, limit: usize) -> Vec<Welcome> {
+        self.lock()
+            .pending_welcomes
+            .get(device)
+            .map(|w| w.iter().take(limit).cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Acknowledges the device's pending Welcomes of the group; idempotent.
+    pub fn ack_welcome(&self, device: &DeviceRef, group_id: &GroupId) {
+        if let Some(pending) = self.lock().pending_welcomes.get_mut(device) {
+            pending.retain(|w| &w.group_id != group_id);
+        }
     }
 
     /// Up to `limit` messages of the group with `seq > after_seq`.
@@ -559,10 +896,64 @@ impl FakeDeliveryService {
     }
 }
 
+fn info(group_id: &GroupId, group: &Group) -> GroupInfo {
+    GroupInfo {
+        group_id: group_id.clone(),
+        kind: group.kind,
+        epoch: group.epoch,
+        last_seq: group.history.len() as u64,
+        members: group.members().into_iter().collect(),
+    }
+}
+
+fn by_user<'a>(devices: impl Iterator<Item = &'a DeviceRef>) -> BTreeMap<UserId, Vec<DeviceId>> {
+    let mut users: BTreeMap<UserId, Vec<DeviceId>> = BTreeMap::new();
+    for device in devices {
+        users
+            .entry(device.user_id.clone())
+            .or_default()
+            .push(device.device_id.clone());
+    }
+    users
+}
+
 impl State {
     fn next_id(&mut self) -> u64 {
         self.next_id += 1;
         self.next_id
+    }
+
+    fn is_active(&self, device: &DeviceRef) -> bool {
+        self.users
+            .get(&device.user_id)
+            .is_some_and(|u| u.active.contains(&device.device_id))
+    }
+
+    fn handle_of(&self, user_id: &UserId) -> Option<String> {
+        self.handles
+            .iter()
+            .find(|(_, owner)| *owner == user_id)
+            .map(|(handle, _)| handle.clone())
+    }
+
+    fn claim(&mut self, device: &DeviceRef) -> Option<Claimed> {
+        let stored = self.key_packages.get_mut(device)?;
+        if let Some(key_package) = stored.one_time.pop_front() {
+            let available = stored.one_time.len();
+            if available < KEY_PACKAGES_LOW_THRESHOLD {
+                self.push_event(device, Event::KeyPackagesLow { available });
+            }
+            return Some(Claimed {
+                device: device.clone(),
+                key_package,
+                last_resort: false,
+            });
+        }
+        stored.last_resort.clone().map(|key_package| Claimed {
+            device: device.clone(),
+            key_package,
+            last_resort: true,
+        })
     }
 
     fn push_event(&mut self, device: &DeviceRef, event: Event) {
@@ -586,154 +977,186 @@ impl State {
 mod tests {
     use super::*;
 
-    fn device(user: &str) -> DeviceRef {
-        DeviceRef::parse(user, "d1").unwrap()
+    fn device(user: &str, device: &str) -> DeviceRef {
+        DeviceRef::parse(user, device).unwrap()
     }
 
-    fn msg(client_id: &str, epoch: u64, kind: MessageKind) -> OutgoingMessage {
-        OutgoingMessage {
-            client_id: ClientId::new(client_id).unwrap(),
+    fn client_id(id: &str) -> ClientId {
+        ClientId::new(id).unwrap()
+    }
+
+    fn user(ds: &FakeDeliveryService, user: &str, devices: &[&str]) -> Vec<DeviceRef> {
+        let user_id = UserId::new(user).unwrap();
+        let active = devices.iter().map(|d| DeviceId::new(*d).unwrap()).collect();
+        ds.put_device_list(&user_id, 1, user.as_bytes().to_vec(), active)
+            .unwrap();
+        devices.iter().map(|d| device(user, d)).collect()
+    }
+
+    fn commit(id: &str, epoch: u64) -> SubmitCommit {
+        SubmitCommit {
+            client_id: client_id(id),
+            mls_message: id.as_bytes().to_vec(),
             epoch,
-            kind,
-            payload: client_id.as_bytes().to_vec(),
-            recipients: vec![],
+            proposal: false,
+            added: vec![],
+            removed_leaves: vec![],
+            welcome: None,
+            welcome_recipients: vec![],
+        }
+    }
+
+    fn add(id: &str, epoch: u64, devices: &[DeviceRef]) -> SubmitCommit {
+        SubmitCommit {
+            added: devices.to_vec(),
+            welcome: Some(b"welcome".to_vec()),
+            welcome_recipients: devices.to_vec(),
+            ..commit(id, epoch)
         }
     }
 
     #[test]
-    fn delivery_semantics() {
+    fn commits_drive_roster_epoch_and_events() {
         let ds = FakeDeliveryService::new();
-        let g = GroupId::new("g").unwrap();
-        let (a, b, c) = (device("a"), device("b"), device("c"));
-        ds.create_group(&g, &a).unwrap();
-        assert!(ds.create_group(&g, &a).is_err());
-        ds.add_member(&g, &b).unwrap();
+        let a = user(&ds, "a", &["d1"]).remove(0);
+        let b = user(&ds, "b", &["d1", "d2"]);
+        let g = ds.create_group_with(GroupKind::Group, &a).unwrap();
+        assert!(g.as_str().starts_with(&format!("{}/", ds.hub_id())));
 
+        let added = ds.submit_commit(&g, &a, add("c1", 0, &b)).unwrap();
+        assert_eq!((added.seq, added.epoch, added.duplicate), (1, 1, false));
+        // Same Commit again: success with `duplicate`.
         assert_eq!(
-            ds.post(&g, &a, msg("m1", 0, MessageKind::Application)),
-            Ok(1)
+            ds.submit_commit(&g, &a, add("c1", 0, &b)).unwrap(),
+            CommitResult {
+                seq: 1,
+                epoch: 1,
+                duplicate: true
+            }
         );
-        // Idempotent on client_id: same seq, no second delivery.
         assert_eq!(
-            ds.post(&g, &a, msg("m1", 0, MessageKind::Application)),
-            Ok(1)
-        );
-        assert_eq!(ds.post(&g, &a, msg("c1", 0, MessageKind::Commit)), Ok(2));
-        assert_eq!(ds.epoch(&g), Ok(1));
-        assert_eq!(
-            ds.post(&g, &b, msg("c2", 0, MessageKind::Commit)),
-            Err(DeliveryError::Conflict409 {
+            ds.submit_commit(&g, &b[0], commit("c2", 0)),
+            Err(DeliveryError::StaleEpoch {
                 commit_epoch: 0,
                 current_epoch: 1
             })
         );
-        let mut welcome = msg("w1", 1, MessageKind::Welcome);
-        welcome.recipients = vec![c.clone()];
-        assert_eq!(ds.post(&g, &a, welcome), Ok(3));
-        assert_eq!(
-            ds.post(&g, &c, msg("x", 1, MessageKind::Application)),
-            Err(DeliveryError::NotAMember(c.clone()))
-        );
+        let mut mismatched = add("c3", 1, &b[..1]);
+        mismatched.welcome_recipients = b.clone();
+        assert!(matches!(
+            ds.submit_commit(&g, &a, mismatched),
+            Err(DeliveryError::ValidationFailed(_))
+        ));
+        assert_eq!(ds.group(&g).unwrap().members.len(), 3);
 
-        let seqs = |d: &DeviceRef| ds.pull(d).iter().map(|m| m.seq).collect::<Vec<_>>();
-        assert_eq!(seqs(&a), Vec::<u64>::new());
-        assert_eq!(seqs(&b), vec![1, 2]);
-        assert_eq!(seqs(&c), vec![3]);
-        assert!(ds.pull(&b).is_empty());
+        // b's devices got the member event and the Welcome, a only the
+        // member event.
+        for d in &b {
+            let events = ds.pull(d);
+            assert!(matches!(&events[0], Event::MemberAdded(c) if c.device_ids.len() == 2));
+            assert!(matches!(&events[1], Event::Welcome(w) if w.seq == 1 && w.epoch == 1));
+            assert_eq!(ds.pending_welcomes(d, 10).len(), 1);
+        }
+        ds.ack_welcome(&b[0], &g);
+        ds.ack_welcome(&b[0], &g);
+        assert!(ds.pending_welcomes(&b[0], 10).is_empty());
+        assert!(matches!(&ds.pull(&a)[..], [Event::MemberAdded(_)]));
 
-        ds.remove_member(&g, &b).unwrap();
-        ds.post(&g, &a, msg("m2", 1, MessageKind::Application))
-            .unwrap();
-        assert!(ds.pull(&b).is_empty());
-        assert!(ds
-            .post(
-                &GroupId::new("nope").unwrap(),
-                &a,
-                msg("z", 0, MessageKind::Application)
-            )
-            .is_err());
+        // Remove b's leaves 1 and 2; the next add takes leaf 1.
+        let mut remove = commit("c4", 1);
+        remove.removed_leaves = vec![1, 2];
+        assert_eq!(ds.submit_commit(&g, &a, remove).unwrap().epoch, 2);
+        assert_eq!(ds.group(&g).unwrap().members, vec![a.clone()]);
+        let removed = ds.pull(&b[1]);
+        assert!(matches!(&removed[0], Event::Message(m) if m.seq == 2));
+        assert!(matches!(&removed[1], Event::MemberRemoved(c) if c.device_ids.len() == 2));
+        let c = user(&ds, "c", &["d1"]);
+        ds.submit_commit(&g, &a, add("c5", 2, &c)).unwrap();
+        let mut remove_c = commit("c6", 3);
+        remove_c.removed_leaves = vec![1];
+        ds.submit_commit(&g, &a, remove_c).unwrap();
+        assert_eq!(ds.group(&g).unwrap().members, vec![a.clone()]);
     }
 
     #[test]
-    fn directory_and_key_packages() {
+    fn messages_are_idempotent_per_sender() {
         let ds = FakeDeliveryService::new();
-        let a1 = ds.register_device("alice", "Alice");
-        let a2 = ds.register_device("alice", "ignored");
-        assert_eq!(a1.device.user_id, a2.device.user_id);
-        assert_ne!(a1.device, a2.device);
-        assert_eq!(ds.authenticate(&a2.token), Ok(a2.device.clone()));
-        assert_eq!(ds.authenticate("nope"), Err(DeliveryError::Unauthorized));
-        let user = ds.find_user("alice").unwrap();
-        assert_eq!(user.display_name, "Alice");
-        assert_eq!(
-            ds.devices(&user.user_id).unwrap(),
-            vec![a1.device.clone(), a2.device.clone()]
-        );
-        assert!(ds.find_user("bob").is_none());
+        let a = user(&ds, "a", &["d1"]).remove(0);
+        let b = user(&ds, "b", &["d1"]);
+        let g = ds.create_group_with(GroupKind::Direct, &a).unwrap();
+        ds.submit_commit(&g, &a, add("c1", 0, &b)).unwrap();
+        let post = |d: &DeviceRef, id: &str| ds.post_message(&g, d, client_id(id), 1, vec![1]);
+        assert_eq!(post(&a, "m1"), Ok(2));
+        assert_eq!(post(&a, "m1"), Ok(2));
+        assert_eq!(post(&b[0], "m1"), Ok(3));
+        let outsider = device("x", "d1");
+        assert_eq!(post(&outsider, "m2"), Err(DeliveryError::NotAMember(outsider)));
+        let history = ds.messages(&g, 1, 10).unwrap();
+        assert_eq!(history.iter().map(|m| m.seq).collect::<Vec<_>>(), vec![2, 3]);
+        let (events, next) = ds.events(&b[0], 0, 10);
+        assert_eq!(events.len(), 3);
+        assert_eq!(ds.events(&b[0], next, 10), (vec![], next));
+    }
 
-        let a = &a1.device;
+    #[test]
+    fn device_lists_sessions_and_key_packages() {
+        let ds = FakeDeliveryService::new();
+        let a = user(&ds, "a", &["d1", "d2"]);
+        let user_id = a[0].user_id.clone();
+        let active = |ids: &[&str]| ids.iter().map(|d| DeviceId::new(*d).unwrap()).collect();
+        // Identical list: no-op; stale or forked lists are rejected.
         assert_eq!(
-            ds.claim_key_package(a),
-            Err(DeliveryError::NoKeyPackage(a.clone()))
+            ds.put_device_list(&user_id, 1, b"a".to_vec(), active(&["d1", "d2"])),
+            Ok(false)
         );
+        assert_eq!(
+            ds.put_device_list(&user_id, 1, b"x".to_vec(), active(&["d1"])),
+            Err(DeliveryError::StaleDeviceList)
+        );
+
+        let token = ds.create_session(&a[1]).unwrap();
+        assert_eq!(ds.authenticate(&token), Ok(a[1].clone()));
         let packages = (0..=KEY_PACKAGES_LOW_THRESHOLD as u8)
             .map(|i| vec![i])
             .collect();
-        ds.upload_key_packages(a, packages, Some(b"last".to_vec()));
-        assert_eq!(ds.claim_key_package(a), Ok(vec![0]));
-        assert_eq!(ds.events(a, a1.cursor, 10).0, vec![]);
-        assert_eq!(ds.claim_key_package(a), Ok(vec![1]));
-        let (events, next) = ds.events(a, a1.cursor, 10);
+        ds.upload_key_packages(&a[0], packages, false);
+        ds.upload_key_packages(&a[0], vec![b"last".to_vec()], true);
+        ds.upload_key_packages(&a[1], vec![b"two".to_vec()], false);
+        let (claimed, missing) = ds.claim_key_packages(&[user_id.clone()]);
+        assert!(missing.is_empty());
+        assert_eq!(claimed.len(), 2);
+        let (claimed, _) = ds.claim_key_packages(&[user_id.clone()]);
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(ds.key_package_count(&a[0]), KEY_PACKAGES_LOW_THRESHOLD - 1);
+
+        // Revoking d2 drops its session and KeyPackages and notifies d1.
         assert_eq!(
-            events.iter().map(|e| e.event.clone()).collect::<Vec<_>>(),
-            vec![Event::KeyPackagesLow {
-                available: KEY_PACKAGES_LOW_THRESHOLD - 1
-            }]
+            ds.put_device_list(&user_id, 2, b"a2".to_vec(), active(&["d1"])),
+            Ok(true)
         );
-        assert_eq!(ds.events(a, next, 10).0, vec![]);
-        for _ in 0..KEY_PACKAGES_LOW_THRESHOLD - 1 {
-            ds.claim_key_package(a).unwrap();
-        }
-        assert_eq!(ds.key_package_count(a), 0);
-        assert_eq!(ds.claim_key_package(a), Ok(b"last".to_vec()));
-        assert_eq!(ds.claim_key_package(a), Ok(b"last".to_vec()));
+        assert_eq!(ds.authenticate(&token), Err(DeliveryError::Unauthorized));
+        assert_eq!(ds.create_session(&a[1]), Err(DeliveryError::Unauthorized));
+        assert!(ds.pull(&a[0]).iter().any(
+            |e| matches!(e, Event::DeviceListUpdated { device_list, .. } if device_list == b"a2")
+        ));
+        assert_eq!(ds.devices(&user_id).unwrap(), vec![a[0].clone()]);
+
+        ds.claim_handle(&user_id, "alice").unwrap();
+        assert_eq!(ds.find_handle("alice"), Some(user_id.clone()));
+        let other = user(&ds, "b", &["d1"])[0].user_id.clone();
+        assert!(ds.claim_handle(&other, "alice").is_err());
+        assert_eq!(ds.user(&user_id).unwrap().handle.as_deref(), Some("alice"));
+        ds.release_handle(&user_id, "alice");
+        assert_eq!(ds.find_handle("alice"), None);
+
+        ds.issue_challenge(b"c".to_vec());
+        assert!(ds.redeem_challenge(b"c"));
+        assert!(!ds.redeem_challenge(b"c"));
     }
 
     #[test]
-    fn events_history_and_blobs() {
+    fn blobs() {
         let ds = FakeDeliveryService::new();
-        let a = ds.register_device("alice", "Alice").device;
-        let b = ds.register_device("bob", "Bob");
-        let g = ds
-            .create_group_with(GroupKind::Direct, &a, std::slice::from_ref(&b.device))
-            .unwrap();
-        let info = ds.group(&g).unwrap();
-        assert_eq!(info.kind, GroupKind::Direct);
-        assert_eq!(info.members.len(), 2);
-        ds.post(&g, &a, msg("m1", 0, MessageKind::Application))
-            .unwrap();
-        ds.post(&g, &a, msg("m2", 0, MessageKind::Application))
-            .unwrap();
-        ds.remove_member(&g, &b.device).unwrap();
-
-        let (events, next) = ds.events(&b.device, b.cursor, 2);
-        assert!(
-            matches!(&events[0].event, Event::MemberAdded { device, .. } if *device == b.device)
-        );
-        assert!(matches!(&events[1].event, Event::Message(m) if m.seq == 1));
-        let (events, next) = ds.events(&b.device, next, 10);
-        assert!(matches!(&events[0].event, Event::Message(m) if m.seq == 2));
-        assert!(
-            matches!(&events[1].event, Event::MemberRemoved { device, .. } if *device == b.device)
-        );
-        assert_eq!(ds.events(&b.device, next, 10), (vec![], next));
-        // `pull` is independent of the cursor API.
-        assert_eq!(ds.pull(&b.device).len(), 2);
-
-        let history = ds.messages(&g, 1, 10).unwrap();
-        assert_eq!(history.iter().map(|m| m.seq).collect::<Vec<_>>(), vec![2]);
-        assert_eq!(history[0].client_id.as_str(), "m2");
-
         let blob = ds.upload_blob(b"hello".to_vec());
         assert_eq!(ds.download_blob(&blob, None), Ok(b"hello".to_vec()));
         assert_eq!(ds.download_blob(&blob, Some(1..3)), Ok(b"el".to_vec()));

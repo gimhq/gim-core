@@ -7,4 +7,5 @@ publish.workspace = true
 
 [dependencies]
 gim-common.workspace = true
+gim-identity.workspace = true
 thiserror.workspace = true

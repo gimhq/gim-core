@@ -40,10 +40,11 @@ pub fn to_event(delivered: Delivered) -> IncomingEvent {
 
 impl Device {
     pub fn new(user: &str) -> Self {
-        let me = DeviceRef::parse(user, "phone").unwrap();
+        let id = gim_test::TestIdentity::new(user);
+        let me = id.device.clone();
         let engine = MlsEngine::new();
         let store = MemoryStore::new();
-        engine.create_identity(&store, me.clone()).unwrap();
+        engine.create_identity_v2(&store, &id.device_key, id.root.public(), id.cert.clone()).unwrap();
         Self {
             client: BaseClient::new(me.clone()),
             me,
