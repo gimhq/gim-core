@@ -107,6 +107,34 @@ async fn reconnect_after_drop_resumes_from_cursor_without_duplicates() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stream_token_is_sent_only_in_the_authorization_header() {
+    let Setup { server, bob, .. } = setup(fast_settings()).await;
+    let mut states = bob.client.subscribe_connection_state();
+    bob.client.start_sync().unwrap();
+    reach_state(&mut states, Connected).await;
+    // Reconnect, so the upgrade request carries a cursor.
+    server.streams_served(1).await;
+    server.controls.kick.store(true, Ordering::SeqCst);
+    server.streams_served(2).await;
+
+    let token = bob.client.session().unwrap().token;
+    let requests = server.controls.stream_requests.lock().unwrap().clone();
+    assert!(requests.len() >= 2, "{requests:?}");
+    for (query, authorization) in &requests {
+        assert_eq!(
+            authorization.as_deref(),
+            Some(format!("Bearer {}", token.as_str()).as_str())
+        );
+        let query = query.as_deref().unwrap_or_default();
+        assert!(!query.contains("token"), "{query}");
+        assert!(!query.contains(token.as_str()), "{query}");
+    }
+    assert!(requests
+        .iter()
+        .any(|(query, _)| query.as_deref().is_some_and(|q| q.starts_with("cursor="))));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn falls_back_to_long_poll_without_stream() {
     let Setup {
         server,

@@ -827,6 +827,15 @@ async fn timeouts_and_connect_failures_are_network_errors() {
         http.group_info(&token(), &gid("g_1")).await,
         Err(TransportError::Network(_))
     ));
+
+    // The URL in the error keeps its path but loses its query.
+    match http.group_messages(&token(), &gid("g_1"), 7, 10).await {
+        Err(TransportError::Network(message)) => {
+            assert!(message.contains("/v2/groups/g_1"), "{message}");
+            assert!(!message.contains('?'), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 #[tokio::test]
