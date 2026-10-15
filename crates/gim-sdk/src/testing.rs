@@ -37,13 +37,29 @@ const MESSAGE_LIMIT_BYTES: usize = 262_144;
 /// A [`Transport`] over a shared [`FakeDeliveryService`]. Cloning shares the
 /// service, so several clients can talk to the same fake hub. It verifies
 /// DeviceLists and AuthResponses with gim-identity and reads epochs and
-/// membership changes from the MLS framing, as the hub does.
+/// membership changes from the MLS framing, as the hub does, including
+/// those of Proposals a Commit references.
 #[derive(Debug, Clone)]
 pub struct FakeTransport {
     service: Arc<FakeDeliveryService>,
     challenges: Arc<AtomicU64>,
     /// Validates uploaded KeyPackages against the stored DeviceLists.
     validator: Arc<MlsEngine>,
+    proposals: Arc<Mutex<HashMap<GroupId, Proposals>>>,
+}
+
+/// The Proposals sequenced in a group's current epoch, by `ProposalRef`.
+#[derive(Debug, Default)]
+struct Proposals {
+    epoch: u64,
+    by_ref: HashMap<Vec<u8>, SequencedProposal>,
+}
+
+#[derive(Debug, Clone)]
+struct SequencedProposal {
+    seq: u64,
+    added: Vec<DeviceRef>,
+    removed_leaves: Vec<u32>,
 }
 
 impl Default for FakeTransport {
@@ -66,6 +82,7 @@ impl FakeTransport {
             service,
             challenges: Arc::default(),
             validator: Arc::new(MlsEngine::with_device_list_lookup(Arc::new(stored_list))),
+            proposals: Arc::default(),
         }
     }
 
@@ -436,10 +453,40 @@ impl Transport for FakeTransport {
         commit: OutgoingCommit,
     ) -> Result<CommitAccepted, PostError> {
         let sender = self.device(token)?;
-        let info = inspect_handshake(&commit.mls_message).map_err(invalid)?;
+        let mut info = inspect_handshake(&commit.mls_message).map_err(invalid)?;
         if info.group_id != group_id.as_str().as_bytes() {
             return Err(invalid("the message is for another group").into());
         }
+        let epoch = self.service.epoch(group_id)?;
+        let mut proposals = self.proposals.lock().unwrap_or_else(|e| e.into_inner());
+        let pending = proposals.entry(group_id.clone()).or_default();
+        if pending.epoch != epoch {
+            *pending = Proposals {
+                epoch,
+                by_ref: HashMap::new(),
+            };
+        }
+        let proposal_ref = info.proposal_ref.clone();
+        if let Some(sequenced) = proposal_ref.as_ref().and_then(|r| pending.by_ref.get(r)) {
+            return Ok(CommitAccepted {
+                seq: sequenced.seq,
+                epoch,
+                duplicate: true,
+            });
+        }
+        // A Commit of the current epoch takes the membership changes of the
+        // Proposals it references; others are duplicates or stale.
+        if info.kind == HandshakeKind::Commit && info.epoch == epoch {
+            for reference in &info.references {
+                let Some(sequenced) = pending.by_ref.get(reference) else {
+                    return Err(invalid("unknown proposal reference").into());
+                };
+                info.added.extend(sequenced.added.iter().cloned());
+                info.removed_leaves
+                    .extend(sequenced.removed_leaves.iter().copied());
+            }
+        }
+        let (added, removed_leaves) = (info.added.clone(), info.removed_leaves.clone());
         let result = self.service.submit_commit(
             group_id,
             &sender,
@@ -454,6 +501,16 @@ impl Transport for FakeTransport {
                 welcome_recipients: commit.welcome_recipients,
             },
         )?;
+        if let (Some(proposal_ref), false) = (proposal_ref, result.duplicate) {
+            pending.by_ref.insert(
+                proposal_ref,
+                SequencedProposal {
+                    seq: result.seq,
+                    added,
+                    removed_leaves,
+                },
+            );
+        }
         Ok(CommitAccepted {
             seq: result.seq,
             epoch: result.epoch,

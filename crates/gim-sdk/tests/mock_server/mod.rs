@@ -19,6 +19,7 @@ use axum::{Json, Router};
 use gim_base::model::{ChatKind, GroupMessage, MessageContent, StateChange};
 use gim_base::{MemoryStore, StateReader};
 use gim_common::{ClientId, DeviceRef, GroupId, MessageId, UserId};
+use gim_crypto::{inspect_handshake, HandshakeKind};
 use gim_proto::envelope::Content;
 use gim_proto::v2::{self, EventData};
 use gim_sdk::testing::{FakeTransport, MemorySecretStorage};
@@ -274,7 +275,14 @@ fn message_dto(m: Delivered) -> v2::Message {
         sender_user_id: m.sender.user_id.to_string(),
         sender_device_id: m.sender.device_id.to_string(),
         client_id: m.client_id.to_string(),
+        message_id: Some(format!("{}#{}", m.group_id, m.seq)),
         kind: match m.kind {
+            gim_test::MessageKind::Commit
+                if inspect_handshake(&m.payload)
+                    .is_ok_and(|info| info.kind == HandshakeKind::Proposal) =>
+            {
+                v2::MessageKind::Proposal
+            }
             gim_test::MessageKind::Commit => v2::MessageKind::Commit,
             gim_test::MessageKind::Application => v2::MessageKind::Application,
         },
@@ -927,6 +935,8 @@ pub fn fast_settings() -> SyncSettings {
         backoff_max: Duration::from_millis(200),
         long_poll_wait: Duration::from_secs(1),
         stream_retry: Duration::from_secs(60),
+        proposal_commit_delay_min: Duration::from_millis(300),
+        proposal_commit_delay_max: Duration::from_millis(600),
     }
 }
 

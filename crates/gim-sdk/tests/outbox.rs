@@ -309,39 +309,6 @@ async fn commit_of_unknown_outcome_stays_pending_until_the_next_sync() {
     assert_eq!(bob.messages(&g).len(), 1);
 }
 
-#[tokio::test]
-async fn self_departed_member_is_removed_by_the_lowest_leaf() {
-    let transport = FlakyTransport::new();
-    let alice = Device::register(&transport, "alice").await;
-    let bob = Device::register(&transport, "bob").await;
-    let carol = Device::register(&transport, "carol").await;
-    let g = alice
-        .client
-        .create_group_chat(None, &[bob.user_id(), carol.user_id()])
-        .await
-        .unwrap();
-    bob.sync().await;
-    carol.sync().await;
-    let service = transport.inner.service();
-    assert_eq!(service.epoch(&g), Ok(1));
-
-    carol.client.leave(&g).await.unwrap();
-    // Bob is not the lowest remaining leaf: he does nothing.
-    bob.sync().await;
-    assert_eq!(service.epoch(&g), Ok(1));
-    // Alice (leaf 0) commits the removal.
-    alice.sync().await;
-    assert_eq!(service.epoch(&g), Ok(2));
-    bob.sync().await;
-    for device in [&alice, &bob] {
-        let members = device.store.chat(&g).unwrap().unwrap().members;
-        assert_eq!(members.len(), 2);
-        assert!(members.iter().all(|m| m.device != carol.device()));
-    }
-    // Nothing more to do.
-    alice.sync().await;
-    assert_eq!(service.epoch(&g), Ok(2));
-}
 
 #[tokio::test]
 async fn typing_is_sent_directly_and_rate_limited() {
@@ -409,4 +376,42 @@ async fn background_sender_flushes_queued_receipts() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("delivered receipt not sent");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_post_that_failed_in_a_send_is_retried_by_the_sender_soon() {
+    let transport = FlakyTransport::new();
+    let alice = Device::register(&transport, "alice").await;
+    let bob = Device::register(&transport, "bob").await;
+    let g = alice
+        .client
+        .create_direct_chat(&bob.user_id())
+        .await
+        .unwrap();
+    // The sender task is idle (nothing queued) when the send fails.
+    let _sender = alice.client.start_outbox_sender();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    transport
+        .faults
+        .fail_posts(MessageKind::Application, true, 1);
+    let id = alice.client.send_text(&g, "lost reply", None).await.unwrap();
+    assert_eq!(alice.message(&id).send_state, Some(SendState::Pending));
+    // Re-posted after the entry's ~1 s backoff, not the sender's idle wait.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while alice.message(&id).send_state != Some(SendState::Sent) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "not re-posted in time"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let posted = server_messages(&transport, &g, &alice.device());
+    assert_eq!(
+        posted
+            .iter()
+            .filter(|m| m.client_id.as_str() == id.as_str())
+            .count(),
+        1,
+        "the hub kept one message for the client_id"
+    );
 }

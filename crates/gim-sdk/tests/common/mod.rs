@@ -20,7 +20,7 @@ use gim_sdk::transport::{
     KeyPackageCount, OutgoingCommit, PostError, SessionError, SessionToken, Transport,
     TransportError, TransportResult, UserRecord,
 };
-use gim_sdk::{Client, ClientBuilder, SecretStorage};
+use gim_sdk::{Client, ClientBuilder, SecretStorage, SyncSettings};
 use tempfile::TempDir;
 
 /// A post fault, applied to the next commit submission (`Commit`) or
@@ -322,8 +322,26 @@ pub struct Device {
     pub data_dir: TempDir,
 }
 
+/// Default timing, but members not chosen to commit a pending Proposal
+/// wait only 300-600 ms.
+pub fn quick_proposals() -> SyncSettings {
+    SyncSettings {
+        proposal_commit_delay_min: Duration::from_millis(300),
+        proposal_commit_delay_max: Duration::from_millis(600),
+        ..SyncSettings::default()
+    }
+}
+
 impl Device {
     pub async fn register(transport: &FlakyTransport, handle: &str) -> Self {
+        Self::register_with(transport, handle, SyncSettings::default()).await
+    }
+
+    pub async fn register_with(
+        transport: &FlakyTransport,
+        handle: &str,
+        settings: SyncSettings,
+    ) -> Self {
         let store = Arc::new(MemoryStore::new());
         let data_dir = tempfile::tempdir().unwrap();
         let client = ClientBuilder::new(
@@ -332,6 +350,7 @@ impl Device {
             Arc::new(MemorySecretStorage::new()) as Arc<dyn SecretStorage>,
         )
         .data_dir(data_dir.path())
+        .sync_settings(settings)
         .build()
         .unwrap();
         client.register(handle, handle).await.unwrap();
@@ -361,6 +380,29 @@ impl Device {
     pub fn messages(&self, group_id: &GroupId) -> Vec<Message> {
         self.store.messages(group_id, None, usize::MAX).unwrap()
     }
+}
+
+/// The device the SDK picks to commit pending Proposals at once: the
+/// lowest device id.
+pub fn lowest<'a>(devices: [&'a Device; 2]) -> (&'a Device, &'a Device) {
+    let [a, b] = devices;
+    if a.device().device_id.as_str() < b.device().device_id.as_str() {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+/// Commits (and standalone Proposals) the hub sequenced in the group.
+pub fn server_handshakes(transport: &FlakyTransport, group_id: &GroupId) -> usize {
+    transport
+        .inner
+        .service()
+        .messages(group_id, 0, usize::MAX)
+        .unwrap()
+        .into_iter()
+        .filter(|m| m.kind == gim_test::MessageKind::Commit)
+        .count()
 }
 
 /// Application messages `sender` posted to the group, as the hub holds
