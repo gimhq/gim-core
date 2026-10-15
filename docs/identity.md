@@ -2,7 +2,8 @@
 
 Normative specification of the identity wire formats implemented by
 `crates/gim-identity`. Test vectors: `crates/gim-identity/tests/vectors/identity.json`,
-`hosting.json` and `auth.json` in the same directory.
+`hosting.json` and `auth.json` in the same directory; negative vectors in
+`negative.json` (see *Negative vectors*).
 
 The key words MUST, MUST NOT and SHOULD are to be interpreted as in RFC 2119.
 
@@ -75,8 +76,51 @@ Two signatures are not carried in the signed form but use the same
 | `HostingEntry.hub_sig` | hub root key | `gim/hosting-entry/v1` | `HostingEntryTbs` |
 | `AuthResponse.sig` | device signing key | `gim/auth-response/v1` | `AuthResponseTbs` |
 
+A decoder MUST also reject inputs that are not deterministic CBOR (see
+*Encoding*) before trusting any decoded value; such inputs are reported as
+`non_canonical_cbor`, distinct from otherwise malformed input
+(`decode_error`).
+
 Validity times are Unix time in milliseconds. An end time (`not_after`,
 `expires_at`) is exclusive: an item is expired when `now >= end`.
+
+## Verification order
+
+Every signed form (`SignedDeviceCert`, `SignedDeviceList`,
+`SignedHubRuntimeCert`, `SignedHostingRecord`, each `HostingEntry` and
+`AuthResponse`) MUST be verified in this order, so no field of an
+unauthenticated body influences the result beyond selecting the verifying
+key:
+
+1. **Envelope.** Strict-decode the outer form (`[tbs, sig]`, or the
+   `AuthResponse` array) as deterministic CBOR.
+2. **Verifying key.** Take the key from outside the body when the verifier
+   has it (device cert: the expected root key; runtime cert: the expected
+   hub root key; hosting entry: the entry's `hub_root_pubkey`; auth
+   response: the certified key of a verified device list). When the key is
+   embedded in the body (device list, hosting record), decode `tbs` only far
+   enough to read it (and, for the hosting record, the claimed `user_id`) and
+   check that it derives the expected or claimed `user_id` *before* using it.
+3. **Signature.** Verify `sig` over the received `tbs` with the form's
+   `context`.
+4. **Body.** Only then strict-decode and validate the rest of the body:
+   version, element count, ids, lists, then validity times.
+
+The first failing step determines the error. Per form:
+
+| Form | Step 2 | Step 4 |
+|---|---|---|
+| `SignedDeviceCert` | expected root key | version, `user_id`, `device_id` |
+| `SignedDeviceList` | `root_pubkey` (element 2) derives the expected `user_id` | version, body `user_id`, certs, revoked, duplicates |
+| `SignedHubRuntimeCert` | expected hub root key | version, `hub_root_pubkey` equals it, `runtime_pubkey`, times |
+| `SignedHostingRecord` | `user_root_pubkey` (element 2) derives the claimed `user_id` (element 1) | version, hub count, entries (each step 3 then uniqueness), `expires_at` |
+| `HostingEntry` | its `hub_root_pubkey` | uniqueness within the record |
+| `AuthResponse` | device list verifies for `user_id`; `device_id` not revoked and certified | challenge version, `audience`, `expires_at` |
+
+The embedded key position (element 2) is read before the version check;
+it is the same for every version of these bodies. A body signed by the right
+key with a wrong context, or by another key, fails at step 3 as
+`bad_signature`.
 
 ## DeviceCert
 
@@ -117,12 +161,12 @@ SignedDeviceList = [ tbs: bstr (DeviceListBody), sig: bstr .size 64 ]
 
 Verification of a `SignedDeviceList` for an expected `user_id`:
 
-1. `tbs` decodes as a `DeviceListBody` with version `1` and exactly six
-   elements; `root_pubkey` is a valid public key.
-2. The user id derived from `root_pubkey` equals both the expected `user_id`
-   and the body's `user_id`.
-3. `sig` is a valid signature by `root_pubkey` over
+1. `tbs` is deterministic CBOR; its element 2 (`root_pubkey`) is a valid
+   public key whose derived user id equals the expected `user_id`.
+2. `sig` is a valid signature by `root_pubkey` over
    `"gim/device-list/v1" || 0x00 || tbs`.
+3. `tbs` is a `DeviceListBody` with version `1` and exactly six elements;
+   the body's `user_id` equals the expected `user_id`.
 4. Every element of `certs` is a `SignedDeviceCert` that verifies under
    `root_pubkey` (and therefore carries the same `user_id`).
 5. Every element of `revoked` is a syntactically valid device id.
@@ -133,10 +177,7 @@ id is in `revoked`.
 
 ### Ordering and updates
 
-- A list `A` supersedes a list `B` of the same user iff `A.seq > B.seq`.
-  Two lists of the same user with equal `seq` and different body bytes are a
-  conflict and MUST be reported as an error. Comparing lists of different
-  users is an error.
+- Replacing a stored list follows *Update and seq rules*.
 - Adding a device appends its cert to `certs` and increments `seq` by one; a
   device that is already certified or revoked cannot be added.
 - Revoking a certified device removes its cert from `certs`, appends its id
@@ -162,10 +203,10 @@ records.
 Verification of a `SignedHubRuntimeCert` against an expected hub root public
 key at time `now`:
 
-1. `tbs` decodes as a `HubRuntimeCertBody` with version `1` and exactly five
-   elements; `hub_root_pubkey` equals the expected key.
-2. `sig` is a valid signature by `hub_root_pubkey` over
+1. `sig` is a valid signature by the expected hub root key over
    `"gim/hub-runtime-cert/v1" || 0x00 || tbs`.
+2. `tbs` decodes as a `HubRuntimeCertBody` with version `1` and exactly five
+   elements; `hub_root_pubkey` equals the expected key.
 3. `runtime_pubkey` is a valid public key.
 4. `not_before <= now < not_after`.
 
@@ -216,17 +257,18 @@ itself and a hub entry cannot be moved to another user's record.
 
 Verification of a `SignedHostingRecord` at time `now`:
 
-1. `tbs` decodes as a `HostingRecordBody` with version `1` and exactly six
-   elements; `user_root_pubkey` is a valid public key.
-2. `user_id` equals the user id derived from `user_root_pubkey`.
-3. `sig` is a valid signature by `user_root_pubkey` over
+1. `tbs` is deterministic CBOR; its element 1 (`user_id`) is a text string
+   and its element 2 (`user_root_pubkey`) a valid public key whose derived
+   user id equals that `user_id`.
+2. `sig` is a valid signature by `user_root_pubkey` over
    `"gim/hosting-record/v1" || 0x00 || tbs`.
+3. `tbs` is a `HostingRecordBody` with version `1` and exactly six elements.
 4. `hubs` has 1 to 16 entries, each exactly three elements with a valid
-   `hub_root_pubkey` and `priority <= 255`; no `hub_root_pubkey` appears
-   twice.
-5. Every `hub_sig` is a valid signature by its `hub_root_pubkey` over
-   `"gim/hosting-entry/v1" || 0x00 || HostingEntryTbs` built from the
-   record's `user_id`, that `hub_root_pubkey` and that `priority`.
+   `hub_root_pubkey` and `priority <= 255`.
+5. For each entry in order: its `hub_sig` is a valid signature by its
+   `hub_root_pubkey` over `"gim/hosting-entry/v1" || 0x00 || HostingEntryTbs`
+   built from the record's `user_id`, that `hub_root_pubkey` and that
+   `priority`; then its `hub_root_pubkey` has not appeared before.
 6. `now < expires_at`.
 
 A verifier that looked the record up by user id MUST also check that the
@@ -234,10 +276,7 @@ record's `user_id` is the one it looked up.
 
 ### Ordering and primary hub
 
-- A record `A` supersedes a record `B` of the same user iff `A.seq > B.seq`.
-  Two records of the same user with equal `seq` and different body bytes are
-  a conflict and MUST be reported as an error. Comparing records of different
-  users is an error.
+- Replacing a stored record follows *Update and seq rules*.
 - The primary hub is the entry with the lowest `priority`; ties are broken
   by the lexicographically smallest `hub_id`.
 
@@ -276,15 +315,98 @@ Verification of an `AuthResponse` by the hub `expected_audience` at time
 
 1. The response decodes with version `1` and exactly five elements;
    `user_id` and `device_id` are syntactically valid ids.
-2. `challenge` decodes as an `AuthChallenge` with version `1`; its
+2. The device list verifies for `user_id` (see *DeviceList*).
+3. `device_id` is not revoked and is certified in the list.
+4. `sig` is a valid signature by the certified `device_sig_pubkey` over
+   `"gim/auth-response/v1" || 0x00 || AuthResponseTbs`.
+5. `challenge` decodes as an `AuthChallenge` with version `1`; its
    `audience` equals `expected_audience` and `now < expires_at`. The hub
    checks that it issued this challenge and that the nonce is unused.
-3. The device list verifies for `user_id` (see *DeviceList*).
-4. `device_id` is not revoked and is certified in the list.
-5. `sig` is a valid signature by the certified `device_sig_pubkey` over
-   `"gim/auth-response/v1" || 0x00 || AuthResponseTbs`.
 
 On success the hub has authenticated the device `(user_id, device_id)`.
+
+## Update and seq rules
+
+A `SignedDeviceList` or `SignedHostingRecord` is mutable state keyed by
+`user_id`. A verified received item `R` replaces a verified stored item `S`
+only by these rules (implemented by `DeviceList::supersedes` and
+`UserHostingRecord::supersedes`, called as `R.supersedes(S)`):
+
+| Condition | Result | `supersedes` |
+|---|---|---|
+| `R.user_id != S.user_id` | reject (`user_id_mismatch`) | `Err(UserIdMismatch)` |
+| `R.seq > S.seq` | replace `S` with `R` | `Ok(true)` |
+| `R.seq == S.seq`, identical body bytes | unchanged, idempotent no-op | `Ok(false)` |
+| `R.seq == S.seq`, different body bytes | reject (`seq_conflict`) | `Err(SeqConflict)` |
+| `R.seq < S.seq` | reject as stale (`stale_seq`) | `Err(StaleSeq)` |
+
+"Identical" compares the signed body (`tbs`) bytes. Both items have passed
+verification under the same root key, so two encodings with the same body
+authorize the same content; a store keeps the bytes it already has. `seq`
+need not increase by exactly one between stored versions.
+
+The hub MUST enforce these rules when a client uploads a list or record,
+and clients MUST enforce them on every fetch, against the newest item they
+have stored for that user, so neither side can be rolled back or forked.
+An expired hosting record fails verification before these rules apply.
+
+## Negative vectors
+
+`crates/gim-identity/tests/vectors/negative.json` holds shared failure
+cases for every implementation:
+
+```
+{ "description": ..., "cases": [ Case, ... ] }
+Case = {
+  "name": string,               ; unique
+  "kind": "device_cert" | "device_list" | "runtime_cert"
+        | "hosting_record" | "auth_response",
+  "input_hex": string,          ; the received bytes, lowercase hex
+  "context": { ... },           ; verifier inputs, per kind below
+  "expected_error": string,     ; a code from the table below
+}
+```
+
+| `kind` | `input_hex` | `context` | Verification |
+|---|---|---|---|
+| `device_cert` | `SignedDeviceCert` | `root_pubkey` (hex) | verify against `root_pubkey` |
+| `device_list` | `SignedDeviceList` | `user_id`, optional `stored` (hex `SignedDeviceList`) | verify for `user_id`; with `stored`, verify it too and apply *Update and seq rules* |
+| `runtime_cert` | `SignedHubRuntimeCert` | `hub_root_pubkey` (hex), `now` | verify against `hub_root_pubkey` at `now` |
+| `hosting_record` | `SignedHostingRecord` | `now`, optional `user_id`, optional `stored` | verify at `now`; with `user_id`, the record's `user_id` must equal it; with `stored`, verify it at `now` and apply *Update and seq rules* |
+| `auth_response` | `AuthResponse` | `audience`, `now`, `device_list` (hex `SignedDeviceList`) | verify as the hub `audience` at `now` |
+
+Every case MUST fail, and the first failure in *Verification order* MUST map
+to `expected_error`. Stable error codes (`IdentityError::code`):
+
+| Code | Meaning |
+|---|---|
+| `decode_error` | malformed input: not CBOR, wrong type, wrong element count or size |
+| `non_canonical_cbor` | valid CBOR that is not the deterministic encoding (non-shortest head, indefinite length, trailing bytes) |
+| `unsupported_version` | body version other than `1` |
+| `invalid_key` | public key does not decompress or is small-order |
+| `invalid_user_id`, `invalid_device_id` | id syntax |
+| `bad_signature` | signature does not verify (wrong key, wrong context, tampered bytes) |
+| `bad_hub_signature` | a `HostingEntry.hub_sig` does not verify |
+| `user_id_mismatch` | a user id does not match the key, the expected user or the stored item |
+| `device_id_mismatch` | cert `device_id` does not match its key |
+| `hub_key_mismatch` | runtime cert names another hub root key than the signer |
+| `root_key_mismatch` | signing with a key other than the item's root key |
+| `duplicate_device` | a device id appears twice in a list |
+| `duplicate_hub` | a hub appears twice in a hosting record |
+| `hub_count` | hosting record without 1..=16 hubs |
+| `device_revoked` | device is revoked in the list |
+| `unknown_device` | device is not certified in the list |
+| `expired` | `now >= not_after` / `expires_at` |
+| `not_yet_valid` | `now < not_before` |
+| `audience_mismatch` | challenge addressed to another hub |
+| `seq_conflict` | same `seq`, different body |
+| `stale_seq` | lower `seq` than the stored item |
+| `seq_overflow` | `seq` cannot be incremented |
+| `random` | the OS random number generator failed |
+
+The file is generated by `crates/gim-identity/tests/negative.rs`; after an
+intentional change, regenerate it with
+`cargo test -p gim-identity --test negative -- --ignored regenerate`.
 
 ## MLS credential
 

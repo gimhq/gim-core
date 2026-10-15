@@ -92,15 +92,19 @@ impl DeviceList {
         self.revoked.contains(device_id)
     }
 
-    /// Whether `self` replaces `other`: same user and strictly higher seq.
-    /// Two different lists with the same seq are a conflict.
+    /// Whether `self` (received) replaces `other` (stored), per the update
+    /// rules of `docs/identity.md`: `Ok(true)` for the same user with a
+    /// strictly higher seq; `Ok(false)` (unchanged, a no-op) for the same seq
+    /// and identical body bytes; [`IdentityError::SeqConflict`] for the same
+    /// seq and different bytes; [`IdentityError::StaleSeq`] for a lower seq;
+    /// [`IdentityError::UserIdMismatch`] for another user.
     pub fn supersedes(&self, other: &DeviceList) -> Result<bool, IdentityError> {
         if self.user_id != other.user_id {
             return Err(IdentityError::UserIdMismatch);
         }
         match self.seq.cmp(&other.seq) {
             Ordering::Greater => Ok(true),
-            Ordering::Less => Ok(false),
+            Ordering::Less => Err(IdentityError::StaleSeq(self.seq)),
             Ordering::Equal if self.encode() == other.encode() => Ok(false),
             Ordering::Equal => Err(IdentityError::SeqConflict(self.seq)),
         }
@@ -201,14 +205,15 @@ impl SignedDeviceList {
         Ok(Self { tbs, sig })
     }
 
-    /// Verifies the list of `user_id`: the embedded root key must derive
-    /// `user_id`, the signature must cover the received `tbs`, and the
-    /// content must pass the [`DeviceList::new`] checks.
+    /// Verifies the list of `user_id` in the documented order: extract only
+    /// the embedded root key and check that it derives `user_id`, check the
+    /// signature over the received `tbs`, then validate the body (version,
+    /// body `user_id`, [`DeviceList::new`] checks).
     pub fn verify(&self, user_id: &UserId) -> Result<DeviceList, IdentityError> {
-        let [_, list_user_id, root_public_key, seq, certs, revoked] = cbor::decode_body(&self.tbs)?;
-        let root_public_key = RootPublicKey::from_bytes(&cbor::key(root_public_key)?)?;
+        let body = cbor::decode(&self.tbs)?;
+        let root_public_key = RootPublicKey::from_bytes(&cbor::key(cbor::item(&body, 2)?)?)?;
         let derived = root_public_key.user_id();
-        if &derived != user_id || cbor::text(list_user_id)? != derived.as_str() {
+        if &derived != user_id {
             return Err(IdentityError::UserIdMismatch);
         }
         verify(
@@ -217,6 +222,10 @@ impl SignedDeviceList {
             &self.tbs,
             &self.sig,
         )?;
+        let [_, list_user_id, _, seq, certs, revoked] = cbor::body(body)?;
+        if cbor::text(list_user_id)? != derived.as_str() {
+            return Err(IdentityError::UserIdMismatch);
+        }
         let seq = cbor::uint(seq)?;
         let certs = cbor::list(certs)?
             .into_iter()

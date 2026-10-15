@@ -20,7 +20,7 @@ pub(crate) fn encode(value: &Value) -> Vec<u8> {
 pub(crate) fn decode(bytes: &[u8]) -> Result<Value, IdentityError> {
     let value: Value = ciborium::from_reader(bytes).map_err(|e| decode_error(e.to_string()))?;
     if encode(&value) != bytes {
-        return Err(decode_error("not deterministic CBOR"));
+        return Err(IdentityError::NonCanonical);
     }
     Ok(value)
 }
@@ -44,7 +44,12 @@ pub(crate) fn decode_signed(bytes: &[u8]) -> Result<(Vec<u8>, [u8; 64]), Identit
 /// Decodes a signed body: an array of exactly `N` items whose first item is
 /// [`FORMAT_VERSION`].
 pub(crate) fn decode_body<const N: usize>(tbs: &[u8]) -> Result<[Value; N], IdentityError> {
-    let Value::Array(items) = decode(tbs)? else {
+    body(decode(tbs)?)
+}
+
+/// [`decode_body`] for an already decoded item.
+pub(crate) fn body<const N: usize>(value: Value) -> Result<[Value; N], IdentityError> {
+    let Value::Array(items) = value else {
         return Err(decode_error("body is not an array"));
     };
     let version = uint(
@@ -66,6 +71,18 @@ pub(crate) fn array<const N: usize>(value: Value) -> Result<[Value; N], Identity
     items
         .try_into()
         .map_err(|_| decode_error(format!("expected an array of {N} items")))
+}
+
+/// Element `index` of a decoded array, without checking the version or the
+/// length; used to extract an embedded key before the signature is checked.
+pub(crate) fn item(value: &Value, index: usize) -> Result<Value, IdentityError> {
+    match value {
+        Value::Array(items) => items
+            .get(index)
+            .cloned()
+            .ok_or_else(|| decode_error("array too short")),
+        _ => Err(decode_error("body is not an array")),
+    }
 }
 
 pub(crate) fn list(value: Value) -> Result<Vec<Value>, IdentityError> {
@@ -108,12 +125,19 @@ mod tests {
 
     #[test]
     fn rejects_non_deterministic_encodings() {
+        let non_canonical =
+            |bytes: &[u8]| matches!(decode(bytes), Err(IdentityError::NonCanonical));
         // uint 1 with a one-byte argument.
-        assert!(decode(&[0x18, 0x01]).is_err());
+        assert!(non_canonical(&[0x18, 0x01]));
         // Indefinite-length array [1].
-        assert!(decode(&[0x9f, 0x01, 0xff]).is_err());
+        assert!(non_canonical(&[0x9f, 0x01, 0xff]));
         // Trailing byte.
-        assert!(decode(&[0x01, 0x01]).is_err());
+        assert!(non_canonical(&[0x01, 0x01]));
+        // Truncated input is malformed, not non-canonical.
+        assert!(matches!(
+            decode(&[0x82, 0x01]),
+            Err(IdentityError::Decode(_))
+        ));
         assert_eq!(decode(&[0x82, 0x01, 0x40]).unwrap(), {
             Value::Array(vec![Value::Integer(1.into()), Value::Bytes(vec![])])
         });
