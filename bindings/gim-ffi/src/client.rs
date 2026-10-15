@@ -5,13 +5,13 @@ use std::sync::{Arc, Mutex};
 
 use futures_util::StreamExt;
 use gim_base::model::{ChatKind as BaseChatKind, Membership, MessageContent as BaseContent};
-use gim_base::StateReader;
+use gim_base::{BaseError, StateReader};
 use gim_common::{GroupId, MessageId, UserId};
 use gim_sdk::transport::Transport;
 use gim_sdk::{
     Client, ClientBuilder, HttpTransport, OutboxSender, OUTGOING_DIR, SESSION_SECRET_KEY,
 };
-use gim_sqlite::{SqliteStore, DATABASE_FILE_NAME};
+use gim_sqlite::{DbKey, SqliteStore, DATABASE_FILE_NAME};
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 use url::Url;
@@ -176,15 +176,17 @@ impl GimClient {
                 reason: format!("data_dir must be absolute: {}", data_dir.display()),
             });
         }
+        let transport = transport(&server_url)?;
+        let secrets = Arc::new(HookSecrets(hooks.clone()));
         let dir = data_dir.clone();
-        let store = tokio::task::spawn_blocking(move || SqliteStore::open(dir)).await??;
-        let sdk = ClientBuilder::new(
-            Arc::new(store),
-            transport(&server_url)?,
-            Arc::new(HookSecrets(hooks.clone())),
-        )
-        .data_dir(&data_dir)
-        .build()?;
+        let builder = tokio::task::spawn_blocking(move || {
+            ClientBuilder::open(transport, secrets, |key, new_key| {
+                SqliteStore::open_or_reset(&dir, &DbKey::new(*key), new_key)
+                    .map_err(BaseError::from)
+            })
+        })
+        .await??;
+        let sdk = builder.data_dir(&data_dir).build()?;
         sdk.restore_session().await?;
         let shared = Arc::new(Shared {
             network_reachable: AtomicBool::new(hooks.is_network_reachable()),
@@ -373,6 +375,8 @@ impl GimClient {
         self.signed_out.store(true, Ordering::SeqCst);
         self.hooks
             .secure_store_delete(SESSION_SECRET_KEY.to_string());
+        self.hooks
+            .secure_store_delete(ClientBuilder::<SqliteStore>::DB_KEY_SECRET_KEY.to_string());
         let data_dir = self.data_dir.clone();
         tokio::task::spawn_blocking(move || {
             for suffix in ["", "-wal", "-shm", "-journal"] {

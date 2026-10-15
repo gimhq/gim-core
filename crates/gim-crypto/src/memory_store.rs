@@ -11,7 +11,7 @@ use openmls_memory_storage::MemoryStorage;
 
 use crate::{CryptoStore, StoredIdentity};
 
-const EXPORT_FORMAT_VERSION: u8 = 1;
+const EXPORT_FORMAT_VERSION: u8 = 2;
 
 #[derive(Debug, thiserror::Error)]
 #[error("memory store: {0}")]
@@ -44,6 +44,13 @@ impl MemoryCryptoStore {
                 put_bytes(&mut out, identity.device.device_id.as_str().as_bytes())?;
                 put_bytes(&mut out, &identity.signature_private_key)?;
                 put_bytes(&mut out, &identity.signature_public_key)?;
+                match &identity.credential {
+                    None => out.push(0),
+                    Some(credential) => {
+                        out.push(1);
+                        put_bytes(&mut out, credential)?;
+                    }
+                }
             }
         }
         let group_ids = read(&self.group_ids)?;
@@ -74,6 +81,11 @@ impl MemoryCryptoStore {
                     .map_err(|e| corrupt(e.to_string()))?,
                 signature_private_key: reader.bytes()?.to_vec(),
                 signature_public_key: reader.bytes()?.to_vec(),
+                credential: match reader.take(1)?[0] {
+                    0 => None,
+                    1 => Some(reader.bytes()?.to_vec()),
+                    _ => return Err(corrupt("bad credential flag")),
+                },
             }),
             _ => return Err(corrupt("bad identity flag")),
         };
@@ -181,12 +193,17 @@ mod tests {
     use super::*;
 
     fn sample() -> MemoryCryptoStore {
+        sample_with(Some(vec![3; 40]))
+    }
+
+    fn sample_with(credential: Option<Vec<u8>>) -> MemoryCryptoStore {
         let store = MemoryCryptoStore::new();
         store
             .save_identity(&StoredIdentity {
                 device: DeviceRef::parse("alice", "phone").unwrap(),
                 signature_private_key: vec![1; 32],
                 signature_public_key: vec![2; 32],
+                credential,
             })
             .unwrap();
         store.add_group_id(&GroupId::new("g1").unwrap()).unwrap();
@@ -218,6 +235,15 @@ mod tests {
             *store.mls_storage().values.read().unwrap()
         );
         assert_eq!(imported.export().unwrap(), bytes);
+    }
+
+    #[test]
+    fn legacy_identity_round_trip() {
+        let store = sample_with(None);
+        let imported = MemoryCryptoStore::import(&store.export().unwrap()).unwrap();
+        let identity = imported.load_identity().unwrap().unwrap();
+        assert_eq!(identity.credential, None);
+        assert_eq!(Some(identity), store.load_identity().unwrap());
     }
 
     #[test]
