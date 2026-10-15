@@ -102,7 +102,8 @@ impl<S: StateStore + 'static> Client<S> {
     /// [`SyncSettings`]); [`Client::network_reachable`] retries at once.
     /// Expired tokens are renewed by signing in again; the loop stops by
     /// itself only when the hub rejects the device's sign-in; see
-    /// [`Client::stop_sync`].
+    /// [`Client::stop_sync`]. Alongside, the user's hosting record is
+    /// renewed when due: at start, daily and on `hosting_record.expiring`.
     pub fn start_sync(&self) -> Result<()> {
         let session = self.require_session()?;
         let mut task = self
@@ -193,7 +194,15 @@ impl<S: StateStore + 'static> Client<S> {
         }
     }
 
+    /// The sync loop, with the hosting record renewal alongside.
     async fn sync_loop(&self, session: Session) -> Result<()> {
+        tokio::select! {
+            result = self.follow_events(session) => result,
+            never = self.maintain_hosting_record() => match never {},
+        }
+    }
+
+    async fn follow_events(&self, session: Session) -> Result<()> {
         let settings = self.inner.sync_settings;
         let mut backoff = Backoff::new(settings.backoff_min, settings.backoff_max);
         let mut stream_retry_at = None;
@@ -630,6 +639,16 @@ impl<S: StateStore + 'static> Client<S> {
                     }
                     Err(err) => return Err(err),
                 },
+                HubEvent::HostingRecordExpiring {
+                    user_id,
+                    expires_at_ms,
+                    seq,
+                } => {
+                    if user_id == session.device.user_id {
+                        tracing::info!(seq, expires_at_ms, "hosting record expiring; renewing");
+                        self.inner.hosting_wake.notify_one();
+                    }
+                }
             }
         }
         self.record_revoked(session, revoked).await?;

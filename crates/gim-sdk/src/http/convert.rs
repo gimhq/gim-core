@@ -137,6 +137,15 @@ pub(super) fn event(event: v2::Event) -> Vec<HubEvent> {
                 device_list: list.device_list,
             }]
         }),
+        v2::EventData::HostingRecordExpiring(expiring) => {
+            user_id(&expiring.user_id).map(|user_id| {
+                vec![HubEvent::HostingRecordExpiring {
+                    user_id,
+                    expires_at_ms: u64::try_from(expiring.expires_at).unwrap_or(0),
+                    seq: expiring.seq,
+                }]
+            })
+        }
         v2::EventData::Unknown { event_type, .. } => {
             tracing::debug!(%event_type, cursor, "skipping unknown event");
             Ok(vec![])

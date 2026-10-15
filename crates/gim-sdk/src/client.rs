@@ -215,6 +215,8 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
                 resolved_users: Default::default(),
                 link_pending: AtomicBool::new(false),
                 proposal_timers: Default::default(),
+                hosting_lock: Mutex::new(()),
+                hosting_wake: Notify::new(),
             }),
         })
     }
@@ -301,6 +303,10 @@ pub(crate) struct Inner<S> {
     /// (group, epoch) whose pending Proposals this device commits after a
     /// delay unless another member did.
     proposal_timers: std::sync::Mutex<HashSet<(GroupId, u64)>>,
+    /// Serializes hosting record publications.
+    pub(crate) hosting_lock: Mutex<()>,
+    /// Cuts the hosting record renewal wait short.
+    pub(crate) hosting_wake: Notify,
 }
 
 #[derive(Clone)]

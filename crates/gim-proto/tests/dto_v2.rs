@@ -20,22 +20,6 @@ const GID: &str =
 const CLIENT: &str = "9f1c2a7e-0b44-4d0e-9a51-3c8f1e2d6b70";
 const TS: i64 = 1_760_479_200_000;
 
-/// Federation additions of the contract (hosting records, H3) that
-/// `gim_proto::v2` does not model yet; the federation client (C3) adds them.
-const DEFERRED_SCHEMAS: [&str; 6] = [
-    "CreateHostingEntryRequest",
-    "HostingEntry",
-    "HostingRecord",
-    "HostingRecordExpiring",
-    "HostingRecordExpiringEvent",
-    "PutHostingRecordRequest",
-];
-const DEFERRED_EVENTS: [&str; 1] = ["hosting_record.expiring"];
-const DEFERRED_ROUTES: [&str; 2] = [
-    "/v2/users/{user_id}/hosting-entry",
-    "/v2/users/{user_id}/hosting-record",
-];
-
 fn spec() -> Value {
     serde_json::from_str(include_str!("../contract/hub-v2/openapi.json"))
         .expect("openapi.json parses")
@@ -193,6 +177,31 @@ fn cases() -> Vec<Case> {
             json!({"link_id": "lnk", "sealed_bundle": b()}),
             json!({"link_id": "lnk", "sealed_bundle": b()}),
         ),
+        case::<CreateHostingEntryRequest>(
+            "CreateHostingEntryRequest",
+            json!({"priority": 3}),
+            json!({}),
+        ),
+        case::<HostingEntry>(
+            "HostingEntry",
+            json!({"hub_id": HUB, "hub_root_pubkey": b(), "priority": 0, "entry": b()}),
+            json!({"hub_id": HUB, "hub_root_pubkey": b(), "priority": 0, "entry": b()}),
+        ),
+        case::<PutHostingRecordRequest>(
+            "PutHostingRecordRequest",
+            json!({"hosting_record": b()}),
+            json!({"hosting_record": b()}),
+        ),
+        case::<HostingRecord>(
+            "HostingRecord",
+            json!({"user_id": USER, "hosting_record": b(), "seq": 2, "expires_at": TS, "hosted": true}),
+            json!({"user_id": USER, "hosting_record": b(), "seq": 2, "expires_at": TS, "hosted": false}),
+        ),
+        case::<HostingRecordExpiring>(
+            "HostingRecordExpiring",
+            json!({"user_id": USER, "expires_at": TS, "seq": 2}),
+            json!({"user_id": USER, "expires_at": TS, "seq": 2}),
+        ),
         case::<UploadKeyPackagesRequest>(
             "UploadKeyPackagesRequest",
             json!({"key_packages": ["AAEC"], "last_resort": true}),
@@ -311,6 +320,19 @@ fn cases() -> Vec<Case> {
                 6,
                 "device_list.updated",
                 json!({"user_id": USER, "device_list": b()}),
+            ),
+        ),
+        case::<Event>(
+            "HostingRecordExpiringEvent",
+            event_json(
+                7,
+                "hosting_record.expiring",
+                json!({"user_id": USER, "expires_at": TS, "seq": 2}),
+            ),
+            event_json(
+                7,
+                "hosting_record.expiring",
+                json!({"user_id": USER, "expires_at": TS, "seq": 2}),
             ),
         ),
         case::<EventList>(
@@ -481,7 +503,6 @@ fn every_schema_has_a_dto() {
     let mut ours: BTreeSet<String> = cases().iter().map(|c| c.schema.to_owned()).collect();
     ours.extend(enums().iter().map(|(name, _)| (*name).to_owned()));
     ours.insert("Event".to_owned());
-    ours.extend(DEFERRED_SCHEMAS.iter().map(|name| (*name).to_owned()));
     assert_eq!(
         all, ours,
         "openapi.json schema set changed; update gim_proto::v2"
@@ -517,14 +538,14 @@ fn event_types_match() {
         (EventData::WELCOME, "WelcomeEvent"),
         (EventData::KEY_PACKAGES_LOW, "KeyPackagesLowEvent"),
         (EventData::DEVICE_LIST_UPDATED, "DeviceListUpdatedEvent"),
+        (
+            EventData::HOSTING_RECORD_EXPIRING,
+            "HostingRecordExpiringEvent",
+        ),
     ];
     assert_eq!(
         keys(mapping),
-        ours.iter()
-            .map(|(t, _)| *t)
-            .chain(DEFERRED_EVENTS)
-            .map(str::to_owned)
-            .collect()
+        ours.iter().map(|(t, _)| (*t).to_owned()).collect()
     );
     for (event_type, schema) in ours {
         assert_eq!(
@@ -536,8 +557,7 @@ fn event_types_match() {
     }
 }
 
-/// Every route in openapi.json but [`DEFERRED_ROUTES`] is covered by
-/// `paths` (34 operations, 3 of them deferred).
+/// Every route in openapi.json is covered by `paths` (34 operations).
 #[test]
 fn paths_cover_openapi() {
     let spec = spec();
@@ -556,6 +576,8 @@ fn paths_cover_openapi() {
         paths::user("{user_id}"),
         paths::user_device_list("{user_id}"),
         paths::user_recovery_backup("{user_id}"),
+        paths::user_hosting_entry("{user_id}"),
+        paths::user_hosting_record("{user_id}"),
         paths::handle("{handle}"),
         paths::link_bundle("{link_id}"),
         paths::group("{gid}"),
@@ -588,7 +610,6 @@ fn paths_cover_openapi() {
             .iter()
             .map(|path| path.replace("%7B", "{").replace("%7D", "}")),
     );
-    ours.extend(DEFERRED_ROUTES.iter().map(|route| (*route).to_owned()));
     assert_eq!(routes, ours);
 }
 
@@ -653,6 +674,14 @@ fn path_parameters_are_percent_encoded() {
     assert_eq!(paths::group_messages("a/b"), "/v2/groups/a%2Fb/messages");
     assert_eq!(paths::welcome_ack("a/b"), "/v2/welcomes/a%2Fb/ack");
     assert_eq!(paths::user(USER), format!("/v2/users/{USER}"));
+    assert_eq!(
+        paths::user_hosting_record("a/b"),
+        "/v2/users/a%2Fb/hosting-record"
+    );
+    assert_eq!(
+        paths::user_hosting_entry("a/b"),
+        "/v2/users/a%2Fb/hosting-entry"
+    );
     assert_eq!(paths::handle("a b?#%"), "/v2/handles/a%20b%3F%23%25");
     assert_eq!(paths::blob("x-._~"), "/v2/blobs/x-._~");
     assert_eq!(paths::link_bundle("é"), "/v2/link-bundles/%C3%A9");
@@ -725,8 +754,9 @@ fn known_events() {
             event_json(4, "welcome", welcome_json(true)),
             event_json(5, "keypackages.low", json!({"available": 2})),
             event_json(6, "device_list.updated", json!({"user_id": USER, "device_list": "AAEC"})),
+            event_json(7, "hosting_record.expiring", json!({"user_id": USER, "expires_at": TS, "seq": 3})),
         ],
-        "next_cursor": 6
+        "next_cursor": 7
     }));
     let events = list.events;
     assert!(matches!(&events[0].data, EventData::Message(m) if m.kind == MessageKind::Application));
@@ -754,6 +784,15 @@ fn known_events() {
         })
     );
     assert_eq!(events[5].data.event_type(), "device_list.updated");
+    assert_eq!(
+        events[6].data,
+        EventData::HostingRecordExpiring(HostingRecordExpiring {
+            user_id: USER.into(),
+            expires_at: TS,
+            seq: 3,
+        })
+    );
+    assert_eq!(events[6].data.event_type(), "hosting_record.expiring");
 }
 
 #[test]

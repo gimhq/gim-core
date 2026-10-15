@@ -15,6 +15,7 @@ mod auth;
 mod client;
 mod error;
 mod history;
+mod hosting;
 pub mod http;
 mod identity;
 mod link;
@@ -36,6 +37,9 @@ pub use client::{
 pub use error::{ClientError, Result};
 pub use gim_identity::recovery::RecoveryCode;
 pub use history::Backfill;
+pub use hosting::{
+    HOSTING_RECORD_CHECK_INTERVAL, HOSTING_RECORD_LIFETIME, HOSTING_RECORD_RENEW_BEFORE,
+};
 pub use http::{HttpConfig, HttpTransport};
 pub use link::{LinkResult, LinkSession, PendingApproval, Sas, LINK_BUNDLE_LIFETIME, LINK_TIMEOUT};
 pub use media::{DOWNLOAD_PIECE, OUTGOING_DIR};

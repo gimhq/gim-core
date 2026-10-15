@@ -104,6 +104,10 @@ impl From<gim_sdk::TransportError> for GimError {
             },
             E::TooLarge(_) => Self::InvalidInput { reason },
             E::DeviceNotActive(_) => Self::NotRegistered,
+            E::HostingRecordRequired(_) => Self::Server {
+                status: 403,
+                reason,
+            },
             E::RetryLater {
                 status,
                 retry_after_secs,

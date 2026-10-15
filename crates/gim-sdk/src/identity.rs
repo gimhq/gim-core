@@ -12,6 +12,7 @@ use gim_identity::{DeviceList, DeviceSigningKey, RootKey, SignedDeviceCert, Sign
 use zeroize::Zeroizing;
 
 use crate::client::{Session, DEVICE_KEY_SECRET_KEY, KEY_PACKAGE_BATCH, ROOT_KEY_SECRET_KEY};
+use crate::hosting::Publish;
 use crate::transport::{TransportError, UserRecord};
 use crate::{Client, ClientError, Result};
 
@@ -43,7 +44,8 @@ impl<S: StateStore + 'static> Client<S> {
     /// creates the self group (the MLS group of the user's devices). The
     /// keys stay in [`crate::SecretStorage`]; the display name is kept
     /// locally and shared through the self group and with chats (the hub
-    /// has no profiles).
+    /// has no profiles). Publishes the user's hosting record; a failure
+    /// there is only logged (the sync loop retries).
     ///
     /// Returns the recovery code. It is stored nowhere: show it to the user
     /// once.
@@ -80,6 +82,7 @@ impl<S: StateStore + 'static> Client<S> {
             },
         })
         .await?;
+        self.publish_hosting_record_logged(Publish::Now).await;
         self.create_self_group().await?;
         Ok(code)
     }

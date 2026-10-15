@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -12,16 +12,19 @@ use async_trait::async_trait;
 use gim_base::model::{ChatKind, GroupMessage, IncomingEvent, MessageKind};
 use gim_common::{now_ms, ClientId, DeviceRef, GroupId, UserId};
 use gim_crypto::{inspect_handshake, private_message_epoch, HandshakeKind, MlsEngine};
-use gim_identity::{AuthChallenge, AuthResponse, IdentityError, SignedDeviceList};
+use gim_identity::{
+    AuthChallenge, AuthResponse, HostingEntry, HubRootKey, IdentityError, SignedDeviceList,
+    SignedHostingRecord, UserHostingRecord,
+};
 use gim_test::{
     Delivered, DeliveryError, Event, FakeDeliveryService, GroupKind, MembershipChange,
     SubmitCommit, Welcome,
 };
 
 use crate::transport::{
-    AccessToken, Challenge, ClaimedKeyPackage, CommitAccepted, EventBatch, GroupInfo, HubEvent,
-    KeyPackageCount, OutgoingCommit, PostError, SessionError, SessionToken, Transport,
-    TransportError, TransportResult, UserRecord,
+    AccessToken, Challenge, ClaimedKeyPackage, CommitAccepted, EventBatch, GroupInfo,
+    HostingEntryGrant, HubEvent, KeyPackageCount, OutgoingCommit, PostError, SessionError,
+    SessionToken, StoredHostingRecord, Transport, TransportError, TransportResult, UserRecord,
 };
 use crate::{SecretStorage, SecretStorageError};
 
@@ -33,6 +36,10 @@ const CHALLENGE_LIFETIME_MS: u64 = 5 * 60_000;
 const SESSION_LIFETIME_MS: u64 = 30 * 24 * 3_600_000;
 /// Largest application message, as on the hub (default).
 const MESSAGE_LIMIT_BYTES: usize = 262_144;
+/// Accepted hosting record lifetimes (`expires_at - now`), as on the hub.
+const HOSTING_RECORD_LIFETIMES_MS: std::ops::RangeInclusive<u64> = 3_600_000..=30 * 24 * 3_600_000;
+/// Seed of the fake hub's root key.
+const HUB_ROOT_SEED: [u8; 32] = [0x68; 32];
 
 /// A [`Transport`] over a shared [`FakeDeliveryService`]. Cloning shares the
 /// service, so several clients can talk to the same fake hub. It verifies
@@ -46,6 +53,18 @@ pub struct FakeTransport {
     /// Validates uploaded KeyPackages against the stored DeviceLists.
     validator: Arc<MlsEngine>,
     proposals: Arc<Mutex<HashMap<GroupId, Proposals>>>,
+    hosting: Arc<FakeHosting>,
+}
+
+/// Hosting records of the fake hub.
+#[derive(Debug)]
+struct FakeHosting {
+    hub_key: HubRootKey,
+    /// Signed records; kept after they expire, as on the hub.
+    records: Mutex<HashMap<UserId, Vec<u8>>>,
+    reads: AtomicUsize,
+    /// Commits and messages need a valid record listing this hub.
+    required: AtomicBool,
 }
 
 /// The Proposals sequenced in a group's current epoch, by `ProposalRef`.
@@ -83,6 +102,92 @@ impl FakeTransport {
             challenges: Arc::default(),
             validator: Arc::new(MlsEngine::with_device_list_lookup(Arc::new(stored_list))),
             proposals: Arc::default(),
+            hosting: Arc::new(FakeHosting {
+                hub_key: HubRootKey::from_seed(&HUB_ROOT_SEED),
+                records: Mutex::default(),
+                reads: AtomicUsize::new(0),
+                required: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    /// The root key the fake hub signs hosting entries with.
+    pub fn hub_root_key(&self) -> &HubRootKey {
+        &self.hosting.hub_key
+    }
+
+    /// The user's stored hosting record, expired or not.
+    pub fn stored_hosting_record(&self, user_id: &UserId) -> Option<Vec<u8>> {
+        self.hosting_records().get(user_id).cloned()
+    }
+
+    /// Replaces (or with `None` deletes) the user's stored hosting record,
+    /// without the hub's checks.
+    pub fn set_hosting_record(&self, user_id: &UserId, record: Option<Vec<u8>>) {
+        let mut records = self.hosting_records();
+        match record {
+            Some(record) => records.insert(user_id.clone(), record),
+            None => records.remove(user_id),
+        };
+    }
+
+    /// `GET .../hosting-record` requests served so far.
+    pub fn hosting_record_reads(&self) -> usize {
+        self.hosting.reads.load(Ordering::SeqCst)
+    }
+
+    /// With `required`, commits and application messages fail with 403
+    /// `hosting_record_required` unless the sender's user has a valid
+    /// hosting record listing this hub, as for federated requests.
+    pub fn require_hosting_records(&self, required: bool) {
+        self.hosting.required.store(required, Ordering::SeqCst);
+    }
+
+    fn hosting_records(&self) -> MutexGuard<'_, HashMap<UserId, Vec<u8>>> {
+        self.hosting
+            .records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The user's stored record if it is still valid at `now`.
+    fn valid_hosting_record(&self, user_id: &UserId, now: u64) -> Option<UserHostingRecord> {
+        let bytes = self.stored_hosting_record(user_id)?;
+        SignedHostingRecord::from_bytes(&bytes)
+            .and_then(|signed| signed.verify(now))
+            .ok()
+    }
+
+    fn check_hosting_record(&self, user_id: &UserId) -> Result<(), PostError> {
+        if !self.hosting.required.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let hub = self.hosting.hub_key.public();
+        match self.valid_hosting_record(user_id, now_ms()) {
+            Some(record)
+                if record
+                    .hubs()
+                    .iter()
+                    .any(|e| *e.hub_root_public_key() == hub) =>
+            {
+                Ok(())
+            }
+            _ => {
+                Err(TransportError::HostingRecordRequired("hosting_record_required".into()).into())
+            }
+        }
+    }
+
+    fn stored(&self, bytes: Vec<u8>, record: &UserHostingRecord) -> StoredHostingRecord {
+        let hub = self.hosting.hub_key.public();
+        StoredHostingRecord {
+            record: bytes,
+            seq: record.seq(),
+            expires_at_ms: record.expires_at(),
+            hosted: record
+                .hubs()
+                .iter()
+                .any(|e| *e.hub_root_public_key() == hub),
         }
     }
 
@@ -453,6 +558,7 @@ impl Transport for FakeTransport {
         commit: OutgoingCommit,
     ) -> Result<CommitAccepted, PostError> {
         let sender = self.device(token)?;
+        self.check_hosting_record(&sender.user_id)?;
         let mut info = inspect_handshake(&commit.mls_message).map_err(invalid)?;
         if info.group_id != group_id.as_str().as_bytes() {
             return Err(invalid("the message is for another group").into());
@@ -526,6 +632,7 @@ impl Transport for FakeTransport {
         mls_message: Vec<u8>,
     ) -> Result<u64, PostError> {
         let sender = self.device(token)?;
+        self.check_hosting_record(&sender.user_id)?;
         if mls_message.len() > MESSAGE_LIMIT_BYTES {
             return Err(TransportError::TooLarge("payload_too_large".into()).into());
         }
@@ -533,6 +640,80 @@ impl Transport for FakeTransport {
         Ok(self
             .service
             .post_message(group_id, &sender, client_id, epoch, mls_message)?)
+    }
+
+    async fn create_hosting_entry(
+        &self,
+        token: &AccessToken,
+        user_id: &UserId,
+        priority: u8,
+    ) -> TransportResult<HostingEntryGrant> {
+        if &self.device(token)?.user_id != user_id {
+            return Err(TransportError::Server("403 forbidden".into()));
+        }
+        let hub = &self.hosting.hub_key;
+        Ok(HostingEntryGrant {
+            hub_id: hub.public().hub_id(),
+            hub_root_public_key: hub.public().as_bytes().to_vec(),
+            priority,
+            entry: HostingEntry::sign(hub, user_id, priority).to_bytes(),
+        })
+    }
+
+    /// Checks the record like the hub: it verifies for `user_id`, its
+    /// lifetime is in range, and it supersedes the stored one (409
+    /// otherwise; the same record again is a no-op).
+    async fn put_hosting_record(
+        &self,
+        user_id: &UserId,
+        bytes: Vec<u8>,
+    ) -> TransportResult<StoredHostingRecord> {
+        let rejected = |reason: String| {
+            TransportError::Server(format!("400 invalid_hosting_record: {reason}"))
+        };
+        let now = now_ms();
+        let record = SignedHostingRecord::from_bytes(&bytes)
+            .and_then(|signed| signed.verify(now))
+            .map_err(|e| rejected(e.to_string()))?;
+        if record.user_id() != user_id {
+            return Err(rejected("user_id_mismatch".into()));
+        }
+        if !HOSTING_RECORD_LIFETIMES_MS.contains(&(record.expires_at() - now)) {
+            return Err(rejected("lifetime_out_of_range".into()));
+        }
+        let mut records = self.hosting_records();
+        // Stored records were verified on insert; they may have expired.
+        let stored = records.get(user_id).and_then(|stored| {
+            SignedHostingRecord::from_bytes(stored)
+                .and_then(|signed| signed.verify(0))
+                .ok()
+                .map(|record| (stored.clone(), record))
+        });
+        if let Some((stored_bytes, stored)) = stored {
+            match record.supersedes(&stored) {
+                Ok(true) => {}
+                Ok(false) => return Ok(self.stored(stored_bytes, &stored)),
+                Err(err) => {
+                    return Err(TransportError::Conflict(format!(
+                        "stale_hosting_record: {err}"
+                    )))
+                }
+            }
+        }
+        records.insert(user_id.clone(), bytes.clone());
+        Ok(self.stored(bytes, &record))
+    }
+
+    async fn hosting_record(
+        &self,
+        user_id: &UserId,
+    ) -> TransportResult<Option<StoredHostingRecord>> {
+        self.hosting.reads.fetch_add(1, Ordering::SeqCst);
+        let bytes = self.stored_hosting_record(user_id);
+        Ok(bytes.and_then(|bytes| {
+            let record = self.valid_hosting_record(user_id, now_ms())?;
+            Some(self.stored(bytes, &record))
+        }))
     }
 
     /// Never waits: the fake hub is synchronous.

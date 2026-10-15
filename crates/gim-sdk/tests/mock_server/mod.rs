@@ -24,7 +24,8 @@ use gim_proto::envelope::Content;
 use gim_proto::v2::{self, EventData};
 use gim_sdk::testing::{FakeTransport, MemorySecretStorage};
 use gim_sdk::transport::{
-    AccessToken, OutgoingCommit, PostError, SessionError, Transport, TransportError,
+    AccessToken, OutgoingCommit, PostError, SessionError, StoredHostingRecord, Transport,
+    TransportError,
 };
 use gim_sdk::{Client, ClientBuilder, ConnectionState, HttpTransport, SecretStorage, SyncSettings};
 use gim_test::{Delivered, Event, StreamEvent};
@@ -117,6 +118,14 @@ impl MockServer {
                 "/v2/users/{user_id}/recovery-backup",
                 put(put_recovery_backup),
             )
+            .route(
+                "/v2/users/{user_id}/hosting-entry",
+                post(create_hosting_entry),
+            )
+            .route(
+                "/v2/users/{user_id}/hosting-record",
+                put(put_hosting_record).get(hosting_record),
+            )
             .route("/v2/users/{user_id}", get(user))
             .route(
                 "/v2/handles/{handle}",
@@ -166,6 +175,9 @@ fn transport_error(err: TransportError) -> Response {
         TransportError::NotFound(_) => error(StatusCode::NOT_FOUND, "not_found"),
         TransportError::Conflict(_) => error(StatusCode::CONFLICT, "conflict"),
         TransportError::TooLarge(_) => error(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
+        TransportError::HostingRecordRequired(_) => {
+            error(StatusCode::FORBIDDEN, v2::HOSTING_RECORD_REQUIRED)
+        }
         _ => error(StatusCode::BAD_REQUEST, "validation_failed"),
     }
 }
@@ -446,6 +458,75 @@ async fn put_recovery_backup(
             backup,
             updated_at: 0,
         })
+    }
+    .await;
+    reply(result)
+}
+
+async fn create_hosting_entry(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(user): Path<String>,
+    Json(request): Json<v2::CreateHostingEntryRequest>,
+) -> Response {
+    let result = async {
+        let (token, user) = (state.token(&headers)?, user_id(&user)?);
+        let priority = request.priority.unwrap_or(0);
+        let grant = state
+            .transport
+            .create_hosting_entry(&token, &user, priority)
+            .await?;
+        Ok(v2::HostingEntry {
+            hub_id: grant.hub_id,
+            hub_root_pubkey: grant.hub_root_public_key,
+            priority: grant.priority,
+            entry: grant.entry,
+        })
+    }
+    .await;
+    reply(result)
+}
+
+fn hosting_record_dto(user: &UserId, stored: StoredHostingRecord) -> v2::HostingRecord {
+    v2::HostingRecord {
+        user_id: user.to_string(),
+        hosting_record: stored.record,
+        seq: stored.seq,
+        expires_at: stored.expires_at_ms as i64,
+        hosted: stored.hosted,
+    }
+}
+
+async fn put_hosting_record(
+    State(state): State<AppState>,
+    Path(user): Path<String>,
+    Json(request): Json<v2::PutHostingRecordRequest>,
+) -> Response {
+    let result = async {
+        let user = user_id(&user)?;
+        let stored = state
+            .transport
+            .put_hosting_record(&user, request.hosting_record)
+            .await?;
+        Ok(hosting_record_dto(&user, stored))
+    }
+    .await;
+    match result {
+        Err(TransportError::Conflict(_)) => error(StatusCode::CONFLICT, v2::STALE_HOSTING_RECORD),
+        Err(TransportError::Server(_)) => {
+            error(StatusCode::BAD_REQUEST, v2::INVALID_HOSTING_RECORD)
+        }
+        result => reply(result),
+    }
+}
+
+/// A public read, as on the hub.
+async fn hosting_record(State(state): State<AppState>, Path(user): Path<String>) -> Response {
+    let result = async {
+        let user = user_id(&user)?;
+        let stored = state.transport.hosting_record(&user).await?;
+        let stored = stored.ok_or_else(|| TransportError::NotFound(user.to_string()))?;
+        Ok(hosting_record_dto(&user, stored))
     }
     .await;
     reply(result)
