@@ -281,6 +281,30 @@ pub struct DepartedMember {
     pub device: DeviceRef,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MembershipChangeKind {
+    Added,
+    /// Removed by another member.
+    Removed,
+    /// Removed by themselves.
+    Left,
+}
+
+/// A user joining or leaving a chat, recorded when the MLS commit or
+/// Welcome that did it is applied. One per (group, seq, user).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MembershipEvent {
+    pub group_id: GroupId,
+    /// Seq of the commit or Welcome.
+    pub seq: u64,
+    /// The user who joined or left.
+    pub user_id: UserId,
+    /// The user whose commit (or Welcome) did it.
+    pub actor: UserId,
+    pub kind: MembershipChangeKind,
+    pub at_ms: u64,
+}
+
 /// User directory cache entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserInfo {
@@ -334,6 +358,7 @@ pub enum StateChange {
         group_id: GroupId,
         message_id: MessageId,
     },
+    MembershipChanged(MembershipEvent),
     /// Transient; never persisted.
     Typing {
         group_id: GroupId,

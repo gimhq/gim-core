@@ -1,6 +1,6 @@
 //! The async client of one device.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
@@ -119,6 +119,7 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
                 sync_wake: Notify::new(),
                 connection: std::sync::Mutex::new(ConnectionState::Offline),
                 connection_changes: broadcast::channel(CONNECTION_CAPACITY).0,
+                resolved_users: Default::default(),
             }),
         })
     }
@@ -192,6 +193,9 @@ pub(crate) struct Inner<S> {
     pub(crate) sync_wake: Notify,
     pub(crate) connection: std::sync::Mutex<ConnectionState>,
     pub(crate) connection_changes: broadcast::Sender<ConnectionState>,
+    /// Users found in the user directory cache or unknown to the server's
+    /// directory; not looked up again.
+    pub(crate) resolved_users: std::sync::Mutex<HashSet<UserId>>,
 }
 
 #[derive(Clone)]
@@ -343,7 +347,8 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Creates a group chat with every device of `users` (and this user's
-    /// other devices).
+    /// other devices). The name is shared with the members in a group info
+    /// message once they are added.
     pub async fn create_group_chat(
         &self,
         name: Option<String>,
@@ -352,8 +357,19 @@ impl<S: StateStore + 'static> Client<S> {
         self.create_chat(ChatKind::Group, name, users).await
     }
 
-    /// Adds every device of `users` that is not a member yet.
+    /// Adds every device of `users` that is not a member yet, then shares
+    /// the group name and avatar with them (a group info message: earlier
+    /// ones are not readable for new members).
     pub async fn add_members(&self, group_id: &GroupId, users: &[UserId]) -> Result<()> {
+        self.add_members_locked(group_id, users).await?;
+        self.share_group_info(group_id).await?;
+        let session = self.require_session()?;
+        self.resolve_users(&session, users.iter().cloned().collect())
+            .await;
+        Ok(())
+    }
+
+    async fn add_members_locked(&self, group_id: &GroupId, users: &[UserId]) -> Result<()> {
         let session = self.require_session()?;
         let _guard = self.inner.group_lock.lock().await;
         let members = self.chat_devices(group_id).await?;
@@ -466,6 +482,24 @@ impl<S: StateStore + 'static> Client<S> {
         users: &[UserId],
     ) -> Result<GroupId> {
         let session = self.require_session()?;
+        let (group_id, added) = self.create_chat_locked(&session, kind, name, users).await?;
+        if added && kind == ChatKind::Group {
+            self.share_group_info(&group_id).await?;
+        }
+        self.resolve_users(&session, users.iter().cloned().collect())
+            .await;
+        Ok(group_id)
+    }
+
+    /// Returns the group id and whether members were added.
+    async fn create_chat_locked(
+        &self,
+        session: &Session,
+        kind: ChatKind,
+        name: Option<String>,
+        users: &[UserId],
+    ) -> Result<(GroupId, bool)> {
+        let session = session.clone();
         let _guard = self.inner.group_lock.lock().await;
         let devices = self.devices_of(&session, users, &[]).await?;
         let key_packages = self.claim_key_packages(&session, devices).await?;
@@ -480,11 +514,125 @@ impl<S: StateStore + 'static> Client<S> {
             .run(move |store, engine| base.create_chat(store, engine, &gid, kind, name, now_ms()))
             .await?;
         self.emit(&changes);
-        if !key_packages.is_empty() {
+        let added = !key_packages.is_empty();
+        if added {
             self.commit(&session, &group_id, CommitOp::Add(key_packages))
                 .await?;
         }
-        Ok(group_id)
+        Ok((group_id, added))
+    }
+
+    /// Sends the group chat's current name and avatar as a group info
+    /// message, if it has either. Direct chats have none to share.
+    async fn share_group_info(&self, group_id: &GroupId) -> Result<()> {
+        let gid = group_id.clone();
+        let chat = self.run(move |store, _| Ok(store.chat(&gid)?)).await?;
+        let Some(chat) = chat.filter(|c| c.kind == ChatKind::Group) else {
+            return Ok(());
+        };
+        if chat.name.is_none() && chat.avatar.is_none() {
+            return Ok(());
+        }
+        let content = Content::GroupInfo {
+            name: chat.name,
+            avatar: chat.avatar,
+        };
+        self.send(group_id, content).await.map(drop)
+    }
+
+    /// Fetches the directory profiles of `users` not cached yet, caches
+    /// them and updates the member names of their chats (broadcast as chat
+    /// changes, so the chat list and timelines show the names). Best
+    /// effort: failures are logged and the lookups retried next time;
+    /// users the directory does not know are not looked up again.
+    pub(crate) async fn resolve_users(&self, session: &Session, users: BTreeSet<UserId>) {
+        if let Err(err) = self.try_resolve_users(session, users).await {
+            tracing::debug!(error = %err, "cannot resolve user profiles");
+        }
+    }
+
+    async fn try_resolve_users(&self, session: &Session, users: BTreeSet<UserId>) -> Result<()> {
+        let resolved = |users: &mut dyn Iterator<Item = UserId>| {
+            self.inner
+                .resolved_users
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(users);
+        };
+        let users: Vec<UserId> = {
+            let known = self
+                .inner
+                .resolved_users
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            users
+                .into_iter()
+                .filter(|u| *u != session.device.user_id && !known.contains(u))
+                .collect()
+        };
+        if users.is_empty() {
+            return Ok(());
+        }
+        let (cached, missing): (Vec<UserId>, Vec<UserId>) = self
+            .run(move |store, _| {
+                let mut split = (Vec::new(), Vec::new());
+                for user_id in users {
+                    match store.user(&user_id)? {
+                        Some(_) => split.0.push(user_id),
+                        None => split.1.push(user_id),
+                    }
+                }
+                Ok(split)
+            })
+            .await?;
+        resolved(&mut cached.into_iter());
+        let mut found = Vec::new();
+        let mut failed = None;
+        for user_id in missing {
+            match self.inner.transport.user(&session.token, &user_id).await {
+                Ok(Some(user)) => found.push(user),
+                Ok(None) => resolved(&mut std::iter::once(user_id)),
+                Err(err) => {
+                    failed = Some(err);
+                    break;
+                }
+            }
+        }
+        if !found.is_empty() {
+            let found_ids: Vec<UserId> = found.iter().map(|u| u.user_id.clone()).collect();
+            let changes = self
+                .run(move |store, _| {
+                    store.transaction(|txn| {
+                        for user in &found {
+                            txn.upsert_user(user)?;
+                        }
+                        let mut changes = Vec::new();
+                        for mut chat in txn.chats()? {
+                            let mut renamed = false;
+                            for member in &mut chat.members {
+                                let Some(user) =
+                                    found.iter().find(|u| u.user_id == member.device.user_id)
+                                else {
+                                    continue;
+                                };
+                                if member.display_name.as_ref() != Some(&user.display_name) {
+                                    member.display_name = Some(user.display_name.clone());
+                                    renamed = true;
+                                }
+                            }
+                            if renamed {
+                                txn.upsert_chat(&chat)?;
+                                changes.push(StateChange::ChatUpserted(chat));
+                            }
+                        }
+                        Ok(changes)
+                    })
+                })
+                .await?;
+            self.emit(&changes);
+            resolved(&mut found_ids.into_iter());
+        }
+        failed.map_or(Ok(()), |err| Err(err.into()))
     }
 
     /// Creates a commit, posts it and merges it once accepted, then does

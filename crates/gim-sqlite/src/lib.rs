@@ -18,8 +18,8 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use gim_base::model::{
-    Chat, DepartedMember, GroupCursor, GroupMessage, MediaCacheEntry, Message, OutboxEntry,
-    PendingCommit, UserInfo,
+    Chat, DepartedMember, GroupCursor, GroupMessage, MediaCacheEntry, MembershipEvent, Message,
+    OutboxEntry, PendingCommit, UserInfo,
 };
 use gim_base::{BaseError, StateReader, StateStore, StoreError, StoreTxn, WriteTarget};
 use gim_common::{DeviceRef, GroupId, MessageId, UserId};
@@ -29,7 +29,7 @@ use rusqlite::{params, Connection, Transaction, TransactionBehavior};
 
 pub use migrations::SCHEMA_VERSION;
 
-use reader::{bound, outbox_state_str, sql_err, Reader};
+use reader::{bound, membership_kind_str, outbox_state_str, sql_err, Reader};
 use rows::{
     encode, ChatData, MemberRow, MessageData, OutboxData, OutboxKindRow, ParkedData,
     PendingCommitData,
@@ -277,6 +277,11 @@ macro_rules! delegate_reader {
                 let $this = self;
                 Reader($conn).departed_members()
             }
+
+            fn membership_events(&self, group_id: &GroupId) -> StoreResult<Vec<MembershipEvent>> {
+                let $this = self;
+                Reader($conn).membership_events(group_id)
+            }
         }
     };
 }
@@ -314,6 +319,7 @@ impl StoreTxn for SqliteTxn<'_> {
             "parked_messages",
             "pending_commits",
             "departed_members",
+            "membership_events",
         ] {
             self.execute(
                 &format!("DELETE FROM {table} WHERE group_id = ?1"),
@@ -494,6 +500,21 @@ impl StoreTxn for SqliteTxn<'_> {
                 member.group_id.as_str(),
                 member.device.user_id.as_str(),
                 member.device.device_id.as_str()
+            ],
+        )
+    }
+
+    fn add_membership_event(&mut self, event: &MembershipEvent) -> StoreResult<()> {
+        self.execute(
+            "INSERT OR REPLACE INTO membership_events \
+             (group_id, seq, user_id, actor, kind, at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                event.group_id.as_str(),
+                event.seq,
+                event.user_id.as_str(),
+                event.actor.as_str(),
+                membership_kind_str(event.kind),
+                event.at_ms
             ],
         )
     }

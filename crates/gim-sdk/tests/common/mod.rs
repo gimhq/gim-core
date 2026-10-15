@@ -79,6 +79,10 @@ impl Transport for FlakyTransport {
         self.inner.find_user(t, handle).await
     }
 
+    async fn user(&self, t: &AccessToken, u: &UserId) -> TransportResult<Option<UserInfo>> {
+        self.inner.user(t, u).await
+    }
+
     async fn list_devices(&self, t: &AccessToken, u: &UserId) -> TransportResult<Vec<DeviceRef>> {
         self.inner.list_devices(t, u).await
     }
