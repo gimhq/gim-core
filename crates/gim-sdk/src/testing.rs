@@ -13,8 +13,8 @@ use gim_common::{DeviceRef, GroupId, UserId};
 use gim_test::{Delivered, DeliveryError, Event, FakeDeliveryService, GroupKind};
 
 use crate::transport::{
-    AccessToken, EventBatch, GroupInfo, OutgoingMessage, PostError, Registration, Transport,
-    TransportError, TransportResult,
+    AccessToken, EventBatch, GroupInfo, KeyPackageCount, OutgoingMessage, PostError, Registration,
+    Transport, TransportError, TransportResult,
 };
 use crate::{SecretStorage, SecretStorageError};
 
@@ -77,6 +77,18 @@ fn to_kind(kind: MessageKind) -> gim_test::MessageKind {
         MessageKind::Commit => gim_test::MessageKind::Commit,
         MessageKind::Welcome => gim_test::MessageKind::Welcome,
         MessageKind::Application => gim_test::MessageKind::Application,
+    }
+}
+
+fn to_group_info(info: gim_test::GroupInfo) -> GroupInfo {
+    GroupInfo {
+        group_id: info.group_id,
+        kind: match info.kind {
+            GroupKind::Direct => ChatKind::Direct,
+            GroupKind::Group => ChatKind::Group,
+        },
+        epoch: info.epoch,
+        members: info.members,
     }
 }
 
@@ -168,6 +180,14 @@ impl Transport for FakeTransport {
         Ok(())
     }
 
+    async fn key_package_count(&self, token: &AccessToken) -> TransportResult<KeyPackageCount> {
+        let device = self.device(token)?;
+        Ok(KeyPackageCount {
+            available: self.service.key_package_count(&device) as u64,
+            has_last_resort: self.service.has_last_resort_key_package(&device),
+        })
+    }
+
     async fn claim_key_package(
         &self,
         token: &AccessToken,
@@ -197,16 +217,17 @@ impl Transport for FakeTransport {
         group_id: &GroupId,
     ) -> TransportResult<GroupInfo> {
         self.member(token, group_id)?;
-        let info = self.service.group(group_id)?;
-        Ok(GroupInfo {
-            group_id: info.group_id,
-            kind: match info.kind {
-                GroupKind::Direct => ChatKind::Direct,
-                GroupKind::Group => ChatKind::Group,
-            },
-            epoch: info.epoch,
-            members: info.members,
-        })
+        Ok(to_group_info(self.service.group(group_id)?))
+    }
+
+    async fn list_groups(&self, token: &AccessToken) -> TransportResult<Vec<GroupInfo>> {
+        let device = self.device(token)?;
+        Ok(self
+            .service
+            .groups_of(&device)
+            .into_iter()
+            .map(to_group_info)
+            .collect())
     }
 
     async fn add_group_members(
