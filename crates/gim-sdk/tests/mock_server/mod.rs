@@ -19,11 +19,13 @@ use axum::{Json, Router};
 use gim_base::model::{ChatKind, GroupMessage, MessageContent, StateChange};
 use gim_base::{MemoryStore, StateReader};
 use gim_common::{ClientId, DeviceRef, GroupId, MessageId, UserId};
+use gim_crypto::{inspect_handshake, HandshakeKind};
 use gim_proto::envelope::Content;
 use gim_proto::v2::{self, EventData};
 use gim_sdk::testing::{FakeTransport, MemorySecretStorage};
 use gim_sdk::transport::{
-    AccessToken, OutgoingCommit, PostError, SessionError, Transport, TransportError,
+    AccessToken, OutgoingCommit, PostError, SessionError, StoredHostingRecord, Transport,
+    TransportError,
 };
 use gim_sdk::{Client, ClientBuilder, ConnectionState, HttpTransport, SecretStorage, SyncSettings};
 use gim_test::{Delivered, Event, StreamEvent};
@@ -116,6 +118,14 @@ impl MockServer {
                 "/v2/users/{user_id}/recovery-backup",
                 put(put_recovery_backup),
             )
+            .route(
+                "/v2/users/{user_id}/hosting-entry",
+                post(create_hosting_entry),
+            )
+            .route(
+                "/v2/users/{user_id}/hosting-record",
+                put(put_hosting_record).get(hosting_record),
+            )
             .route("/v2/users/{user_id}", get(user))
             .route(
                 "/v2/handles/{handle}",
@@ -165,6 +175,9 @@ fn transport_error(err: TransportError) -> Response {
         TransportError::NotFound(_) => error(StatusCode::NOT_FOUND, "not_found"),
         TransportError::Conflict(_) => error(StatusCode::CONFLICT, "conflict"),
         TransportError::TooLarge(_) => error(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
+        TransportError::HostingRecordRequired(_) => {
+            error(StatusCode::FORBIDDEN, v2::HOSTING_RECORD_REQUIRED)
+        }
         _ => error(StatusCode::BAD_REQUEST, "validation_failed"),
     }
 }
@@ -274,7 +287,14 @@ fn message_dto(m: Delivered) -> v2::Message {
         sender_user_id: m.sender.user_id.to_string(),
         sender_device_id: m.sender.device_id.to_string(),
         client_id: m.client_id.to_string(),
+        message_id: format!("{}#{}", m.group_id, m.seq),
         kind: match m.kind {
+            gim_test::MessageKind::Commit
+                if inspect_handshake(&m.payload)
+                    .is_ok_and(|info| info.kind == HandshakeKind::Proposal) =>
+            {
+                v2::MessageKind::Proposal
+            }
             gim_test::MessageKind::Commit => v2::MessageKind::Commit,
             gim_test::MessageKind::Application => v2::MessageKind::Application,
         },
@@ -438,6 +458,75 @@ async fn put_recovery_backup(
             backup,
             updated_at: 0,
         })
+    }
+    .await;
+    reply(result)
+}
+
+async fn create_hosting_entry(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(user): Path<String>,
+    Json(request): Json<v2::CreateHostingEntryRequest>,
+) -> Response {
+    let result = async {
+        let (token, user) = (state.token(&headers)?, user_id(&user)?);
+        let priority = request.priority.unwrap_or(0);
+        let grant = state
+            .transport
+            .create_hosting_entry(&token, &user, priority)
+            .await?;
+        Ok(v2::HostingEntry {
+            hub_id: grant.hub_id,
+            hub_root_pubkey: grant.hub_root_public_key,
+            priority: grant.priority,
+            entry: grant.entry,
+        })
+    }
+    .await;
+    reply(result)
+}
+
+fn hosting_record_dto(user: &UserId, stored: StoredHostingRecord) -> v2::HostingRecord {
+    v2::HostingRecord {
+        user_id: user.to_string(),
+        hosting_record: stored.record,
+        seq: stored.seq,
+        expires_at: stored.expires_at_ms as i64,
+        hosted: stored.hosted,
+    }
+}
+
+async fn put_hosting_record(
+    State(state): State<AppState>,
+    Path(user): Path<String>,
+    Json(request): Json<v2::PutHostingRecordRequest>,
+) -> Response {
+    let result = async {
+        let user = user_id(&user)?;
+        let stored = state
+            .transport
+            .put_hosting_record(&user, request.hosting_record)
+            .await?;
+        Ok(hosting_record_dto(&user, stored))
+    }
+    .await;
+    match result {
+        Err(TransportError::Conflict(_)) => error(StatusCode::CONFLICT, v2::STALE_HOSTING_RECORD),
+        Err(TransportError::Server(_)) => {
+            error(StatusCode::BAD_REQUEST, v2::INVALID_HOSTING_RECORD)
+        }
+        result => reply(result),
+    }
+}
+
+/// A public read, as on the hub.
+async fn hosting_record(State(state): State<AppState>, Path(user): Path<String>) -> Response {
+    let result = async {
+        let user = user_id(&user)?;
+        let stored = state.transport.hosting_record(&user).await?;
+        let stored = stored.ok_or_else(|| TransportError::NotFound(user.to_string()))?;
+        Ok(hosting_record_dto(&user, stored))
     }
     .await;
     reply(result)
@@ -927,6 +1016,9 @@ pub fn fast_settings() -> SyncSettings {
         backoff_max: Duration::from_millis(200),
         long_poll_wait: Duration::from_secs(1),
         stream_retry: Duration::from_secs(60),
+        proposal_commit_delay_min: Duration::from_millis(300),
+        proposal_commit_delay_max: Duration::from_millis(600),
+        ..SyncSettings::default()
     }
 }
 

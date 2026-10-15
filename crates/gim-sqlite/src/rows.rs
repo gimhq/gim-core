@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use gim_base::model::{
     ChatKind, ChatMember, Membership, MessageContent, MessageKind, OutboxKind, PendingCommit,
-    PendingMedia, PendingWelcome, PreparedPayload, SendState,
+    PendingLeave, PendingMedia, PendingWelcome, PreparedPayload, SendState,
 };
 use gim_base::StoreError;
 use gim_common::{ClientId, DeviceRef, GroupId, MessageId, UserId};
@@ -90,6 +90,7 @@ impl From<ChatKindRow> for ChatKind {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum MembershipRow {
     Joined,
+    Leaving,
     Left,
 }
 
@@ -97,6 +98,7 @@ impl From<Membership> for MembershipRow {
     fn from(membership: Membership) -> Self {
         match membership {
             Membership::Joined => Self::Joined,
+            Membership::Leaving => Self::Leaving,
             Membership::Left => Self::Left,
         }
     }
@@ -106,6 +108,7 @@ impl From<MembershipRow> for Membership {
     fn from(membership: MembershipRow) -> Self {
         match membership {
             MembershipRow::Joined => Self::Joined,
+            MembershipRow::Leaving => Self::Leaving,
             MembershipRow::Left => Self::Left,
         }
     }
@@ -419,6 +422,40 @@ impl PendingCommitData {
                 payload: w.payload.into_vec(),
                 recipients: w.recipients,
             }),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PendingLeaveData {
+    pub client_id: ClientId,
+    pub epoch: u64,
+    pub payload: serde_bytes::ByteBuf,
+    pub attempts: u32,
+    pub accepted: bool,
+}
+
+impl From<&PendingLeave> for PendingLeaveData {
+    fn from(p: &PendingLeave) -> Self {
+        Self {
+            client_id: p.client_id.clone(),
+            epoch: p.epoch,
+            payload: serde_bytes::ByteBuf::from(p.payload.clone()),
+            attempts: p.attempts,
+            accepted: p.accepted,
+        }
+    }
+}
+
+impl PendingLeaveData {
+    pub(crate) fn into_model(self, group_id: GroupId) -> PendingLeave {
+        PendingLeave {
+            group_id,
+            client_id: self.client_id,
+            epoch: self.epoch,
+            payload: self.payload.into_vec(),
+            attempts: self.attempts,
+            accepted: self.accepted,
         }
     }
 }

@@ -109,6 +109,7 @@ impl Device {
                     epoch: joined.epoch,
                     added: vec![self.me.clone()],
                     removed: vec![],
+                    left: vec![],
                     self_removed: false,
                 })
             }
