@@ -3,7 +3,7 @@
 mod common;
 
 use common::{group, new_client_id, setup, Device};
-use gim_base::model::{AfterCommit, DepartedMember, IncomingEvent, PendingCommit};
+use gim_base::model::{DepartedMember, IncomingEvent, PendingCommit};
 use gim_base::{StateReader, StateStore, StoreTxn};
 use gim_test::FakeDeliveryService;
 
@@ -50,7 +50,7 @@ fn departed_members_are_recorded_until_out_of_the_tree() {
 }
 
 #[test]
-fn merging_settles_the_pending_commit_record() {
+fn merging_removes_the_pending_commit_record() {
     let ds = FakeDeliveryService::new();
     let g = group("crew");
     let (alice, bob, carol) = (
@@ -59,52 +59,25 @@ fn merging_settles_the_pending_commit_record() {
         Device::new("carol"),
     );
     setup(&ds, &g, &[&alice, &bob]);
-
-    let commit = |then: AfterCommit, devices: Vec<gim_common::DeviceRef>| {
-        alice
-            .store
-            .transaction(|txn| {
-                let out = if devices.is_empty() {
-                    alice
-                        .engine
-                        .add_members(&*txn, &g, &[carol.key_package()])?
-                } else {
-                    alice.engine.remove_members(&*txn, &g, &devices)?
-                };
-                txn.upsert_pending_commit(&PendingCommit {
-                    group_id: g.clone(),
-                    client_id: new_client_id(),
-                    epoch: out.epoch,
-                    payload: out.commit,
-                    merged: false,
-                    then: then.clone(),
-                })?;
-                Ok(())
-            })
-            .unwrap();
-    };
-
-    // A follow-up is left: the record is kept, marked merged.
-    commit(
-        AfterCommit::RemoveFromFanOut(vec![bob.me.clone()]),
-        vec![bob.me.clone()],
-    );
+    alice
+        .store
+        .transaction(|txn| {
+            let out = alice
+                .engine
+                .add_members(&*txn, &g, &[carol.key_package()])?;
+            txn.upsert_pending_commit(&PendingCommit {
+                group_id: g.clone(),
+                client_id: new_client_id(),
+                epoch: out.epoch,
+                payload: out.commit,
+                welcome: None,
+            })?;
+            Ok(())
+        })
+        .unwrap();
     alice
         .client
         .merge_own_commit(&alice.store, &alice.engine, &g, 10)
-        .unwrap();
-    let pending = alice.store.pending_commit(&g).unwrap().unwrap();
-    assert!(pending.merged);
-    alice
-        .store
-        .transaction(|txn| Ok(txn.remove_pending_commit(&g)?))
-        .unwrap();
-
-    // Nothing follows: the record goes with the merge.
-    commit(AfterCommit::Nothing, vec![]);
-    alice
-        .client
-        .merge_own_commit(&alice.store, &alice.engine, &g, 11)
         .unwrap();
     assert_eq!(alice.store.pending_commit(&g).unwrap(), None);
     assert!(alice.store.pending_commits().unwrap().is_empty());
@@ -122,14 +95,13 @@ fn take_mls_pending_commit(device: &Device, g: &gim_common::GroupId) -> bool {
         .unwrap()
 }
 
-fn record(g: &gim_common::GroupId, epoch: u64, merged: bool) -> PendingCommit {
+fn record(g: &gim_common::GroupId, epoch: u64) -> PendingCommit {
     PendingCommit {
         group_id: g.clone(),
         client_id: new_client_id(),
         epoch,
         payload: vec![1],
-        merged,
-        then: AfterCommit::Nothing,
+        welcome: None,
     }
 }
 
@@ -171,28 +143,17 @@ fn startup_reconciles_dangling_pending_commits() {
     assert!(!take_mls_pending_commit(&alice, &g));
     assert_eq!(alice.epoch(&g), epoch);
 
-    // An unmerged record without an MLS pending commit is dropped, also
-    // for a group that is gone.
+    // A record without an MLS pending commit is dropped, also for a group
+    // that is gone.
     let gone = group("gone");
-    upsert(record(&g, epoch, false));
-    upsert(record(&gone, 1, false));
+    upsert(record(&g, epoch));
+    upsert(record(&gone, 1));
     assert_eq!(reconcile(), vec![g.clone(), gone]);
     assert!(alice.store.pending_commits().unwrap().is_empty());
 
-    // A merged record only has its follow-up left: kept.
-    let merged = record(&g, epoch, true);
-    upsert(merged.clone());
-    assert!(reconcile().is_empty());
-    assert_eq!(alice.store.pending_commits().unwrap(), vec![merged.clone()]);
-    // An MLS pending commit next to a merged record is dangling.
-    mls_commit();
-    assert_eq!(reconcile(), vec![g.clone()]);
-    assert_eq!(alice.store.pending_commits().unwrap(), vec![merged]);
-    assert!(!take_mls_pending_commit(&alice, &g));
-
     // A matching pair is left alone and can still be merged.
     let out = mls_commit();
-    upsert(record(&g, out.epoch, false));
+    upsert(record(&g, out.epoch));
     assert!(reconcile().is_empty());
     alice
         .client

@@ -78,13 +78,13 @@ fn reapplying_events_is_idempotent() {
     let (alice, bob) = (Device::new("alice"), Device::new("bob"));
     alice.create_chat(&ds, &g);
     alice.add(&ds, &g, &[&bob]);
-    let welcome = bob.pull(&ds);
-    assert!(!bob.apply(welcome[0].clone()).is_empty());
-    assert!(bob.apply(welcome[0].clone()).is_empty());
+    let welcome = bob.pull(&ds).into_iter().find(is_message).unwrap();
+    assert!(!bob.apply(welcome.clone()).is_empty());
+    assert!(bob.apply(welcome).is_empty());
 
     alice.send_text(&ds, &g, "one");
     alice.send_text(&ds, &g, "two");
-    let events = bob.pull(&ds);
+    let events: Vec<_> = bob.pull(&ds).into_iter().filter(is_message).collect();
     for event in &events {
         assert!(!bob.apply(event.clone()).is_empty());
     }
@@ -95,7 +95,11 @@ fn reapplying_events_is_idempotent() {
     assert_eq!(bob.store.chat(&g).unwrap().unwrap().unread_count, 2);
     let cursor = bob.store.group_cursor(&g).unwrap();
     assert_eq!(cursor.first_gap(), None);
-    assert_eq!(cursor.contiguous_seq, 4);
+    assert_eq!(cursor.contiguous_seq, 3);
+}
+
+fn is_message(event: &IncomingEvent) -> bool {
+    matches!(event, IncomingEvent::Message(_))
 }
 
 #[test]
@@ -213,7 +217,7 @@ fn future_epoch_message_waits_for_its_commit() {
 
     alice.add(&ds, &g, &[&carol]);
     let id = alice.send_text(&ds, &g, "after the commit");
-    let mut events = bob.pull(&ds);
+    let mut events: Vec<_> = bob.pull(&ds).into_iter().filter(is_message).collect();
     assert_eq!(events.len(), 2);
     let message = events.pop().unwrap();
     let commit = events.pop().unwrap();
@@ -226,11 +230,7 @@ fn future_epoch_message_waits_for_its_commit() {
         .any(|c| matches!(c, StateChange::MessageUpserted(m) if m.message_id == id)));
     assert!(bob.store.parked_messages(&g).unwrap().is_empty());
     assert!(bob.apply(message).is_empty());
-    // Seq 4 is carol's Welcome, which bob never receives.
-    assert_eq!(
-        bob.store.group_cursor(&g).unwrap().first_gap(),
-        Some((4, 4))
-    );
+    assert_eq!(bob.store.group_cursor(&g).unwrap().first_gap(), None);
 }
 
 #[test]
