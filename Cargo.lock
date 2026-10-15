@@ -1188,6 +1188,7 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.2.17",
  "gim-common",
+ "gim-identity",
  "hkdf 0.12.4",
  "serde_json",
  "sha2 0.10.9",

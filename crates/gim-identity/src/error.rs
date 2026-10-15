@@ -30,6 +30,20 @@ pub enum IdentityError {
     SeqConflict(u64),
     #[error("device list seq overflow")]
     SeqOverflow,
+    #[error("expired")]
+    Expired,
+    #[error("not yet valid")]
+    NotYetValid,
+    #[error("challenge audience does not match this hub")]
+    AudienceMismatch,
+    #[error("hub root key does not match the expected hub")]
+    HubKeyMismatch,
+    #[error("invalid hub signature on the hosting entry of {0}")]
+    BadHubSignature(String),
+    #[error("hub {0} appears more than once")]
+    DuplicateHub(String),
+    #[error("hosting record has {0} hubs, expected 1..=16")]
+    HubCount(usize),
     #[error("random number generator failed: {0}")]
     Random(String),
 }
