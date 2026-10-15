@@ -458,9 +458,9 @@ impl SignedHostingRecord {
     /// Verifies the record in the documented order: extract only the claimed
     /// `user_id` and the embedded root key and check that the key derives
     /// it, check the user signature over the received `tbs`, then validate
-    /// the body (version, the [`UserHostingRecord::new`] checks except that
-    /// unsorted hubs are rejected rather than sorted,
-    /// `now < expires_at`). The caller compares
+    /// the body (version, hub count, entry shapes, the
+    /// [`UserHostingRecord::new`] checks except that unsorted hubs are
+    /// rejected rather than sorted, `now < expires_at`). The caller compares
     /// [`UserHostingRecord::user_id`] with the user it looked up.
     pub fn verify(&self, now: u64) -> Result<UserHostingRecord, IdentityError> {
         let body = cbor::decode(&self.tbs)?;
@@ -478,7 +478,13 @@ impl SignedHostingRecord {
         let [_, _, _, seq, expires_at, hubs] = cbor::body(body)?;
         let seq = cbor::uint(seq)?;
         let expires_at = cbor::uint(expires_at)?;
-        let hubs = cbor::list(hubs)?
+        // Count before decoding entries, so an oversized array is rejected
+        // without decoding it.
+        let hubs = cbor::list(hubs)?;
+        if hubs.is_empty() || hubs.len() > MAX_HUBS {
+            return Err(IdentityError::HubCount(hubs.len()));
+        }
+        let hubs = hubs
             .into_iter()
             .map(HostingEntry::decode)
             .collect::<Result<Vec<_>, _>>()?;

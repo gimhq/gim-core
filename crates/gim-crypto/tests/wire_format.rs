@@ -44,6 +44,20 @@ impl Device {
         device
     }
 
+    /// The device list of this device's user: this device only, seq 1.
+    fn device_list(&self) -> DeviceList {
+        let cert = SignedDeviceCert::issue(&self.root, &self.key.public(), 1_700_000_000_000, 1);
+        DeviceList::new(self.root.public(), 1, vec![cert], vec![]).unwrap()
+    }
+
+    /// Stores the device lists of `others` in this device's cache.
+    fn learn(&self, others: &[&Device]) {
+        for other in others {
+            let signed = other.device_list().sign(&other.root).unwrap();
+            self.lists.insert(&other.me.user_id, &signed).unwrap();
+        }
+    }
+
     fn key_package(&self) -> Vec<u8> {
         self.engine
             .generate_key_packages(&self.store, 1)
@@ -74,6 +88,9 @@ fn sorted(mut refs: Vec<DeviceRef>) -> Vec<DeviceRef> {
 /// Alice creates the group and adds Bob and Carol in one commit.
 fn trio() -> (Device, Device, Device) {
     let (alice, bob, carol) = (Device::new(1), Device::new(2), Device::new(3));
+    for device in [&alice, &bob, &carol] {
+        device.learn(&[&alice, &bob, &carol]);
+    }
     alice.engine.create_group(&alice.store, &group()).unwrap();
     let out = alice
         .engine
@@ -144,9 +161,12 @@ fn private_message_handshake_is_rejected() {
         .set_configuration(alice.store.mls_storage(), &config)
         .unwrap();
 
+    let dave = Device::new(4);
+    alice.learn(&[&dave]);
+    bob.learn(&[&dave]);
     let out = alice
         .engine
-        .add_members(&alice.store, &group(), &[Device::new(4).key_package()])
+        .add_members(&alice.store, &group(), &[dave.key_package()])
         .unwrap();
     assert_eq!(wire_format(&out.commit), WireFormat::PrivateMessage);
     assert!(matches!(
@@ -160,6 +180,9 @@ fn private_message_handshake_is_rejected() {
 fn commits_expose_added_and_removed_devices() {
     let (alice, bob, carol) = trio();
     let dave = Device::new(4);
+    for device in [&alice, &bob, &carol] {
+        device.learn(&[&dave]);
+    }
     let out = alice
         .engine
         .add_members(&alice.store, &group(), &[dave.key_package()])
@@ -214,24 +237,8 @@ fn commits_expose_added_and_removed_devices() {
 #[test]
 fn revoked_device_from_cache_is_removed_and_rejected() {
     let (alice, bob, carol) = trio();
-    let list = DeviceList::new(
-        carol.root.public(),
-        1,
-        vec![SignedDeviceCert::issue(
-            &carol.root,
-            &carol.key.public(),
-            1_700_000_000_000,
-            1,
-        )],
-        vec![],
-    )
-    .unwrap();
-    let revoked = list.revoke(&carol.me.device_id).unwrap();
+    let revoked = carol.device_list().revoke(&carol.me.device_id).unwrap();
     for device in [&alice, &bob] {
-        assert!(device
-            .lists
-            .insert(&carol.me.user_id, &list.sign(&carol.root).unwrap())
-            .unwrap());
         assert!(device
             .lists
             .insert(&carol.me.user_id, &revoked.sign(&carol.root).unwrap())

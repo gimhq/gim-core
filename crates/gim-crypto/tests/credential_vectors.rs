@@ -81,7 +81,7 @@ fn compute() -> Value {
     let invalid = |name: &str,
                    content: Vec<u8>,
                    credential_type: u16,
-                   leaf: usize,
+                   leaf: &[u8],
                    with_list: bool,
                    error: &str| {
         json!({
@@ -89,14 +89,22 @@ fn compute() -> Value {
             "input_hex": hex(&content),
             "context": {
                 "credential_type": credential_type,
-                "leaf_signature_key": hex(devices[leaf].0.as_bytes()),
+                "leaf_signature_key": hex(leaf),
                 "device_list": with_list.then(|| list_hex.clone()),
             },
             "expected_error": error,
         })
     };
 
+    let leaf = |n: usize| devices[n].0.as_bytes().as_slice();
     let content = devices[0].1.encode();
+    // Certified by the root but absent from the list.
+    let unlisted = DeviceSigningKey::from_seed(&seed(0x80)).public();
+    let unlisted_content = GimCredential::new(
+        root.public(),
+        SignedDeviceCert::issue(&root, &unlisted, CREATED_AT, 3),
+    )
+    .encode();
     let forged = GimCredential::new(
         root.public(),
         SignedDeviceCert::issue(&other_root, &devices[0].0, CREATED_AT, 1),
@@ -123,21 +131,29 @@ fn compute() -> Value {
         "device_seeds": [hex(&seed(0x20)), hex(&seed(0x40))],
         "valid": [
             valid("device", 0, true),
-            valid("device_without_known_list", 1, false),
         ],
         "invalid": [
-            invalid("cert_signed_by_another_root", forged, gim, 0, false, "bad_cert_signature"),
-            invalid("leaf_key_mismatch", content.clone(), gim, 1, false, "leaf_key_mismatch"),
-            invalid("revoked_device", devices[1].1.encode(), gim, 1, true, "revoked_device"),
-            invalid("non_canonical_cbor", non_canonical, gim, 0, false, "non_canonical_cbor"),
-            invalid("unsupported_version", with_version(2), gim, 0, false, "unsupported_version"),
+            invalid("cert_signed_by_another_root", forged, gim, leaf(0), false, "bad_cert_signature"),
+            invalid("leaf_key_mismatch", content.clone(), gim, leaf(1), false, "leaf_key_mismatch"),
+            invalid("revoked_device", devices[1].1.encode(), gim, leaf(1), true, "revoked_device"),
+            invalid("non_canonical_cbor", non_canonical, gim, leaf(0), false, "non_canonical_cbor"),
+            invalid("unsupported_version", with_version(2), gim, leaf(0), false, "unsupported_version"),
             invalid(
                 "wrong_credential_type",
-                content,
+                content.clone(),
                 BASIC_CREDENTIAL_TYPE,
-                0,
+                leaf(0),
                 false,
                 "wrong_credential_type",
+            ),
+            invalid("device_list_unknown", content, gim, leaf(0), false, "device_list_unknown"),
+            invalid(
+                "device_not_in_list",
+                unlisted_content,
+                gim,
+                unlisted.as_bytes(),
+                true,
+                "device_not_in_list",
             ),
         ],
     })
