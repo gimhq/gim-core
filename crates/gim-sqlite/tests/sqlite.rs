@@ -9,8 +9,8 @@ use common::{group, key, setup, text, Device, NOW};
 use gim_base::model::{
     Chat, ChatKind, ChatMember, DepartedMember, GroupCursor, GroupMessage, MediaCacheEntry,
     Membership, MembershipChangeKind, MembershipEvent, Message, MessageContent, MessageKind,
-    OutboxEntry, OutboxKind, OutboxState, PendingCommit, PendingLeave, PendingMedia, PendingWelcome,
-    PreparedPayload, SendState, UserInfo,
+    OutboxEntry, OutboxKind, OutboxState, PendingCommit, PendingLeave, PendingMedia,
+    PendingWelcome, PreparedPayload, SendState, UserInfo,
 };
 use gim_base::{
     BaseError, MemoryStore, StateReader, StateStore, StoreError, StoreTxn, WriteTarget,

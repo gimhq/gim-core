@@ -14,7 +14,9 @@ use gim_base::{BaseClient, BaseError, StateReader, StateStore, StoreTxn};
 use gim_common::{now_ms, ClientId, GroupId};
 use gim_crypto::MlsEngine;
 use gim_sdk::testing::MemorySecretStorage;
-use gim_sdk::{Client, ClientBuilder, ClientError, SecretStorage, COMMIT_POST_ATTEMPTS, SESSION_SECRET_KEY};
+use gim_sdk::{
+    Client, ClientBuilder, ClientError, SecretStorage, COMMIT_POST_ATTEMPTS, SESSION_SECRET_KEY,
+};
 use gim_sqlite::{DbKey, SqliteStore};
 use tempfile::TempDir;
 
@@ -147,17 +149,19 @@ async fn a_leave_proposal_left_uncommitted_is_committed_after_restart() {
     let node = Persistent::new(&transport);
     let bob = node.register("bob").await;
     let bob_id = bob.session().unwrap().device.user_id;
-    let g = alice.client.create_group_chat(None, &[bob_id]).await.unwrap();
+    let g = alice
+        .client
+        .create_group_chat(None, &[bob_id])
+        .await
+        .unwrap();
     bob.sync_once().await.unwrap();
     let service = transport.inner.service();
 
     // Bob, the only member left, commits alice's leave; the posts fail.
     alice.client.leave(&g).await.unwrap();
-    transport.faults.fail_posts(
-        MessageKind::Commit,
-        false,
-        COMMIT_POST_ATTEMPTS as usize,
-    );
+    transport
+        .faults
+        .fail_posts(MessageKind::Commit, false, COMMIT_POST_ATTEMPTS as usize);
     assert!(bob.sync_once().await.is_err());
     assert_eq!(service.epoch(&g), Ok(1));
 
@@ -181,16 +185,18 @@ async fn leaving_survives_a_restart() {
     let node = Persistent::new(&transport);
     let bob = node.register("bob").await;
     let bob_id = bob.session().unwrap().device.user_id;
-    let g = alice.client.create_group_chat(None, &[bob_id]).await.unwrap();
+    let g = alice
+        .client
+        .create_group_chat(None, &[bob_id])
+        .await
+        .unwrap();
     bob.sync_once().await.unwrap();
     let service = transport.inner.service();
 
     // The proposal never reaches the hub.
-    transport.faults.fail_posts(
-        MessageKind::Commit,
-        false,
-        COMMIT_POST_ATTEMPTS as usize,
-    );
+    transport
+        .faults
+        .fail_posts(MessageKind::Commit, false, COMMIT_POST_ATTEMPTS as usize);
     assert!(bob.leave(&g).await.is_err());
     let leave = bob.store().pending_leave(&g).unwrap().unwrap();
     assert!(!leave.accepted);

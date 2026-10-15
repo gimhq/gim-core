@@ -111,7 +111,11 @@ async fn the_lowest_device_commits_the_leave_and_the_other_does_nothing() {
         (event.user_id, event.actor, event.kind),
         (carol.user_id(), carol.user_id(), MembershipChangeKind::Left)
     );
-    alice.client.send_text(&g, "after carol", None).await.unwrap();
+    alice
+        .client
+        .send_text(&g, "after carol", None)
+        .await
+        .unwrap();
     bob.sync().await;
     carol.sync().await;
     assert_eq!(bob.messages(&g).len(), 1);

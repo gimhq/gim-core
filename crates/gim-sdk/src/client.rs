@@ -872,10 +872,11 @@ impl<S: StateStore + 'static> Client<S> {
                                 else {
                                     return Ok(false);
                                 };
-                                let welcome = output.welcome.clone().map(|payload| PendingWelcome {
-                                    payload,
-                                    recipients: output.added.clone(),
-                                });
+                                let welcome =
+                                    output.welcome.clone().map(|payload| PendingWelcome {
+                                        payload,
+                                        recipients: output.added.clone(),
+                                    });
                                 (output, welcome)
                             }
                             CommitOp::Remove(devices) => {
@@ -1047,7 +1048,9 @@ impl<S: StateStore + 'static> Client<S> {
                     let mut pending = Vec::new();
                     for chat in txn.chats()? {
                         let gid = chat.group_id;
-                        if chat.membership != Membership::Joined || !engine.has_group(&*txn, &gid)? {
+                        if chat.membership != Membership::Joined
+                            || !engine.has_group(&*txn, &gid)?
+                        {
                             continue;
                         }
                         let proposals = engine.pending_proposals(&*txn, &gid)?;

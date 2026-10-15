@@ -384,7 +384,7 @@ impl Device {
 
 /// The device the SDK picks to commit pending Proposals at once: the
 /// lowest device id.
-pub fn lowest<'a>(devices: [&'a Device; 2]) -> (&'a Device, &'a Device) {
+pub fn lowest(devices: [&Device; 2]) -> (&Device, &Device) {
     let [a, b] = devices;
     if a.device().device_id.as_str() < b.device().device_id.as_str() {
         (a, b)

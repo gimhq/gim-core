@@ -309,7 +309,6 @@ async fn commit_of_unknown_outcome_stays_pending_until_the_next_sync() {
     assert_eq!(bob.messages(&g).len(), 1);
 }
 
-
 #[tokio::test]
 async fn typing_is_sent_directly_and_rate_limited() {
     let transport = FlakyTransport::new();
@@ -394,7 +393,11 @@ async fn a_post_that_failed_in_a_send_is_retried_by_the_sender_soon() {
     transport
         .faults
         .fail_posts(MessageKind::Application, true, 1);
-    let id = alice.client.send_text(&g, "lost reply", None).await.unwrap();
+    let id = alice
+        .client
+        .send_text(&g, "lost reply", None)
+        .await
+        .unwrap();
     assert_eq!(alice.message(&id).send_state, Some(SendState::Pending));
     // Re-posted after the entry's ~1 s backoff, not the sender's idle wait.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);

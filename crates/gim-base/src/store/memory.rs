@@ -235,11 +235,7 @@ impl StateReader for MemoryStore {
     }
 
     fn pending_leaves(&self) -> StoreResult<Vec<PendingLeave>> {
-        Ok(read(&self.rows)?
-            .pending_leaves
-            .values()
-            .cloned()
-            .collect())
+        Ok(read(&self.rows)?.pending_leaves.values().cloned().collect())
     }
 
     fn departed_members(&self) -> StoreResult<Vec<DepartedMember>> {
