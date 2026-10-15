@@ -974,7 +974,6 @@ dependencies = [
  "gim-common",
  "gim-crypto",
  "gim-ffi",
- "gim-proto",
  "gim-sdk",
  "gim-sqlite",
  "gim-ui",
