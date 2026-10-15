@@ -18,6 +18,9 @@ use crate::stream::{Backoff, ConnectionState};
 use crate::transport::{EventBatch, TransportError};
 use crate::{Client, ClientError, Result};
 
+/// Shortest interval between two long-polls that returned no events.
+const MIN_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
 /// Messages per `group_messages` request when backfilling.
 pub const BACKFILL_PAGE: u32 = 100;
 
@@ -98,6 +101,17 @@ impl<S: StateStore + 'static> Client<S> {
         let client = self.clone();
         *task = Some(tokio::spawn(async move { client.sync_loop(session).await }));
         Ok(())
+    }
+
+    /// Whether the sync loop is running: started and not stopped, by
+    /// [`Client::stop_sync`] or by itself.
+    pub fn is_sync_running(&self) -> bool {
+        self.inner
+            .sync_task
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|t| !t.is_finished())
     }
 
     /// Stops the sync loop. Returns why it stopped by itself, if it did:
@@ -267,7 +281,14 @@ impl<S: StateStore + 'static> Client<S> {
                     if stream_retry_at.is_some_and(|at| Instant::now() >= at) {
                         return Ok(());
                     }
-                    self.fetch(session, settings.long_poll_wait).await?
+                    let started = Instant::now();
+                    let fetched = self.fetch(session, settings.long_poll_wait).await?;
+                    if matches!(&fetched, Fetched::Batch(b) if b.events.is_empty()) {
+                        // The request was not held (a transport that does
+                        // not wait, or an early answer): do not spin.
+                        tokio::time::sleep_until(started + MIN_POLL_INTERVAL).await;
+                    }
+                    fetched
                 }
             };
             let expired = matches!(fetched, Fetched::Expired { .. });

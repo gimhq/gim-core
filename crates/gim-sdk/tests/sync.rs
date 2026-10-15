@@ -171,6 +171,7 @@ async fn stream_close_4410_recovers_and_reconnects() {
     let mut states = s.bob.client.subscribe_connection_state();
     s.bob.client.start_sync().unwrap();
     reach_state(&mut states, ConnectionState::Connected).await;
+    s.server.streams_served(1).await;
 
     // Pruned: these events never reach Bob; only the history has them.
     let first = s.next_seq();
