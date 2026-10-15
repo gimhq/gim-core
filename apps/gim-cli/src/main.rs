@@ -60,6 +60,12 @@ fn long_about() -> String {
     )
 }
 
+const MEMBERS_ABOUT: &str = "Lists devices known from chat membership only.";
+
+const TYPING_ABOUT: &str = "Typing indicators expire on their own; --stop only takes effect \
+     within the same process that sent the start (gim-sdk keeps typing state in memory), \
+     so from a fresh process it is a no-op.";
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Register a new device (requires --server).
@@ -81,6 +87,7 @@ enum Command {
     #[command(subcommand)]
     Group(GroupCommand),
     /// List the members of a chat.
+    #[command(long_about = MEMBERS_ABOUT)]
     Members { chat: String },
     /// Send a text message.
     Send {
@@ -131,6 +138,7 @@ enum Command {
         limit: usize,
     },
     /// Send a typing notification.
+    #[command(long_about = TYPING_ABOUT)]
     Typing {
         chat: String,
         /// Stop typing instead.
@@ -322,6 +330,24 @@ mod tests {
             );
         }
         assert!(help.contains("5  server, network or transport error"));
+    }
+
+    #[test]
+    fn typing_and_members_help_state_their_limits() {
+        let mut cli = Cli::command();
+        for (name, about) in [("typing", TYPING_ABOUT), ("members", MEMBERS_ABOUT)] {
+            let help = cli
+                .find_subcommand_mut(name)
+                .unwrap()
+                .render_long_help()
+                .to_string();
+            assert!(help.contains(about), "{name}:\n{help}");
+        }
+        assert!(TYPING_ABOUT.contains("from a fresh process it is a no-op."));
+        assert_eq!(
+            MEMBERS_ABOUT,
+            "Lists devices known from chat membership only."
+        );
     }
 
     #[test]
