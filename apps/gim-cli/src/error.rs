@@ -30,8 +30,6 @@ pub fn exit_codes_help() -> String {
 pub enum ErrorKind {
     Other,
     Usage,
-    // Raised by `listen` / `wait-for`.
-    #[allow(dead_code)]
     Timeout,
     NotFound,
     Server,
@@ -80,6 +78,10 @@ impl CliError {
 
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::NotFound, message)
+    }
+
+    pub fn timeout(message: impl Into<String>) -> Self {
+        Self::new(ErrorKind::Timeout, message)
     }
 
     pub fn other(message: impl Into<String>) -> Self {

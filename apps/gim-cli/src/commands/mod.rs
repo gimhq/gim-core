@@ -3,13 +3,15 @@
 
 pub mod account;
 pub mod chats;
+pub mod listen;
 pub mod media;
 pub mod messages;
+pub mod wait_for;
 
 use gim_base::StateReader;
 use gim_common::{GroupId, MessageId};
 
-use crate::error::Result;
+use crate::error::{CliError, ErrorKind, Result};
 use crate::output::{send_state_name, ChatIdOut, Output, SentOut};
 use crate::profile::Ctx;
 
@@ -19,6 +21,23 @@ pub fn chat_id_output(chat_id: &GroupId) -> Output {
         chat_id: chat_id.to_string(),
     };
     Output::new(&out, chat_id.to_string())
+}
+
+/// Fails once the sync loop stopped by itself (the server rejected the
+/// token), with why it stopped.
+pub fn check_sync(ctx: &Ctx) -> Result<()> {
+    if ctx.client.is_sync_running() {
+        return Ok(());
+    }
+    ctx.client.stop_sync()?;
+    Err(CliError::new(ErrorKind::Server, "sync loop stopped"))
+}
+
+/// Stops the sync loop of `listen` / `wait-for` and sends what was queued.
+pub async fn stop_sync(ctx: &Ctx) -> Result<()> {
+    let stopped = ctx.client.stop_sync();
+    ctx.client.flush_outbox().await?;
+    Ok(stopped?)
 }
 
 /// A message just queued: its id and current send state.

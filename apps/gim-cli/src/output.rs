@@ -37,13 +37,29 @@
 //!   "delivered"|"read"}}`. SendState = `"pending"|"sent"|"delivered"|
 //!   "read"|"failed"` (own messages only).
 //! - `download`: `{"path", "size"}`
+//! - `wait-for`: `{"message": Message}`
+//! - `listen` prints one object per line (JSON lines) instead:
+//!   `{"event": "message", "message": Message}`,
+//!   `{"event": "message_removed", "chat_id", "message_id"}`,
+//!   `{"event": "chat", "chat": ChatSummary}`, `{"event": "chat_removed",
+//!   "chat_id"}`, `{"event": "membership", "chat_id", "seq", "user", "actor",
+//!   "change": "added"|"removed"|"left", "at_ms"}`, `{"event": "typing",
+//!   "chat_id", "user", "active": bool}`, `{"event": "connection", "state":
+//!   "offline"|"connecting"|"syncing"|"connected"}` (`user` / `actor`:
+//!   handle, else user id). An error still ends the stream with one error
+//!   object.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use gim_base::model::{Chat, ChatKind, Membership, Message, MessageContent, SendState, UserInfo};
+use gim_base::model::{
+    Chat, ChatKind, Membership, MembershipChangeKind, Message, MessageContent, SendState,
+    StateChange, UserInfo,
+};
 use gim_common::UserId;
+use gim_sdk::ConnectionState;
 use serde::Serialize;
+use serde_json::json;
 
 use crate::error::CliError;
 use crate::resolve::{peer_of, users_of, Directory};
@@ -63,9 +79,19 @@ impl Output {
         }
     }
 
+    /// Nothing to print (`listen` printed as it went).
+    pub fn empty() -> Self {
+        Self {
+            json: serde_json::Value::Null,
+            human: String::new(),
+        }
+    }
+
     pub fn print(&self, json: bool) {
         if json {
-            println!("{}", self.json);
+            if !self.json.is_null() {
+                println!("{}", self.json);
+            }
         } else if !self.human.is_empty() {
             println!("{}", self.human);
         }
@@ -210,6 +236,11 @@ pub struct MessagesOut {
 }
 
 #[derive(Debug, Serialize)]
+pub struct MessageWrapOut {
+    pub message: MessageOut,
+}
+
+#[derive(Debug, Serialize)]
 pub struct DownloadOut {
     pub path: String,
     pub size: u64,
@@ -239,8 +270,25 @@ pub fn send_state_name(state: SendState) -> &'static str {
     }
 }
 
+pub fn membership_change_name(kind: MembershipChangeKind) -> &'static str {
+    match kind {
+        MembershipChangeKind::Added => "added",
+        MembershipChangeKind::Removed => "removed",
+        MembershipChangeKind::Left => "left",
+    }
+}
+
+pub fn connection_state_name(state: ConnectionState) -> &'static str {
+    match state {
+        ConnectionState::Offline => "offline",
+        ConnectionState::Connecting => "connecting",
+        ConnectionState::Syncing => "syncing",
+        ConnectionState::Connected => "connected",
+    }
+}
+
 /// Snake-case serde name of a unit enum (e.g. a receipt kind).
-fn serde_name(value: &impl Serialize) -> String {
+pub fn serde_name(value: &impl Serialize) -> String {
     match serde_json::to_value(value) {
         Ok(serde_json::Value::String(name)) => name,
         other => format!("{other:?}"),
@@ -403,6 +451,95 @@ pub fn message_line(m: &MessageOut) -> String {
     line
 }
 
+/// The `listen` line of a change; `None` for changes that are not printed
+/// (`KeyPackagesLow`). `last` is the last message of an upserted chat.
+pub fn event_output(
+    change: &StateChange,
+    me: &UserId,
+    directory: &Directory,
+    last: Option<&Message>,
+) -> Option<Output> {
+    let (json, human) = match change {
+        StateChange::MessageUpserted(message) => {
+            let out = message_out(message, directory);
+            let human = format!("message {}", message_line(&out));
+            (json!({"event": "message", "message": out}), human)
+        }
+        StateChange::MessageRemoved {
+            group_id,
+            message_id,
+        } => (
+            json!({
+                "event": "message_removed",
+                "chat_id": group_id.to_string(),
+                "message_id": message_id.to_string(),
+            }),
+            format!("message-removed {group_id} {message_id}"),
+        ),
+        StateChange::ChatUpserted(chat) => {
+            let out = chat_summary(chat, me, directory, last);
+            let human = format!(
+                "chat {} {} {}",
+                out.id,
+                out.kind,
+                out.name.as_deref().unwrap_or("-")
+            );
+            (json!({"event": "chat", "chat": out}), human)
+        }
+        StateChange::ChatRemoved(group_id) => (
+            json!({"event": "chat_removed", "chat_id": group_id.to_string()}),
+            format!("chat-removed {group_id}"),
+        ),
+        StateChange::MembershipChanged(event) => {
+            let (user, actor) = (
+                directory.label(&event.user_id),
+                directory.label(&event.actor),
+            );
+            let change = membership_change_name(event.kind);
+            let human = format!("membership {} {user} {change} by {actor}", event.group_id);
+            let json = json!({
+                "event": "membership",
+                "chat_id": event.group_id.to_string(),
+                "seq": event.seq,
+                "user": user,
+                "actor": actor,
+                "change": change,
+                "at_ms": event.at_ms,
+            });
+            (json, human)
+        }
+        StateChange::Typing {
+            group_id,
+            user_id,
+            active,
+        } => {
+            let user = directory.label(user_id);
+            let human = format!(
+                "typing {group_id} {user} {}",
+                if *active { "started" } else { "stopped" }
+            );
+            let json = json!({
+                "event": "typing",
+                "chat_id": group_id.to_string(),
+                "user": user,
+                "active": active,
+            });
+            (json, human)
+        }
+        StateChange::KeyPackagesLow => return None,
+    };
+    Some(Output { json, human })
+}
+
+/// The `listen` line of a connection state transition.
+pub fn connection_output(state: ConnectionState) -> Output {
+    let name = connection_state_name(state);
+    Output {
+        json: json!({"event": "connection", "state": name}),
+        human: format!("connection {name}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -474,5 +611,106 @@ mod tests {
         assert_eq!(summary_of(&m), "Anchored in Hvar");
         m.deleted = true;
         assert_eq!(summary_of(&m), "(deleted)");
+    }
+
+    fn line(change: &StateChange) -> (serde_json::Value, String) {
+        let directory = Directory::from_users([UserInfo {
+            user_id: UserId::new("u-bob").unwrap(),
+            handle: "bob".into(),
+            display_name: "Bob".into(),
+        }]);
+        let me = UserId::new("u-alice").unwrap();
+        let out = event_output(change, &me, &directory, None).unwrap();
+        // One line, no pretty printing.
+        assert!(!out.json.to_string().contains('\n'));
+        (out.json, out.human)
+    }
+
+    #[test]
+    fn state_changes_map_to_event_lines() {
+        let g = || GroupId::new("g-1").unwrap();
+        let (json, human) = line(&StateChange::MessageUpserted(message()));
+        assert_eq!(json["event"], "message");
+        assert_eq!(json["message"]["id"], "m-2");
+        assert_eq!(json["message"]["text"], "Anchored in Hvar");
+        assert_eq!(json["message"]["reactions"]["bob"][0], "⛵");
+        assert!(human.starts_with("message [7] m-2 u-alice: Anchored in Hvar"));
+
+        let removed = StateChange::MessageRemoved {
+            group_id: g(),
+            message_id: MessageId::new("m-2").unwrap(),
+        };
+        assert_eq!(
+            line(&removed),
+            (
+                json!({"event": "message_removed", "chat_id": "g-1", "message_id": "m-2"}),
+                "message-removed g-1 m-2".into()
+            )
+        );
+
+        let mut chat = Chat::new(g(), ChatKind::Group, 0);
+        chat.name = Some("crew".into());
+        let (json, human) = line(&StateChange::ChatUpserted(chat));
+        assert_eq!(json["event"], "chat");
+        assert_eq!(json["chat"]["id"], "g-1");
+        assert_eq!(json["chat"]["kind"], "group");
+        assert_eq!(json["chat"]["name"], "crew");
+        assert_eq!(human, "chat g-1 group crew");
+
+        assert_eq!(
+            line(&StateChange::ChatRemoved(g())),
+            (
+                json!({"event": "chat_removed", "chat_id": "g-1"}),
+                "chat-removed g-1".into()
+            )
+        );
+
+        let joined = StateChange::MembershipChanged(gim_base::model::MembershipEvent {
+            group_id: g(),
+            seq: 4,
+            user_id: UserId::new("u-bob").unwrap(),
+            actor: UserId::new("u-alice").unwrap(),
+            kind: MembershipChangeKind::Added,
+            at_ms: 9,
+        });
+        assert_eq!(
+            line(&joined),
+            (
+                json!({
+                    "event": "membership", "chat_id": "g-1", "seq": 4, "user": "bob",
+                    "actor": "u-alice", "change": "added", "at_ms": 9,
+                }),
+                "membership g-1 bob added by u-alice".into()
+            )
+        );
+
+        let typing = StateChange::Typing {
+            group_id: g(),
+            user_id: UserId::new("u-bob").unwrap(),
+            active: false,
+        };
+        assert_eq!(
+            line(&typing),
+            (
+                json!({"event": "typing", "chat_id": "g-1", "user": "bob", "active": false}),
+                "typing g-1 bob stopped".into()
+            )
+        );
+
+        let me = UserId::new("u-alice").unwrap();
+        let low = event_output(
+            &StateChange::KeyPackagesLow,
+            &me,
+            &Directory::default(),
+            None,
+        );
+        assert!(low.is_none());
+
+        let connected = connection_output(ConnectionState::Connected);
+        assert_eq!(
+            connected.json,
+            json!({"event": "connection", "state": "connected"})
+        );
+        assert_eq!(connected.human, "connection connected");
     }
 }
