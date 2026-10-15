@@ -4,6 +4,19 @@ use serde::{Deserialize, Serialize};
 pub const STALE_EPOCH: &str = "stale_epoch";
 /// Error code of a 410 on `GET /v2/events` and of a stream error frame.
 pub const CURSOR_EXPIRED: &str = "cursor_expired";
+/// Error code of a 400 on `PUT /v2/users/{user_id}/hosting-record`: the
+/// record does not verify or its lifetime is out of range.
+pub const INVALID_HOSTING_RECORD: &str = "invalid_hosting_record";
+/// Error code of a 409 on `PUT /v2/users/{user_id}/hosting-record`: the
+/// hub stores a record with a higher seq, or another one with the same seq.
+pub const STALE_HOSTING_RECORD: &str = "stale_hosting_record";
+/// Error code of a 403 on a federated request of a user without a valid
+/// hosting record listing the hub.
+pub const HOSTING_RECORD_REQUIRED: &str = "hosting_record_required";
+/// Error code of a 502: a peer hub refused the request.
+pub const PEER_REFUSED: &str = "peer_refused";
+/// Error code of a 503 (with `Retry-After`): a peer hub did not answer.
+pub const PEER_UNAVAILABLE: &str = "peer_unavailable";
 
 /// `Health`: `GET /healthz`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

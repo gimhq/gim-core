@@ -3,7 +3,7 @@
 use std::error::Error as _;
 use std::time::Duration;
 
-use gim_proto::v2::{CursorExpiredError, ErrorResponse};
+use gim_proto::v2::{self, CursorExpiredError, ErrorResponse};
 use reqwest::StatusCode;
 
 use crate::transport::TransportError;
@@ -36,6 +36,12 @@ pub(super) fn from_status(status: StatusCode, body: &[u8]) -> TransportError {
         StatusCode::NOT_FOUND => TransportError::NotFound(message),
         StatusCode::CONFLICT => TransportError::Conflict(message),
         StatusCode::PAYLOAD_TOO_LARGE => TransportError::TooLarge(message),
+        StatusCode::FORBIDDEN
+            if serde_json::from_slice::<ErrorResponse>(body)
+                .is_ok_and(|e| e.error.code == v2::HOSTING_RECORD_REQUIRED) =>
+        {
+            TransportError::HostingRecordRequired(message)
+        }
         StatusCode::GONE => match serde_json::from_slice::<CursorExpiredError>(body) {
             Ok(expired) => TransportError::Gone {
                 cursor: expired.cursor,

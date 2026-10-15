@@ -210,6 +210,8 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
                 connection_changes: broadcast::channel(CONNECTION_CAPACITY).0,
                 resolved_users: Default::default(),
                 link_pending: AtomicBool::new(false),
+                hosting_lock: Mutex::new(()),
+                hosting_wake: Notify::new(),
             }),
         })
     }
@@ -293,6 +295,10 @@ pub(crate) struct Inner<S> {
     pub(crate) resolved_users: std::sync::Mutex<HashSet<UserId>>,
     /// A linked identity waits for [`Client::confirm_link`].
     pub(crate) link_pending: AtomicBool,
+    /// Serializes hosting record publications.
+    pub(crate) hosting_lock: Mutex<()>,
+    /// Cuts the hosting record renewal wait short.
+    pub(crate) hosting_wake: Notify,
 }
 
 #[derive(Clone)]
