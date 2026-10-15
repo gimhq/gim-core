@@ -20,7 +20,7 @@ pub use error::GimError;
 pub use hooks::PlatformHooks;
 pub use link::{LinkSession, PendingApproval};
 pub use task_handle::TaskHandle;
-pub use timeline::{Timeline, TimelineDiff, TimelineListener};
+pub use timeline::{LocalTimeZone, Timeline, TimelineDiff, TimelineListener};
 pub use types::{
     ChatKind, ChatSummary, ConnectionState, DeviceInfo, MediaRef, MembershipChangeKind,
     MessageContent, MessageItem, MessagePreview, ReactionGroup, ReplyPreview, SendState, Session,

@@ -26,5 +26,5 @@ pub use items::{
     ChatKind, ChatListItem, MediaRef, MembershipChangeKind, MessageContent, MessageItem,
     MessagePreview, ReactionGroup, ReplyPreview, SendState, TimelineItem, UserProfile,
 };
-pub use timeline::{Timeline, TimelineOptions, DEFAULT_PAGE_SIZE};
+pub use timeline::{FixedOffset, TimeZone, Timeline, TimelineOptions, DEFAULT_PAGE_SIZE};
 pub use typing::{TypingNotifications, TYPING_TIMEOUT};

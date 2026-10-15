@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use gim_core::{
     create_client_with_fake_transport, ChatKind, ChatListDiff, ChatListListener, ChatSummary,
-    ClientConfig, ConnectionState, ConnectionStateListener, GimClient, GimError, MessageContent,
-    MessageItem, PlatformHooks, SendState, TaskHandle, TimelineDiff, TimelineItem,
+    ClientConfig, ConnectionState, ConnectionStateListener, GimClient, GimError, LocalTimeZone,
+    MessageContent, MessageItem, PlatformHooks, SendState, TaskHandle, TimelineDiff, TimelineItem,
     TimelineListener, TypingListener,
 };
 use gim_sdk::testing::FakeTransport;
@@ -230,6 +230,102 @@ fn text(item: &MessageItem) -> &str {
         MessageContent::Text { body } => body,
         other => panic!("not a text: {other:?}"),
     }
+}
+
+/// A time zone without DST, implemented on the "native" side.
+struct Offset(i32);
+
+impl LocalTimeZone for Offset {
+    fn utc_offset_secs(&self, _at_ms: i64) -> i32 {
+        self.0
+    }
+}
+
+fn separators(items: &[TimelineItem]) -> Vec<u64> {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            TimelineItem::DateSeparator { day_start_ms } => Some(*day_start_ms),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn date_separators_follow_the_local_time_zone() {
+    const HOUR_MS: i64 = 3_600_000;
+    const DAY_MS: i64 = 24 * HOUR_MS;
+    let transport = FakeTransport::new();
+    let alice = User::register(&transport, "alice", "Alice").await;
+    let chat = alice
+        .client
+        .create_group_chat("Crew".to_string(), Vec::new())
+        .await
+        .unwrap();
+    alice
+        .client
+        .send_text(chat.clone(), "late".to_string(), None)
+        .await
+        .unwrap();
+    let (timeline, _handle) = alice.timeline(&chat).await;
+    let items = timeline
+        .wait("the message", |items| messages(items).len() == 1)
+        .await;
+    let sent = messages(&items)[0].sent_at_ms as i64;
+    // UTC by default.
+    let utc_day = sent - sent.rem_euclid(DAY_MS);
+    assert_eq!(separators(&items), vec![utc_day as u64]);
+
+    // +2 h re-buckets the open timeline.
+    alice
+        .client
+        .set_local_time_zone(Some(Arc::new(Offset(7200))));
+    let local = sent + 2 * HOUR_MS;
+    let plus_two_day = local - local.rem_euclid(DAY_MS) - 2 * HOUR_MS;
+    timeline
+        .wait("the +2 h day", |items| {
+            separators(items) == vec![plus_two_day as u64]
+        })
+        .await;
+
+    // The clock is not under test control: pick the offset that makes the
+    // message 00:54 local (between +1 h and +25 h, so its UTC day is the
+    // day before).
+    let mut offset = (54 * 60_000 - sent).rem_euclid(DAY_MS);
+    if offset < HOUR_MS {
+        offset += DAY_MS;
+    }
+    // Whole seconds, rounded up: 00:54:00.xxx local.
+    let offset = (offset + 999) / 1000 * 1000;
+    let local = sent + offset;
+    let local_midnight = local - local.rem_euclid(DAY_MS) - offset;
+    assert_ne!(local_midnight, utc_day);
+    alice
+        .client
+        .set_local_time_zone(Some(Arc::new(Offset((offset / 1000) as i32))));
+    let items = timeline
+        .wait("the 00:54 local day", |items| {
+            separators(items) == vec![local_midnight as u64]
+        })
+        .await;
+    assert!(matches!(items[0], TimelineItem::DateSeparator { .. }));
+    assert_eq!(messages(&items).len(), 1);
+
+    // A timeline opened later uses the zone too.
+    let (later, _later_handle) = alice.timeline(&chat).await;
+    later
+        .wait("the 00:54 local day", |items| {
+            separators(items) == vec![local_midnight as u64]
+        })
+        .await;
+
+    // None is UTC again.
+    alice.client.set_local_time_zone(None);
+    timeline
+        .wait("the UTC day", |items| {
+            separators(items) == vec![utc_day as u64]
+        })
+        .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -27,12 +27,34 @@ use crate::Result;
 pub const DEFAULT_PAGE_SIZE: usize = 50;
 
 const DAY_MS: i64 = 86_400_000;
+const HOUR_MS: i64 = 3_600_000;
 
+/// The local time zone that date separators split calendar days in.
+pub trait TimeZone: Send + Sync {
+    /// Offset from UTC in effect at `at_ms` (Unix milliseconds), DST
+    /// included. Asked once per UTC hour of the items' timestamps (at the
+    /// start of that hour) and cached until the zone is replaced.
+    fn utc_offset_secs(&self, at_ms: i64) -> i32;
+}
+
+/// A time zone without DST.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FixedOffset(pub i32);
+
+impl TimeZone for FixedOffset {
+    fn utc_offset_secs(&self, _at_ms: i64) -> i32 {
+        self.0
+    }
+}
+
+#[derive(Clone)]
 pub struct TimelineOptions {
-    /// Offset of the local time zone from UTC; date separators split local
-    /// calendar days.
+    /// Offset of the local time zone from UTC, used when `time_zone` is
+    /// `None`; date separators split local calendar days.
     pub utc_offset_secs: i32,
+    /// The local time zone, with an offset per timestamp (DST-safe).
+    /// Overrides `utc_offset_secs`.
+    pub time_zone: Option<Arc<dyn TimeZone>>,
     /// Messages loaded when the timeline opens.
     pub initial_page_size: usize,
 }
@@ -41,8 +63,19 @@ impl Default for TimelineOptions {
     fn default() -> Self {
         Self {
             utc_offset_secs: 0,
+            time_zone: None,
             initial_page_size: DEFAULT_PAGE_SIZE,
         }
+    }
+}
+
+impl std::fmt::Debug for TimelineOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TimelineOptions")
+            .field("utc_offset_secs", &self.utc_offset_secs)
+            .field("time_zone", &self.time_zone.as_ref().map(|_| ".."))
+            .field("initial_page_size", &self.initial_page_size)
+            .finish()
     }
 }
 
@@ -80,10 +113,13 @@ impl Timeline {
         let own = own_user(client)?;
         let mut changes = client.subscribe_changes();
         let store: Arc<Reader> = client.store().clone();
+        let zone = options
+            .time_zone
+            .unwrap_or_else(|| Arc::new(FixedOffset(options.utc_offset_secs)));
         let state = Arc::new(Mutex::new(State {
             group_id: group_id.clone(),
             own,
-            utc_offset_ms: i64::from(options.utc_offset_secs) * 1000,
+            days: LocalDays::new(zone),
             page_size: options.initial_page_size,
             chat: None,
             messages: Vec::new(),
@@ -153,6 +189,16 @@ impl Timeline {
         (values, stream.map(diff::collapse_reset))
     }
 
+    /// Replaces the local time zone and moves the date separators to the
+    /// new local days, delivered as diffs through the item streams (only
+    /// separators are removed and inserted; messages stay). Call it when
+    /// the system time zone changes.
+    pub fn set_time_zone(&self, zone: Arc<dyn TimeZone>) {
+        let mut state = lock(&self.state);
+        state.days = LocalDays::new(zone);
+        state.publish();
+    }
+
     /// Loads up to `count` older messages (delivered through the item
     /// streams): from the store, and once it has nothing older, from the
     /// server history ([`Client::backfill_history`]), skipping what this
@@ -215,7 +261,7 @@ enum ItemKey {
 struct State {
     group_id: GroupId,
     own: UserId,
-    utc_offset_ms: i64,
+    days: LocalDays,
     page_size: usize,
     chat: Option<Chat>,
     /// Loaded messages in timeline order.
@@ -472,7 +518,7 @@ impl State {
     /// separators only move forward. While older messages are not loaded,
     /// membership events older than the window are left out too; direct
     /// chats show none.
-    fn build(&self) -> Vec<(ItemKey, TimelineItem)> {
+    fn build(&mut self) -> Vec<(ItemKey, TimelineItem)> {
         let lowest = match (self.has_more, self.oldest_seq()) {
             (true, Some(oldest)) => oldest,
             _ => 0,
@@ -523,11 +569,10 @@ impl State {
         let mut items = Vec::with_capacity(entries.len() + 1);
         let mut last_day = None;
         for (at_ms, key, item) in entries {
-            let local = at_ms as i64 + self.utc_offset_ms;
-            let day = local.div_euclid(DAY_MS);
+            let day = self.days.day(at_ms as i64);
             if last_day.is_none_or(|last| day > last) {
                 last_day = Some(day);
-                let day_start_ms = (day * DAY_MS - self.utc_offset_ms).max(0) as u64;
+                let day_start_ms = self.days.day_start_ms(day).max(0) as u64;
                 items.push((
                     ItemKey::Day(day_start_ms),
                     TimelineItem::DateSeparator { day_start_ms },
@@ -542,6 +587,46 @@ impl State {
         let (keys, items): (Vec<_>, Vec<_>) = self.build().into_iter().unzip();
         let old_keys = std::mem::replace(&mut self.keys, keys);
         diff::update_keyed(&mut self.items, old_keys, &items, &self.keys);
+    }
+}
+
+/// Local calendar days of a [`TimeZone`], with its offsets cached per UTC
+/// hour.
+struct LocalDays {
+    zone: Arc<dyn TimeZone>,
+    /// Offset in ms by UTC hour.
+    offsets: HashMap<i64, i64>,
+}
+
+impl LocalDays {
+    fn new(zone: Arc<dyn TimeZone>) -> Self {
+        Self {
+            zone,
+            offsets: HashMap::new(),
+        }
+    }
+
+    fn offset_ms(&mut self, at_ms: i64) -> i64 {
+        let hour = at_ms.div_euclid(HOUR_MS);
+        let zone = &self.zone;
+        *self
+            .offsets
+            .entry(hour)
+            .or_insert_with(|| i64::from(zone.utc_offset_secs(hour * HOUR_MS)) * 1000)
+    }
+
+    /// The local day number of `at_ms`.
+    fn day(&mut self, at_ms: i64) -> i64 {
+        (at_ms + self.offset_ms(at_ms)).div_euclid(DAY_MS)
+    }
+
+    /// When local `day` starts, in UTC ms: local midnight with the offset
+    /// in effect at midnight, which differs from the one later that day on
+    /// a DST transition day.
+    fn day_start_ms(&mut self, day: i64) -> i64 {
+        let midnight = day * DAY_MS;
+        let guess = midnight - self.offset_ms(midnight);
+        midnight - self.offset_ms(guess)
     }
 }
 
