@@ -58,12 +58,12 @@ fn commits_and_welcomes_record_membership_changes() {
     bob.sync(&ds);
     dave.sync(&ds);
 
-    // Dave proposes to leave; alice's commit removes him from the tree,
-    // which records that he left.
-    dave.propose_leave(&ds, &g);
+    // Dave proposes to leave; alice's commit of his proposal removes him
+    // from the tree, which records that he left.
+    let proposal = dave.propose_leave(&ds, &g);
     alice.sync(&ds);
     carol.sync(&ds);
-    let remove_dave = alice.remove(&ds, &g, &[&dave]);
+    let remove_dave = alice.commit_proposals(&ds, &g, common::proposal_leaves(&ds, &g, proposal));
     carol.sync(&ds);
 
     let added_bob = event(add_bob, "bob", "alice", Kind::Added);
@@ -240,9 +240,9 @@ fn leaving_records_the_own_left_event() {
     assert!(again.is_empty());
     assert_eq!(events(&bob, &g), before);
 
-    // Alice removes him from the tree and records the same kind of event.
+    // Alice commits his proposal and records the same kind of event.
     alice.sync(&ds);
-    let remove_bob = alice.remove(&ds, &g, &[&bob]);
+    let remove_bob = alice.commit_proposals(&ds, &g, vec![1]);
     assert_eq!(
         events(&alice, &g).last(),
         Some(&event(remove_bob, "bob", "alice", Kind::Left))

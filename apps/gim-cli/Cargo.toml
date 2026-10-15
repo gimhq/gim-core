@@ -14,6 +14,7 @@ base64.workspace = true
 clap.workspace = true
 gim-base.workspace = true
 gim-common.workspace = true
+gim-identity.workspace = true
 gim-sdk.workspace = true
 gim-sqlite.workspace = true
 serde.workspace = true

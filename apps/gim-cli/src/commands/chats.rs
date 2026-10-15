@@ -47,12 +47,12 @@ pub fn list(ctx: &Ctx) -> Result<Output> {
 
 /// The joined direct chat with the user, created if there is none.
 pub async fn dm(ctx: &Ctx, handle: &str) -> Result<Output> {
-    let user = ctx.resolve_user(handle).await?;
+    let user_id = ctx.resolve_user(handle).await?;
     let chats = ctx.store().chats()?;
-    let existing = find_direct(&chats, &ctx.session.device.user_id, &user.user_id);
+    let existing = find_direct(&chats, &ctx.session.device.user_id, &user_id);
     let chat_id = match existing {
         Some(chat) => chat.group_id.clone(),
-        None => ctx.client.create_direct_chat(&user.user_id).await?,
+        None => ctx.client.create_direct_chat(&user_id).await?,
     };
     Ok(chat_id_output(&chat_id))
 }

@@ -240,6 +240,44 @@ impl Device {
         self.post_commit(ds, g, out)
     }
 
+    /// Commits the pending proposals by reference; the fake hub does not
+    /// resolve references, so the leaves they remove are passed along.
+    /// Returns the commit seq.
+    pub fn commit_proposals(
+        &self,
+        ds: &FakeDeliveryService,
+        g: &GroupId,
+        removed_leaves: Vec<u32>,
+    ) -> u64 {
+        let out = self
+            .store
+            .transaction(|txn| Ok(self.engine.commit_pending_proposals(&*txn, g)?))
+            .unwrap()
+            .expect("pending proposals");
+        let epoch = inspect_handshake(&out.commit).unwrap().epoch;
+        let seq = ds
+            .submit_commit(
+                g,
+                &self.me,
+                SubmitCommit {
+                    client_id: new_client_id(),
+                    mls_message: out.commit,
+                    epoch,
+                    proposal: false,
+                    added: vec![],
+                    removed_leaves,
+                    welcome: None,
+                    welcome_recipients: vec![],
+                },
+            )
+            .unwrap()
+            .seq;
+        self.client
+            .merge_own_commit(&self.store, &self.engine, g, seq)
+            .unwrap();
+        seq
+    }
+
     pub fn enqueue(&self, g: &GroupId, content: Content) -> MessageId {
         self.client
             .enqueue(&self.store, g, content, None, NOW)
@@ -298,6 +336,12 @@ pub fn text(body: &str) -> Content {
     Content::Text {
         body: body.to_string(),
     }
+}
+
+/// Leaves removed by the proposal the hub sequenced at `seq`.
+pub fn proposal_leaves(ds: &FakeDeliveryService, g: &GroupId, seq: u64) -> Vec<u32> {
+    let proposal = ds.messages(g, seq - 1, 1).unwrap().remove(0);
+    inspect_handshake(&proposal.payload).unwrap().removed_leaves
 }
 
 pub fn new_client_id() -> ClientId {

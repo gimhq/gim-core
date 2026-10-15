@@ -1,7 +1,7 @@
 gim-hub API v2 contract, vendored verbatim (byte-identical copies).
 
 Repository: gimhq/gim-hub (local checkout: /srv/gimhq/im-client/hub)
-Commit:     e11ad00 (hub main at vendoring time, H3 closed federation)
+Commit:     9608f34 (hub main at vendoring time, H4 + FX6)
 Vendored:   2026-10-15
 
 Files (hub path -> this directory):

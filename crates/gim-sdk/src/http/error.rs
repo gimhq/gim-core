@@ -3,7 +3,7 @@
 use std::error::Error as _;
 use std::time::Duration;
 
-use gim_proto::v2::{CursorExpiredError, ErrorResponse};
+use gim_proto::v2::{self, CursorExpiredError, ErrorResponse};
 use reqwest::StatusCode;
 
 use crate::transport::TransportError;
@@ -28,14 +28,31 @@ pub(super) fn retry_later(
     }
 }
 
-/// Maps a non-2xx response.
-pub(super) fn from_status(status: StatusCode, body: &[u8]) -> TransportError {
+/// Maps a non-2xx response; `retry_after` is its `Retry-After` in seconds.
+pub(super) fn from_status(
+    status: StatusCode,
+    retry_after: Option<u64>,
+    body: &[u8],
+) -> TransportError {
     let message = message(status, body);
+    let code = serde_json::from_slice::<ErrorResponse>(body)
+        .map(|e| e.error.code)
+        .unwrap_or_default();
     match status {
         StatusCode::UNAUTHORIZED => TransportError::Unauthorized,
         StatusCode::NOT_FOUND => TransportError::NotFound(message),
         StatusCode::CONFLICT => TransportError::Conflict(message),
         StatusCode::PAYLOAD_TOO_LARGE => TransportError::TooLarge(message),
+        StatusCode::FORBIDDEN if code == v2::HOSTING_RECORD_REQUIRED => {
+            TransportError::HostingRecordRequired(message)
+        }
+        StatusCode::BAD_GATEWAY if code == v2::PEER_REFUSED => TransportError::PeerRefused(message),
+        StatusCode::SERVICE_UNAVAILABLE if code == v2::PEER_UNAVAILABLE => {
+            TransportError::PeerUnavailable {
+                retry_after_secs: retry_after,
+                reason: message,
+            }
+        }
         StatusCode::GONE => match serde_json::from_slice::<CursorExpiredError>(body) {
             Ok(expired) => TransportError::Gone {
                 cursor: expired.cursor,

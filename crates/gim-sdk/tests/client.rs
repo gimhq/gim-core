@@ -6,7 +6,7 @@ use std::sync::Arc;
 use gim_base::model::{
     ChatKind, Membership, MembershipChangeKind, Message, MessageContent, SendState, StateChange,
 };
-use gim_base::{MemoryStore, StateReader};
+use gim_base::{BaseError, MemoryStore, StateReader};
 use gim_common::{GroupId, MessageId, UserId};
 use gim_identity::recovery::open_root_key_backup;
 use gim_identity::{RootKey, SignedDeviceList};
@@ -366,10 +366,36 @@ async fn add_remove_and_leave() {
 
     let mut changes = carol.client.subscribe_changes();
     carol.client.leave(&g).await.unwrap();
+    // Leaving: still a member until another member commits the proposal;
+    // nothing can be sent meanwhile.
+    assert_eq!(
+        carol.store.chat(&g).unwrap().unwrap().membership,
+        Membership::Leaving
+    );
+    assert!(carol.store.pending_leave(&g).unwrap().unwrap().accepted);
+    assert!(matches!(
+        carol
+            .client
+            .send(&g, Content::Text { body: "x".into() })
+            .await,
+        Err(ClientError::Base(BaseError::InvalidState(_)))
+    ));
+    let epoch = transport.service().epoch(&g).unwrap();
+    // Alice, the only other member, commits it by reference on sync.
+    alice.sync().await;
+    assert_eq!(transport.service().epoch(&g), Ok(epoch + 1));
+    assert_eq!(alice.members(&g), sorted(vec![alice.user_id()]));
+    let alice_left = alice.store.membership_events(&g).unwrap().pop().unwrap();
+    assert_eq!(
+        (alice_left.user_id, alice_left.actor, alice_left.kind),
+        (carol.user_id(), alice.user_id(), MembershipChangeKind::Left)
+    );
+    carol.sync().await;
     assert_eq!(
         carol.store.chat(&g).unwrap().unwrap().membership,
         Membership::Left
     );
+    assert_eq!(carol.store.pending_leave(&g).unwrap(), None);
     // Carol's device records her own Left, like the other members do.
     let left = carol.store.membership_events(&g).unwrap().pop().unwrap();
     assert_eq!(

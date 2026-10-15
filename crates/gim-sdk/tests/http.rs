@@ -7,8 +7,8 @@ use gim_base::model::{ChatKind, IncomingEvent, MessageKind};
 use gim_common::{ClientId, DeviceRef, GroupId, UserId};
 use gim_identity::{DeviceSigningKey, RootKey};
 use gim_sdk::transport::{
-    AccessToken, ClaimedKeyPackage, CommitAccepted, HubEvent, OutgoingCommit, PostError,
-    SessionError, Transport, TransportError,
+    AccessToken, ClaimedKeyPackage, CommitAccepted, HostingEntryGrant, HubEvent, KeyPackageClaim,
+    OutgoingCommit, PostError, SessionError, StoredHostingRecord, Transport, TransportError,
 };
 use gim_sdk::{HttpConfig, HttpTransport};
 use serde_json::{json, Value};
@@ -82,6 +82,7 @@ fn message_json(seq: u64, kind: &str) -> Value {
         "sender_user_id": uid(2),
         "sender_device_id": did(2),
         "client_id": "c1",
+        "message_id": format!("m-{seq}"),
         "kind": kind,
         "epoch": 2,
         "mls_message": "AQID",
@@ -287,27 +288,30 @@ async fn claim_key_packages_by_user() {
         .and(path("/v2/keypackages/claim"))
         .and(header("authorization", BEARER))
         .and(body_json(json!({
-            "targets": [{ "user_id": uid(2) }, { "user_id": uid(3) }],
+            "targets": [{ "user_id": uid(2) }, { "user_id": uid(3) }, { "user_id": uid(4) }],
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "key_packages": [{
                 "user_id": uid(2), "device_id": did(2), "key_package": "BAU=", "last_resort": false,
             }],
             "missing": [{ "user_id": uid(3) }],
-            "unavailable": [],
+            "unavailable": [{ "user_id": uid(4) }],
         })))
         .mount(&server)
         .await;
     let claimed = transport(&server)
-        .claim_key_packages(&token(), &[user(2), user(3)])
+        .claim_key_packages_federated(&token(), &[user(2), user(3), user(4)])
         .await
         .unwrap();
     assert_eq!(
         claimed,
-        vec![ClaimedKeyPackage {
-            device: device(2),
-            key_package: vec![4, 5],
-        }]
+        KeyPackageClaim {
+            key_packages: vec![ClaimedKeyPackage {
+                device: device(2),
+                key_package: vec![4, 5],
+            }],
+            unavailable: vec![user(4)],
+        }
     );
 }
 
@@ -440,6 +444,77 @@ async fn post_message() {
 }
 
 #[tokio::test]
+async fn peer_failures_of_posts() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v2/groups/h2%2F1/messages"))
+        .and(body_json(
+            json!({ "client_id": "c1", "mls_message": "AQID" }),
+        ))
+        .respond_with(throttled(503, "peer_unavailable", "7"))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v2/groups/h2%2F1/messages"))
+        .and(body_json(
+            json!({ "client_id": "c2", "mls_message": "AQID" }),
+        ))
+        .respond_with(ResponseTemplate::new(503).set_body_json(error_body("peer_unavailable")))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v2/groups/h2%2F1/commits"))
+        .respond_with(ResponseTemplate::new(502).set_body_json(error_body("peer_refused")))
+        .mount(&server)
+        .await;
+    let http = transport(&server);
+    let (t, g) = (token(), gid("h2/1"));
+    let post = |client_id: &str| {
+        http.post_message(&t, &g, ClientId::new(client_id).unwrap(), vec![1, 2, 3])
+    };
+    let unavailable = post("c1").await.unwrap_err();
+    assert_eq!(
+        unavailable,
+        PostError::Transport(TransportError::PeerUnavailable {
+            retry_after_secs: Some(7),
+            reason: "peer_unavailable: nope".into(),
+        })
+    );
+    // Not retried within the call: the caller resends with the same id.
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(
+        post("c2").await,
+        Err(PostError::Transport(TransportError::PeerUnavailable {
+            retry_after_secs: None,
+            reason: "peer_unavailable: nope".into(),
+        }))
+    );
+    let commit = OutgoingCommit {
+        client_id: ClientId::new("c3").unwrap(),
+        mls_message: vec![1, 2, 3],
+        welcome: None,
+        welcome_recipients: vec![],
+    };
+    let refused = http
+        .submit_commit(&token(), &gid("h2/1"), commit)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused,
+        PostError::Transport(TransportError::PeerRefused("peer_refused: nope".into()))
+    );
+    let PostError::Transport(refused) = refused else {
+        unreachable!()
+    };
+    assert!(refused.is_peer_failure());
+    assert_eq!(refused.retry_after(), None);
+    let PostError::Transport(unavailable) = unavailable else {
+        unreachable!()
+    };
+    assert_eq!(unavailable.retry_after(), Some(Duration::from_secs(7)));
+}
+
+#[tokio::test]
 async fn post_message_conflicts() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -509,8 +584,10 @@ async fn fetch_events_long_poll() {
             // Not a gim-identity user id: skipped.
             { "cursor": 17, "created_at": 1, "type": "device_list.updated",
               "data": { "user_id": "u_b", "device_list": "AQI=" } },
+            { "cursor": 18, "created_at": 1, "type": "hosting_record.expiring",
+              "data": { "user_id": uid(1), "expires_at": 1_700_000_000_000_i64, "seq": 3 } },
         ],
-        "next_cursor": 17,
+        "next_cursor": 18,
     });
     Mock::given(method("GET"))
         .and(path("/v2/events"))
@@ -524,8 +601,8 @@ async fn fetch_events_long_poll() {
         .fetch_events(&token(), Some(10), Duration::from_secs(25))
         .await
         .unwrap();
-    assert_eq!(batch.next_cursor, 17);
-    assert_eq!(batch.events.len(), 5);
+    assert_eq!(batch.next_cursor, 18);
+    assert_eq!(batch.events.len(), 6);
     let HubEvent::Group(IncomingEvent::Message(message)) = &batch.events[0] else {
         panic!("expected a message: {:?}", batch.events[0]);
     };
@@ -557,6 +634,14 @@ async fn fetch_events_long_poll() {
         HubEvent::DeviceListUpdated {
             user_id: user(2),
             device_list: vec![1, 2]
+        }
+    );
+    assert_eq!(
+        batch.events[5],
+        HubEvent::HostingRecordExpiring {
+            user_id: user(1),
+            expires_at_ms: 1_700_000_000_000,
+            seq: 3
         }
     );
 }
@@ -655,7 +740,7 @@ async fn group_messages_from_seq_inclusive() {
 }
 
 #[tokio::test]
-async fn group_messages_skip_proposal_and_unknown_kinds() {
+async fn group_messages_skip_unknown_kinds_and_keep_proposals() {
     let server = MockServer::start().await;
     let page = |from: &str, messages: Vec<Value>| {
         Mock::given(method("GET"))
@@ -667,12 +752,9 @@ async fn group_messages_skip_proposal_and_unknown_kinds() {
             })))
     };
     // A page of skipped kinds only is followed by the next one.
-    page(
-        "4",
-        vec![message_json(4, "proposal"), message_json(5, "foo")],
-    )
-    .mount(&server)
-    .await;
+    page("4", vec![message_json(4, "foo"), message_json(5, "bar")])
+        .mount(&server)
+        .await;
     page(
         "6",
         vec![message_json(6, "application"), message_json(7, "proposal")],
@@ -685,19 +767,24 @@ async fn group_messages_skip_proposal_and_unknown_kinds() {
         .group_messages(&token(), &gid("g/1"), 4, 2)
         .await
         .unwrap();
-    assert_eq!(messages.iter().map(|m| m.seq).collect::<Vec<_>>(), vec![6]);
+    // Proposals are handshakes, applied like Commits.
+    assert_eq!(
+        messages.iter().map(|m| (m.seq, m.kind)).collect::<Vec<_>>(),
+        vec![(6, MessageKind::Application), (7, MessageKind::Commit)]
+    );
     let messages = http
         .group_messages(&token(), &gid("g/1"), 8, 2)
         .await
         .unwrap();
     assert!(messages.is_empty());
 
-    // Message events of those kinds are dropped.
+    // Message events of unknown kinds are dropped.
+    let proposal = message_json(4, "proposal");
     Mock::given(method("GET"))
         .and(path("/v2/events"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "events": [
-                {"cursor": 1, "created_at": 0, "type": "message", "data": message_json(4, "proposal")},
+                {"cursor": 1, "created_at": 0, "type": "message", "data": proposal},
                 {"cursor": 2, "created_at": 0, "type": "message", "data": message_json(5, "foo")},
                 {"cursor": 3, "created_at": 0, "type": "message", "data": message_json(6, "application")},
             ],
@@ -710,10 +797,18 @@ async fn group_messages_skip_proposal_and_unknown_kinds() {
         .await
         .unwrap();
     assert_eq!(batch.next_cursor, 3);
-    assert!(matches!(
-        batch.events.as_slice(),
-        [HubEvent::Group(IncomingEvent::Message(m))] if m.seq == 6
-    ));
+    let seqs: Vec<(u64, MessageKind)> = batch
+        .events
+        .iter()
+        .map(|e| match e {
+            HubEvent::Group(IncomingEvent::Message(m)) => (m.seq, m.kind),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        seqs,
+        vec![(4, MessageKind::Commit), (6, MessageKind::Application)]
+    );
 }
 
 #[tokio::test]
@@ -803,6 +898,8 @@ async fn status_mapping() {
         (500, "internal"),
         (503, "unavailable"),
         (400, "bad_request"),
+        (403, "hosting_record_required"),
+        (402, "forbidden"),
     ];
     for (status, code) in cases {
         Mock::given(method("GET"))
@@ -839,6 +936,96 @@ async fn status_mapping() {
         Err(TransportError::Server("unavailable: nope".into()))
     );
     assert!(matches!(info(400).await, Err(TransportError::Server(m)) if m.contains("400")));
+    assert_eq!(
+        info(403).await,
+        Err(TransportError::HostingRecordRequired(
+            "hosting_record_required: nope".into()
+        ))
+    );
+    assert!(matches!(info(402).await, Err(TransportError::Server(m)) if m.contains("402")));
+}
+
+#[tokio::test]
+async fn hosting_entry_and_record() {
+    let server = MockServer::start().await;
+    let entry_route = format!("/v2/users/{}/hosting-entry", uid(1));
+    Mock::given(method("POST"))
+        .and(path(entry_route.as_str()))
+        .and(header("authorization", BEARER))
+        .and(body_json(json!({ "priority": 0 })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "hub_id": "h1", "hub_root_pubkey": "AQI=", "priority": 0, "entry": "AwQ=",
+        })))
+        .mount(&server)
+        .await;
+    let record_route = format!("/v2/users/{}/hosting-record", uid(1));
+    let record = |seq: u64| {
+        json!({
+            "user_id": uid(1), "hosting_record": "BQY=", "seq": seq,
+            "expires_at": 1_700_000_000_000_i64, "hosted": true,
+        })
+    };
+    Mock::given(method("PUT"))
+        .and(path(record_route.as_str()))
+        .and(body_json(json!({ "hosting_record": "BQY=" })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(record(2)))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path(record_route.as_str()))
+        .and(body_json(json!({ "hosting_record": "AA==" })))
+        .respond_with(ResponseTemplate::new(409).set_body_json(error_body("stale_hosting_record")))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(record_route.as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(record(2)))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/users/{}/hosting-record", uid(2))))
+        .respond_with(ResponseTemplate::new(404).set_body_json(error_body("not_found")))
+        .mount(&server)
+        .await;
+
+    let http = transport(&server);
+    let grant = http
+        .create_hosting_entry(&token(), &user(1), 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        grant,
+        HostingEntryGrant {
+            hub_id: "h1".into(),
+            hub_root_public_key: vec![1, 2],
+            priority: 0,
+            entry: vec![3, 4],
+        }
+    );
+    let stored = StoredHostingRecord {
+        record: vec![5, 6],
+        seq: 2,
+        expires_at_ms: 1_700_000_000_000,
+        hosted: true,
+    };
+    assert_eq!(
+        http.put_hosting_record(&user(1), vec![5, 6]).await,
+        Ok(stored.clone())
+    );
+    assert_eq!(
+        http.put_hosting_record(&user(1), vec![0]).await,
+        Err(TransportError::Conflict(
+            "stale_hosting_record: nope".into()
+        ))
+    );
+    assert_eq!(http.hosting_record(&user(1)).await, Ok(Some(stored)));
+    assert_eq!(http.hosting_record(&user(2)).await, Ok(None));
+
+    // Record uploads and reads carry no token.
+    let requests = server.received_requests().await.unwrap();
+    for request in requests.iter().filter(|r| r.url.path() == record_route) {
+        assert!(!request.headers.contains_key("authorization"));
+    }
 }
 
 #[tokio::test]

@@ -35,6 +35,7 @@ use tokio::time::Instant;
 use zeroize::Zeroizing;
 
 use crate::client::{DEVICE_KEY_SECRET_KEY, ROOT_KEY_SECRET_KEY};
+use crate::hosting::Publish;
 use crate::identity::{random_seed, Enrollment};
 use crate::transport::TransportError;
 use crate::{Client, ClientError, Result};
@@ -99,9 +100,7 @@ impl<S: StateStore + 'static> Client<S> {
     /// New device: creates this device's signing key and a link offer
     /// naming `hubs` (where the old device may post the bundle).
     pub fn start_link(&self, hubs: Vec<String>) -> Result<LinkSession> {
-        if self.session().is_some() {
-            return Err(ClientError::AlreadyLoggedIn);
-        }
+        self.check_onboarding()?;
         let device_seed = random_seed()?;
         let device = DeviceSigningKey::from_seed(&device_seed).public();
         let (offer, secret) = LinkOffer::new(device, hubs).map_err(ClientError::identity)?;
@@ -118,33 +117,32 @@ impl<S: StateStore + 'static> Client<S> {
     /// [`LINK_TIMEOUT`]), opens and verifies it, stores the user's root key
     /// and this device's key, signs in and uploads KeyPackages. Returns the
     /// SAS to compare with the old device's; confirm it with
-    /// [`Client::confirm_link`]. A bundle that does not open or verify is
-    /// rejected and nothing is stored; the session cannot be reused then.
+    /// [`Client::confirm_link`]. Publishes the user's hosting record only if
+    /// the hub has no valid one or it is due for renewal (failures are only
+    /// logged).
+    ///
+    /// If no bundle arrived (network error, timeout), call it again with
+    /// the same session. A bundle that does not open or verify is rejected
+    /// and nothing is stored; the session cannot be reused then. A failure
+    /// after the bundle opened discards everything the call stored (see
+    /// [`crate::ENROLLMENT_SECRET_KEY`]) and uses the session up: start a
+    /// new link and approve it on the old device again. The device of the
+    /// failed attempt stays in the user's DeviceList until the old device
+    /// revokes it ([`Client::confirm_approval`] with `false` on the first
+    /// approval, or [`Client::revoke_device`]).
     pub async fn wait_link(&self, link: &LinkSession) -> Result<LinkResult> {
-        if self.session().is_some() {
-            return Err(ClientError::AlreadyLoggedIn);
-        }
+        self.check_onboarding()?;
         if link.used.swap(true, Ordering::SeqCst) {
             return Err(ClientError::InvalidInput(
                 "the link session was used; start a new one".into(),
             ));
         }
-        let link_id = link_id(&link.offer);
-        let deadline = Instant::now() + LINK_TIMEOUT;
-        let sealed = loop {
-            let started = Instant::now();
-            let fetched = self
-                .inner
-                .transport
-                .fetch_link_bundle(&link_id, LINK_POLL_WAIT)
-                .await?;
-            if let Some(sealed) = fetched {
-                break sealed;
+        let sealed = match self.poll_link_bundle(&link_id(&link.offer)).await {
+            Ok(sealed) => sealed,
+            Err(err) => {
+                link.used.store(false, Ordering::SeqCst);
+                return Err(err);
             }
-            if Instant::now() >= deadline {
-                return Err(ClientError::InvalidInput("no link bundle arrived".into()));
-            }
-            tokio::time::sleep_until(started + MIN_LINK_POLL_INTERVAL).await;
         };
         let (opened, sas) =
             open_link_bundle(&link.offer, &link.secret, &sealed).map_err(ClientError::identity)?;
@@ -165,21 +163,55 @@ impl<S: StateStore + 'static> Client<S> {
             .sign(&root)
             .map_err(ClientError::identity)?;
         let user_id = opened.cert.user_id;
-        self.enroll(Enrollment {
-            root_seed: root.to_seed(),
-            device_seed: link.device_seed.clone(),
-            cert,
-            device_list,
-            backup: None,
-            me: UserInfo {
-                user_id,
-                handle: String::new(),
-                display_name: String::new(),
-            },
-        })
+        self.begin_enrollment(&DeviceRef::new(
+            user_id.clone(),
+            opened.cert.device_public_key.device_id(),
+        ))
         .await?;
+        let enrolled = async {
+            self.enroll(Enrollment {
+                root_seed: root.to_seed(),
+                device_seed: link.device_seed.clone(),
+                cert,
+                device_list,
+                backup: None,
+                me: UserInfo {
+                    user_id,
+                    handle: String::new(),
+                    display_name: String::new(),
+                },
+            })
+            .await?;
+            // The other devices keep the user's record; publish only if it
+            // is missing or due.
+            self.publish_hosting_record_logged(Publish::IfDue).await;
+            Ok(())
+        }
+        .await;
+        self.end_enrollment(enrolled).await?;
         self.inner.link_pending.store(true, Ordering::SeqCst);
         Ok(LinkResult { sas })
+    }
+
+    /// Long-polls the hub for the bundle of `link_id`, up to
+    /// [`LINK_TIMEOUT`].
+    async fn poll_link_bundle(&self, link_id: &str) -> Result<Vec<u8>> {
+        let deadline = Instant::now() + LINK_TIMEOUT;
+        loop {
+            let started = Instant::now();
+            let fetched = self
+                .inner
+                .transport
+                .fetch_link_bundle(link_id, LINK_POLL_WAIT)
+                .await?;
+            if let Some(sealed) = fetched {
+                return Ok(sealed);
+            }
+            if Instant::now() >= deadline {
+                return Err(ClientError::InvalidInput("no link bundle arrived".into()));
+            }
+            tokio::time::sleep_until(started + MIN_LINK_POLL_INTERVAL).await;
+        }
     }
 
     /// New device: the user compared the SAS. On a mismatch the bundle came
@@ -262,7 +294,13 @@ impl<S: StateStore + 'static> Client<S> {
     /// device moves to the revoked set, otherwise they all stay listed. If a
     /// newer list lands concurrently (409), the list is read and rebuilt
     /// once more. Fails with [`TransportError::NotFound`] if the hub has no
-    /// DeviceList of the user.
+    /// DeviceList of the user. Publishes a new hosting record (seq + 1);
+    /// a failure there is only logged (the sync loop retries).
+    ///
+    /// On failure everything the call stored is discarded (see
+    /// [`crate::ENROLLMENT_SECRET_KEY`]); calling it again restores with a
+    /// new device key. If the hub's list certifies the device of the
+    /// discarded attempt, the new list revokes it (one more seq).
     ///
     /// Chats are not rejoined automatically: their members (or another own
     /// device) have to add this device again.
@@ -272,9 +310,7 @@ impl<S: StateStore + 'static> Client<S> {
         code: &RecoveryCode,
         revoke_others: bool,
     ) -> Result<()> {
-        if self.session().is_some() {
-            return Err(ClientError::AlreadyLoggedIn);
-        }
+        self.check_onboarding()?;
         let backup = self
             .inner
             .transport
@@ -289,57 +325,70 @@ impl<S: StateStore + 'static> Client<S> {
             .map_err(ClientError::identity)?;
         let device_seed = random_seed()?;
         let device = DeviceSigningKey::from_seed(&device_seed).public();
-
-        let mut rebuilt = false;
-        let (cert, device_list) = loop {
-            let current = self.hub_device_list(user_id, &root).await?;
-            let seq = current
-                .seq()
-                .checked_add(1)
-                .ok_or_else(|| ClientError::Identity("device list seq overflow".into()))?;
-            let cert = SignedDeviceCert::issue(&root, &device, now_ms(), seq);
-            let list = if revoke_others {
-                let revoked = current
-                    .revoked()
-                    .iter()
-                    .cloned()
-                    .chain(current.certs().map(|c| c.device_id.clone()))
-                    .collect();
-                DeviceList::new(root.public(), seq, vec![cert.clone()], revoked)
-            } else {
-                current.add_cert(cert.clone())
-            }
-            .and_then(|list| list.sign(&root))
-            .map_err(ClientError::identity)?;
-            match self
-                .inner
-                .transport
-                .put_device_list(user_id, list.to_bytes())
-                .await
-            {
-                Ok(()) => break (cert, list),
-                Err(TransportError::Conflict(reason)) if !rebuilt => {
-                    tracing::info!(%reason, "a newer device list landed; rebuilding");
-                    rebuilt = true;
+        let discarded = self
+            .enrolling_device()?
+            .filter(|d| d.user_id == *user_id)
+            .map(|d| d.device_id);
+        self.begin_enrollment(&DeviceRef::new(user_id.clone(), device.device_id()))
+            .await?;
+        let enrolled = async {
+            let mut rebuilt = false;
+            let (cert, device_list) = loop {
+                let mut current = self.hub_device_list(user_id, &root).await?;
+                if let Some(discarded) = discarded.as_ref().filter(|d| current.contains(d)) {
+                    current = current.revoke(discarded).map_err(ClientError::identity)?;
                 }
-                Err(err) => return Err(err.into()),
-            }
-        };
-        self.enroll(Enrollment {
-            root_seed: root.to_seed(),
-            device_seed,
-            cert,
-            device_list,
-            backup: None,
-            me: UserInfo {
-                user_id: user_id.clone(),
-                handle: String::new(),
-                display_name: String::new(),
-            },
-        })
-        .await?;
-        self.create_self_group().await?;
-        Ok(())
+                let seq = current
+                    .seq()
+                    .checked_add(1)
+                    .ok_or_else(|| ClientError::Identity("device list seq overflow".into()))?;
+                let cert = SignedDeviceCert::issue(&root, &device, now_ms(), seq);
+                let list = if revoke_others {
+                    let revoked = current
+                        .revoked()
+                        .iter()
+                        .cloned()
+                        .chain(current.certs().map(|c| c.device_id.clone()))
+                        .collect();
+                    DeviceList::new(root.public(), seq, vec![cert.clone()], revoked)
+                } else {
+                    current.add_cert(cert.clone())
+                }
+                .and_then(|list| list.sign(&root))
+                .map_err(ClientError::identity)?;
+                match self
+                    .inner
+                    .transport
+                    .put_device_list(user_id, list.to_bytes())
+                    .await
+                {
+                    Ok(()) => break (cert, list),
+                    Err(TransportError::Conflict(reason)) if !rebuilt => {
+                        tracing::info!(%reason, "a newer device list landed; rebuilding");
+                        rebuilt = true;
+                    }
+                    Err(err) => return Err(err.into()),
+                }
+            };
+            self.enroll(Enrollment {
+                root_seed: root.to_seed(),
+                device_seed,
+                cert,
+                device_list,
+                backup: None,
+                me: UserInfo {
+                    user_id: user_id.clone(),
+                    handle: String::new(),
+                    display_name: String::new(),
+                },
+            })
+            .await?;
+            self.publish_hosting_record_logged(Publish::Now).await;
+            self.create_self_group().await?;
+            Ok(())
+        }
+        .await;
+        self.end_enrollment(enrolled).await
     }
 
     /// The user's current DeviceList read from the hub without a session,

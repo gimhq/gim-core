@@ -58,12 +58,12 @@ fn commits_and_welcomes_record_membership_changes() {
     bob.sync(&ds);
     dave.sync(&ds);
 
-    // Dave proposes to leave; alice's commit removes him from the tree,
-    // which records that he left.
-    dave.propose_leave(&ds, &g);
+    // Dave proposes to leave; alice's commit of his proposal removes him
+    // from the tree, which records that he left.
+    let proposal = dave.propose_leave(&ds, &g);
     alice.sync(&ds);
     carol.sync(&ds);
-    let remove_dave = alice.remove(&ds, &g, &[&dave]);
+    let remove_dave = alice.commit_proposals(&ds, &g, common::proposal_leaves(&ds, &g, proposal));
     carol.sync(&ds);
 
     let added_bob = event(add_bob, "bob", "alice", Kind::Added);
@@ -240,11 +240,190 @@ fn leaving_records_the_own_left_event() {
     assert!(again.is_empty());
     assert_eq!(events(&bob, &g), before);
 
-    // Alice removes him from the tree and records the same kind of event.
+    // Alice commits his proposal and records the same kind of event.
     alice.sync(&ds);
-    let remove_bob = alice.remove(&ds, &g, &[&bob]);
+    let remove_bob = alice.commit_proposals(&ds, &g, vec![1]);
+    assert_eq!(common::proposal_leaves(&ds, &g, remove_bob - 1), vec![1]);
     assert_eq!(
         events(&alice, &g).last(),
         Some(&event(remove_bob, "bob", "alice", Kind::Left))
     );
+}
+
+#[test]
+fn leaving_waits_for_the_commit_of_another_member() {
+    let ds = FakeDeliveryService::new();
+    let g = group("crew");
+    let (alice, bob, carol) = (
+        Device::new("alice"),
+        Device::new("bob"),
+        Device::new("carol"),
+    );
+    alice.create_chat(&ds, &g);
+    alice.add(&ds, &g, &[&bob, &carol]);
+    bob.sync(&ds);
+    carol.sync(&ds);
+
+    let (leave, changes) = bob
+        .client
+        .start_leave(&bob.store, &bob.engine, &g, common::new_client_id(), NOW)
+        .unwrap();
+    assert_eq!((leave.epoch, leave.attempts, leave.accepted), (1, 1, false));
+    assert!(matches!(
+        changes.as_slice(),
+        [StateChange::ChatUpserted(chat)] if chat.membership == Membership::Leaving
+    ));
+    assert_eq!(bob.store.pending_leave(&g).unwrap(), Some(leave.clone()));
+    // Leaving twice is refused; nothing can be sent meanwhile.
+    assert!(bob
+        .client
+        .start_leave(&bob.store, &bob.engine, &g, common::new_client_id(), NOW)
+        .is_err());
+    assert!(matches!(
+        bob.client
+            .enqueue(&bob.store, &g, common::text("still here?"), None, NOW),
+        Err(gim_base::BaseError::InvalidState(reason)) if reason.contains("leaving")
+    ));
+    let proposal_seq = bob.post_proposal(&ds, &g, leave.payload.clone());
+    assert_eq!(common::proposal_leaves(&ds, &g, proposal_seq), vec![1]);
+    bob.client
+        .leave_accepted(&bob.store, &g, &leave.client_id)
+        .unwrap();
+    assert!(bob.store.pending_leave(&g).unwrap().unwrap().accepted);
+
+    // Messages still reach Bob, who sends no receipt for them. (Alice has
+    // not seen the proposal yet: with a pending proposal a member cannot
+    // send before committing it.)
+    let hello = alice.send_text(&ds, &g, "still there?");
+    alice.sync(&ds);
+    carol.sync(&ds);
+    bob.sync(&ds);
+    assert!(bob.store.message(&hello).unwrap().is_some());
+    assert!(bob.store.outbox_entries().unwrap().is_empty());
+    assert_eq!(
+        bob.store.chat(&g).unwrap().unwrap().membership,
+        Membership::Leaving
+    );
+
+    // Alice commits it by reference; everybody records Bob as left.
+    let remove_bob = alice.commit_proposals(&ds, &g, vec![1]);
+    assert!(remove_bob > proposal_seq);
+    carol.sync(&ds);
+    bob.sync(&ds);
+    let left = event(remove_bob, "bob", "alice", Kind::Left);
+    assert_eq!(events(&alice, &g).last(), Some(&left));
+    assert_eq!(events(&carol, &g).last(), Some(&left));
+    // Bob records his own Left, as when leaving without the commit.
+    assert_eq!(
+        events(&bob, &g).last(),
+        Some(&event(remove_bob, "bob", "bob", Kind::Left))
+    );
+    let chat = bob.store.chat(&g).unwrap().unwrap();
+    assert_eq!(chat.membership, Membership::Left);
+    assert_eq!(bob.store.pending_leave(&g).unwrap(), None);
+    assert!(!bob.engine.has_group(&bob.store, &g).unwrap());
+    for device in [&alice, &carol] {
+        let members: Vec<_> = device
+            .store
+            .chat(&g)
+            .unwrap()
+            .unwrap()
+            .members
+            .into_iter()
+            .map(|m| m.device)
+            .collect();
+        assert!(!members.contains(&bob.me));
+    }
+    // The hub's member_removed afterwards changes nothing.
+    bob.sync(&ds);
+    assert_eq!(
+        events(&bob, &g).last(),
+        Some(&event(remove_bob, "bob", "bob", Kind::Left))
+    );
+}
+
+#[test]
+fn a_stale_leave_is_renewed_for_the_new_epoch() {
+    let ds = FakeDeliveryService::new();
+    let g = group("crew");
+    let (alice, bob, carol) = (
+        Device::new("alice"),
+        Device::new("bob"),
+        Device::new("carol"),
+    );
+    alice.create_chat(&ds, &g);
+    alice.add(&ds, &g, &[&bob]);
+    bob.sync(&ds);
+    let (leave, _) = bob
+        .client
+        .start_leave(&bob.store, &bob.engine, &g, common::new_client_id(), NOW)
+        .unwrap();
+    bob.post_proposal(&ds, &g, leave.payload.clone());
+    // Alice adds Carol before committing it: the proposal is stale.
+    alice.sync(&ds);
+    alice.add(&ds, &g, &[&carol]);
+    bob.sync(&ds);
+    assert_eq!(bob.epoch(&g), 2);
+    let renewed = bob
+        .client
+        .renew_leave(&bob.store, &bob.engine, &g, common::new_client_id())
+        .unwrap();
+    assert_eq!((renewed.epoch, renewed.attempts), (2, 2));
+    assert_ne!(renewed.payload, leave.payload);
+    assert_eq!(bob.store.pending_leave(&g).unwrap(), Some(renewed.clone()));
+    bob.post_proposal(&ds, &g, renewed.payload);
+    alice.sync(&ds);
+    let remove_bob = alice.commit_proposals(&ds, &g, vec![1]);
+    bob.sync(&ds);
+    assert_eq!(
+        bob.store.chat(&g).unwrap().unwrap().membership,
+        Membership::Left
+    );
+    assert_eq!(
+        events(&bob, &g).last(),
+        Some(&event(remove_bob, "bob", "bob", Kind::Left))
+    );
+}
+
+#[test]
+fn an_aborted_leave_rejoins_and_a_hub_removal_finishes_it() {
+    let ds = FakeDeliveryService::new();
+    let g = group("crew");
+    let (alice, bob) = (Device::new("alice"), Device::new("bob"));
+    alice.create_chat(&ds, &g);
+    alice.add(&ds, &g, &[&bob]);
+    bob.sync(&ds);
+    bob.client
+        .start_leave(&bob.store, &bob.engine, &g, common::new_client_id(), NOW)
+        .unwrap();
+    let changes = bob.client.abort_leave(&bob.store, &bob.engine, &g).unwrap();
+    assert!(matches!(
+        changes.as_slice(),
+        [StateChange::ChatUpserted(chat)] if chat.membership == Membership::Joined
+    ));
+    assert_eq!(bob.store.pending_leave(&g).unwrap(), None);
+    assert!(bob
+        .engine
+        .pending_proposals(&bob.store, &g)
+        .unwrap()
+        .is_empty());
+
+    // Leaving again; the hub removes Bob without a commit he sees.
+    bob.client
+        .start_leave(&bob.store, &bob.engine, &g, common::new_client_id(), NOW)
+        .unwrap();
+    let changes = bob.apply(IncomingEvent::MemberRemoved {
+        group_id: g.clone(),
+        device: bob.me.clone(),
+    });
+    assert!(changes.iter().any(|c| matches!(
+        c,
+        StateChange::MembershipChanged(e) if e.kind == Kind::Left && e.actor == bob.me.user_id
+    )));
+    assert_eq!(
+        bob.store.chat(&g).unwrap().unwrap().membership,
+        Membership::Left
+    );
+    assert_eq!(bob.store.pending_leave(&g).unwrap(), None);
+    assert!(!bob.engine.has_group(&bob.store, &g).unwrap());
 }
