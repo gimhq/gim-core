@@ -6,7 +6,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::time::Duration;
 
-use futures_util::FutureExt;
 use gim_base::model::{GroupMessage, IncomingEvent, Membership, MessageKind, StateChange};
 use gim_base::{BaseClient, StateReader, StateStore, StoreTxn};
 use gim_common::{DeviceRef, GroupId};
@@ -102,7 +101,7 @@ impl<S: StateStore + 'static> Client<S> {
 
     /// Stops the sync loop. Returns why it stopped by itself, if it did:
     /// [`ClientError::NotRegistered`] when the token was rejected.
-    pub fn stop_sync(&self) -> Result<()> {
+    pub async fn stop_sync(&self) -> Result<()> {
         let task = self
             .inner
             .sync_task
@@ -110,12 +109,12 @@ impl<S: StateStore + 'static> Client<S> {
             .unwrap_or_else(|e| e.into_inner())
             .take();
         let result = match task {
-            // A finished task's result is ready.
-            Some(task) if task.is_finished() => task.now_or_never().map_or(Ok(()), |joined| {
-                joined.unwrap_or_else(|e| Err(ClientError::Task(e.to_string())))
-            }),
+            Some(task) if task.is_finished() => task
+                .await
+                .unwrap_or_else(|e| Err(ClientError::Task(e.to_string()))),
             Some(task) => {
                 task.abort();
+                let _ = task.await;
                 Ok(())
             }
             None => Ok(()),
@@ -137,18 +136,7 @@ impl<S: StateStore + 'static> Client<S> {
         self.inner.sync_wake.notify_one();
     }
 
-    /// Ignored while no loop is registered, except `Offline`: a loop that
-    /// was just aborted must not report a state after [`Client::stop_sync`].
     fn set_connection_state(&self, state: ConnectionState) {
-        let registered = self
-            .inner
-            .sync_task
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some();
-        if !registered && state != ConnectionState::Offline {
-            return;
-        }
         let mut current = self
             .inner
             .connection

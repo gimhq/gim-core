@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use gim_base::model::{ChatKind as BaseChatKind, Membership, MessageContent as BaseContent};
@@ -10,7 +11,7 @@ use gim_common::{GroupId, MessageId, UserId};
 use gim_sdk::transport::Transport;
 use gim_sdk::{Client, ClientBuilder, HttpTransport, OutboxSender, SESSION_SECRET_KEY};
 use gim_sqlite::{SqliteStore, DATABASE_FILE_NAME};
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
 use url::Url;
 
@@ -21,6 +22,11 @@ use crate::{
     Timeline, UserProfile,
 };
 
+/// Pause between two event fetches while connected.
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// First and maximum pause after a failed sync.
+const MIN_BACKOFF: Duration = Duration::from_secs(1);
+const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// Copies of files passed to `send_media`, under the data directory.
 const OUTGOING_DIR: &str = "outgoing";
 
@@ -89,9 +95,11 @@ fn parse_server_url(value: &str) -> Result<Url, GimError> {
     Ok(url)
 }
 
-/// State shared with the connection state forwarder.
+/// State shared with the sync task.
 struct Shared {
     network_reachable: AtomicBool,
+    /// Wakes the sync task early (reachability changed).
+    wake: Notify,
     connection: watch::Sender<ConnectionState>,
 }
 
@@ -103,53 +111,24 @@ impl Shared {
             changed
         });
     }
-}
 
-fn connection_state(state: gim_sdk::ConnectionState) -> ConnectionState {
-    match state {
-        gim_sdk::ConnectionState::Offline => ConnectionState::Offline,
-        gim_sdk::ConnectionState::Connecting => ConnectionState::Connecting,
-        gim_sdk::ConnectionState::Syncing => ConnectionState::Syncing,
-        gim_sdk::ConnectionState::Connected => ConnectionState::Connected,
+    async fn sleep_or_wake(&self, duration: Duration) {
+        tokio::select! {
+            () = self.wake.notified() => {}
+            () = tokio::time::sleep(duration) => {}
+        }
     }
 }
 
-/// The running gim-sdk sync loop, the task forwarding its connection states
-/// and the outbox sender; all stop when dropped.
+/// The running sync loop and outbox sender; both stop when dropped.
 struct SyncTasks {
-    sdk: Sdk,
-    forward: JoinHandle<()>,
+    sync: JoinHandle<()>,
     _outbox: OutboxSender,
-}
-
-impl SyncTasks {
-    fn start(sdk: &Sdk, shared: Arc<Shared>) -> Result<Self, GimError> {
-        let mut states = sdk.subscribe_connection_state();
-        sdk.start_sync()?;
-        let source = sdk.clone();
-        let forward = tokio::spawn(async move {
-            loop {
-                let state = match states.recv().await {
-                    Ok(state) => state,
-                    Err(broadcast::error::RecvError::Lagged(_)) => source.connection_state(),
-                    Err(broadcast::error::RecvError::Closed) => return,
-                };
-                shared.set_connection(connection_state(state));
-            }
-        });
-        Ok(Self {
-            sdk: sdk.clone(),
-            forward,
-            _outbox: sdk.start_outbox_sender(),
-        })
-    }
 }
 
 impl Drop for SyncTasks {
     fn drop(&mut self) {
-        self.forward.abort();
-        // Stopped on purpose: why the loop may have ended does not matter.
-        let _ = self.sdk.stop_sync();
+        self.sync.abort();
     }
 }
 
@@ -189,6 +168,7 @@ impl GimClient {
         sdk.restore_session().await?;
         let shared = Arc::new(Shared {
             network_reachable: AtomicBool::new(hooks.is_network_reachable()),
+            wake: Notify::new(),
             connection: watch::channel(ConnectionState::Offline).0,
         });
         Ok(Self {
@@ -231,6 +211,41 @@ impl GimClient {
     fn stop_sync_tasks(&self) {
         drop(self.sync.lock().unwrap_or_else(|e| e.into_inner()).take());
         self.shared.set_connection(ConnectionState::Offline);
+    }
+}
+
+/// Fetches events until stopped: `Connecting` until the first successful
+/// fetch, `Syncing` while catching up, then `Connected`; `Offline` while the
+/// platform reports no network. Failures back off exponentially; a
+/// reachability change retries at once.
+async fn run_sync(sdk: Sdk, shared: Arc<Shared>) {
+    let mut backoff = MIN_BACKOFF;
+    loop {
+        if !shared.network_reachable.load(Ordering::SeqCst) {
+            shared.set_connection(ConnectionState::Offline);
+            shared.wake.notified().await;
+            continue;
+        }
+        let connected = *shared.connection.borrow() == ConnectionState::Connected;
+        if !connected && *shared.connection.borrow() != ConnectionState::Syncing {
+            shared.set_connection(ConnectionState::Connecting);
+        }
+        match sdk.sync_once().await {
+            Ok(changes) => {
+                backoff = MIN_BACKOFF;
+                if changes.is_empty() {
+                    shared.set_connection(ConnectionState::Connected);
+                    shared.sleep_or_wake(POLL_INTERVAL).await;
+                } else if !connected {
+                    shared.set_connection(ConnectionState::Syncing);
+                }
+            }
+            Err(_) => {
+                shared.set_connection(ConnectionState::Connecting);
+                shared.sleep_or_wake(backoff).await;
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+            }
+        }
     }
 }
 
@@ -368,8 +383,7 @@ impl GimClient {
         Ok(())
     }
 
-    /// Starts the background sync loop (WebSocket stream with a long-poll
-    /// fallback, reconnecting with backoff) and the outbox sender.
+    /// Starts the background sync loop and outbox sender.
     pub async fn start_sync(&self) -> Result<(), GimError> {
         let sdk = self.sdk()?;
         if sdk.session().is_none() {
@@ -377,7 +391,10 @@ impl GimClient {
         }
         let mut sync = self.sync.lock().unwrap_or_else(|e| e.into_inner());
         if sync.is_none() {
-            *sync = Some(SyncTasks::start(sdk, self.shared.clone())?);
+            *sync = Some(SyncTasks {
+                sync: tokio::spawn(run_sync(sdk.clone(), self.shared.clone())),
+                _outbox: sdk.start_outbox_sender(),
+            });
         }
         Ok(())
     }
@@ -395,9 +412,11 @@ impl GimClient {
             .shared
             .network_reachable
             .swap(reachable, Ordering::SeqCst);
-        // Retries pending sends and reconnects the sync loop at once.
         if reachable && !was {
             self.sdk.network_reachable();
+        }
+        if reachable != was {
+            self.shared.wake.notify_one();
         }
     }
 

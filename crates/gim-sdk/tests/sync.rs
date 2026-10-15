@@ -193,5 +193,5 @@ async fn stream_close_4410_recovers_and_reconnects() {
     s.alice.send_text(&s.group_id, "m3").await;
     wait_until("live message", || s.bob.texts(&s.group_id).len() == 3).await;
     assert_eq!(s.bob.texts(&s.group_id), ["m1", "m2", "m3"]);
-    s.bob.client.stop_sync().unwrap();
+    s.bob.client.stop_sync().await.unwrap();
 }
