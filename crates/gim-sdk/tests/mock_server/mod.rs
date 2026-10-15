@@ -1018,6 +1018,7 @@ pub fn fast_settings() -> SyncSettings {
         stream_retry: Duration::from_secs(60),
         proposal_commit_delay_min: Duration::from_millis(300),
         proposal_commit_delay_max: Duration::from_millis(600),
+        ..SyncSettings::default()
     }
 }
 

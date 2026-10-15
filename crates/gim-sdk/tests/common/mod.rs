@@ -3,7 +3,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::ops::Range;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -18,8 +18,9 @@ use gim_identity::{HostingEntry, HubRootKey, RootKey};
 use gim_sdk::testing::{FakeTransport, MemorySecretStorage};
 use gim_sdk::transport::{
     AccessToken, Challenge, ClaimedKeyPackage, CommitAccepted, EventBatch, GroupInfo,
-    HostingEntryGrant, HubEvent, KeyPackageCount, OutgoingCommit, PostError, SessionError,
-    SessionToken, StoredHostingRecord, Transport, TransportError, TransportResult, UserRecord,
+    HostingEntryGrant, HubEvent, KeyPackageClaim, KeyPackageCount, OutgoingCommit, PostError,
+    SessionError, SessionToken, StoredHostingRecord, Transport, TransportError, TransportResult,
+    UserRecord,
 };
 use gim_sdk::{Client, ClientBuilder, SecretStorage, SyncSettings};
 use tempfile::TempDir;
@@ -71,6 +72,19 @@ pub struct Faults {
     /// DeviceLists that land on the hub right before the next
     /// `put_device_list` calls, one per call (a concurrent upload).
     pub concurrent_lists: Mutex<VecDeque<(UserId, Vec<u8>)>>,
+    /// Users whose hub is unreachable: claims list them as unavailable.
+    pub unreachable: Mutex<BTreeSet<UserId>>,
+    /// Errors returned by the next commit submissions or message posts
+    /// (by kind), without reaching the hub: peer hub failures.
+    pub peer_failures: Mutex<VecDeque<(MessageKind, TransportError)>>,
+    /// `(client_id, mls_message)` of every commit submission that reached
+    /// the transport.
+    pub commit_posts: Mutex<Vec<(ClientId, Vec<u8>)>>,
+    /// `client_id` of every application message post that reached the
+    /// transport.
+    pub message_posts: Mutex<Vec<ClientId>>,
+    /// Group history starts at this seq (a replica's join point).
+    pub history_from: Mutex<HashMap<GroupId, u64>>,
 }
 
 impl Faults {
@@ -98,6 +112,15 @@ impl FlakyTransport {
 
     fn network() -> TransportError {
         TransportError::Network("injected".into())
+    }
+
+    /// Takes the next peer failure if it is for `kind`.
+    fn peer_failure(&self, kind: MessageKind) -> Option<TransportError> {
+        let mut failures = self.faults.peer_failures.lock().unwrap();
+        match failures.front() {
+            Some((k, _)) if *k == kind => failures.pop_front().map(|(_, err)| err),
+            _ => None,
+        }
     }
 
     /// Takes the next post fault if it is for `kind`.
@@ -225,6 +248,20 @@ impl Transport for FlakyTransport {
         self.inner.claim_key_packages(t, users).await
     }
 
+    async fn claim_key_packages_federated(
+        &self,
+        t: &AccessToken,
+        users: &[UserId],
+    ) -> TransportResult<KeyPackageClaim> {
+        let unreachable = self.faults.unreachable.lock().unwrap().clone();
+        let (unavailable, reachable): (Vec<UserId>, Vec<UserId>) =
+            users.iter().cloned().partition(|u| unreachable.contains(u));
+        Ok(KeyPackageClaim {
+            key_packages: self.inner.claim_key_packages(t, &reachable).await?,
+            unavailable,
+        })
+    }
+
     async fn create_group(&self, t: &AccessToken, kind: ChatKind) -> TransportResult<GroupId> {
         self.inner.create_group(t, kind).await
     }
@@ -243,6 +280,14 @@ impl Transport for FlakyTransport {
         g: &GroupId,
         commit: OutgoingCommit,
     ) -> Result<CommitAccepted, PostError> {
+        self.faults
+            .commit_posts
+            .lock()
+            .unwrap()
+            .push((commit.client_id.clone(), commit.mls_message.clone()));
+        if let Some(err) = self.peer_failure(MessageKind::Commit) {
+            return Err(err.into());
+        }
         match self.fault(MessageKind::Commit) {
             None => self.inner.submit_commit(t, g, commit).await,
             Some(PostFault {
@@ -262,6 +307,14 @@ impl Transport for FlakyTransport {
         client_id: ClientId,
         mls_message: Vec<u8>,
     ) -> Result<u64, PostError> {
+        self.faults
+            .message_posts
+            .lock()
+            .unwrap()
+            .push(client_id.clone());
+        if let Some(err) = self.peer_failure(MessageKind::Application) {
+            return Err(err.into());
+        }
         match self.fault(MessageKind::Application) {
             None => self.inner.post_message(t, g, client_id, mls_message).await,
             Some(PostFault {
@@ -348,6 +401,9 @@ impl Transport for FlakyTransport {
         from_seq: u64,
         limit: u32,
     ) -> TransportResult<Vec<GroupMessage>> {
+        // A replica serves history from its join point on.
+        let start = self.faults.history_from.lock().unwrap().get(g).copied();
+        let from_seq = start.map_or(from_seq, |start| from_seq.max(start));
         self.inner.group_messages(t, g, from_seq, limit).await
     }
 
