@@ -1,5 +1,5 @@
 //! Groups of devices with gim credentials: lifecycle, and rejection of
-//! forged, mismatched, revoked and basic credentials.
+//! forged, mismatched, revoked, unlisted and basic credentials.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -71,6 +71,18 @@ impl Device {
         }
     }
 
+    /// Makes this device learn, for each of `others` it has no list for yet,
+    /// a device list certifying that device.
+    fn learn(&self, others: &[&Device]) {
+        let mut lists = self.lists.0.write().unwrap();
+        for other in others {
+            lists.entry(other.me.user_id.clone()).or_insert_with(|| {
+                let cert = SignedDeviceCert::issue(&other.root, &other.key.public(), 0, 1);
+                DeviceList::new(other.root.public(), 1, vec![cert], vec![]).unwrap()
+            });
+        }
+    }
+
     /// Makes this device learn a device list of `other`'s user revoking it.
     fn learn_revocation(&self, other: &Device) {
         let list = DeviceList::new(
@@ -134,6 +146,20 @@ fn sorted(devices: &[&Device]) -> Vec<DeviceRef> {
     refs
 }
 
+/// Makes every device learn the device lists of all of them.
+fn learn_all(devices: &[&Device]) {
+    for device in devices {
+        device.learn(devices);
+    }
+}
+
+fn assert_credential_error<T: std::fmt::Debug>(result: Result<T, CryptoError>, code: &str) {
+    assert!(
+        matches!(&result, Err(CryptoError::InvalidCredential { reason }) if reason.starts_with(code)),
+        "{result:?}"
+    );
+}
+
 fn assert_invalid_credential<T: std::fmt::Debug>(result: Result<T, CryptoError>) {
     assert!(
         matches!(result, Err(CryptoError::InvalidCredential { .. })),
@@ -145,6 +171,7 @@ fn assert_invalid_credential<T: std::fmt::Debug>(result: Result<T, CryptoError>)
 fn three_devices_create_join_add_remove_message() {
     let g = group();
     let (alice, bob, carol) = (Device::new(1), Device::new(2), Device::new(3));
+    learn_all(&[&alice, &bob, &carol]);
     assert_eq!(alice.engine.identity(&alice.store).unwrap(), alice.me);
     assert_eq!(
         alice.engine.signature_public_key(&alice.store).unwrap(),
@@ -267,6 +294,7 @@ fn forged_cert_rejected_on_add() {
     let g = group();
     let alice = Device::new(1);
     let mallory = forged_device(9);
+    learn_all(&[&alice, &mallory]);
     alice.engine.create_group(&alice.store, &g).unwrap();
     assert_invalid_credential(
         alice
@@ -285,6 +313,7 @@ fn forged_cert_rejected_on_welcome() {
     let g = group();
     let bob = Device::new(2);
     let mallory = forged_device(9);
+    learn_all(&[&bob, &mallory]);
     mallory.engine.create_group(&mallory.store, &g).unwrap();
     let (_, welcome) = mallory.add(&g, &[&bob]);
     assert_invalid_credential(bob.join(&welcome));
@@ -306,6 +335,8 @@ fn leaf_key_mismatch_rejected() {
             credential: Some(GimCredential::new(root.public(), cert).encode()),
         }
     });
+    let bob = Device::new(2);
+    learn_all(&[&alice, &bob, &eve]);
     alice.engine.create_group(&alice.store, &g).unwrap();
     assert_invalid_credential(
         alice
@@ -313,7 +344,6 @@ fn leaf_key_mismatch_rejected() {
             .add_members(&alice.store, &g, &[eve.key_package()]),
     );
 
-    let bob = Device::new(2);
     eve.engine.create_group(&eve.store, &g).unwrap();
     let (_, welcome) = eve.add(&g, &[&bob]);
     assert_invalid_credential(bob.join(&welcome));
@@ -323,6 +353,7 @@ fn leaf_key_mismatch_rejected() {
 fn revoked_device_rejected_on_add() {
     let g = group();
     let (alice, dave) = (Device::new(1), Device::new(4));
+    learn_all(&[&alice, &dave]);
     alice.engine.create_group(&alice.store, &g).unwrap();
     alice.learn_revocation(&dave);
     assert_invalid_credential(
@@ -342,6 +373,8 @@ fn revoked_device_rejected_on_incoming_commit() {
         Device::new(3),
         Device::new(4),
     );
+    let erin = Device::new(5);
+    learn_all(&[&alice, &bob, &carol, &dave, &erin]);
     alice.engine.create_group(&alice.store, &g).unwrap();
     let (_, welcome) = alice.add(&g, &[&bob, &carol]);
     bob.join(&welcome).unwrap();
@@ -358,7 +391,6 @@ fn revoked_device_rejected_on_incoming_commit() {
 
     // A commit sent by a device the receiver knows to be revoked.
     alice.learn_revocation(&carol);
-    let erin = Device::new(5);
     let out = carol
         .engine
         .add_members(&carol.store, &g, &[erin.key_package()])
@@ -372,6 +404,8 @@ fn revoked_device_rejected_on_incoming_commit() {
 fn welcome_from_revoked_device_rejected() {
     let g = group();
     let (alice, bob) = (Device::new(1), Device::new(2));
+    alice.learn(&[&alice, &bob]);
+    bob.learn(&[&bob]);
     alice.engine.create_group(&alice.store, &g).unwrap();
     bob.learn_revocation(&alice);
     let (_, welcome) = alice.add(&g, &[&bob]);
@@ -394,5 +428,50 @@ fn basic_key_package_rejected_by_v2_group() {
         .remove(0);
     alice.engine.create_group(&alice.store, &g).unwrap();
     assert_invalid_credential(alice.engine.add_members(&alice.store, &g, &[kp]));
+    assert_eq!(alice.epoch(&g), 0);
+}
+
+#[test]
+fn device_without_known_list_rejected() {
+    let g = group();
+    let (alice, bob) = (Device::new(1), Device::new(2));
+    alice.learn(&[&alice]);
+    alice.engine.create_group(&alice.store, &g).unwrap();
+    assert_credential_error(
+        alice
+            .engine
+            .add_members(&alice.store, &g, &[bob.key_package()]),
+        "device_list_unknown",
+    );
+    assert_eq!(alice.epoch(&g), 0);
+}
+
+#[test]
+fn device_not_in_list_rejected() {
+    let g = group();
+    let (alice, bob) = (Device::new(1), Device::new(2));
+    alice.learn(&[&alice]);
+    // Alice knows a list of Bob's user certifying another of his devices.
+    let other = DeviceSigningKey::from_seed(&[42; 32]).public();
+    let list = DeviceList::new(
+        bob.root.public(),
+        1,
+        vec![SignedDeviceCert::issue(&bob.root, &other, 0, 1)],
+        vec![],
+    )
+    .unwrap();
+    alice
+        .lists
+        .0
+        .write()
+        .unwrap()
+        .insert(bob.me.user_id.clone(), list);
+    alice.engine.create_group(&alice.store, &g).unwrap();
+    assert_credential_error(
+        alice
+            .engine
+            .add_members(&alice.store, &g, &[bob.key_package()]),
+        "device_not_in_list",
+    );
     assert_eq!(alice.epoch(&g), 0);
 }

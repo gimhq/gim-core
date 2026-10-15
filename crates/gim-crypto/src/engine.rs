@@ -24,8 +24,12 @@ pub const MAX_KEY_PACKAGES_PER_CALL: u32 = 1000;
 pub struct CommitOutput {
     pub commit: Vec<u8>,
     pub welcome: Option<Vec<u8>>,
-    /// Epoch the commit was created in; sent to gim-server as `epoch`.
+    /// Epoch the commit was created in; sent to the hub as `epoch`.
     pub epoch: u64,
+    /// Devices whose leaves the commit adds.
+    pub added: Vec<DeviceRef>,
+    /// Devices whose leaves the commit removes.
+    pub removed: Vec<DeviceRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -266,6 +270,10 @@ impl MlsEngine {
                 Ok(key_package)
             })
             .collect::<Result<Vec<_>>>()?;
+        let added = key_packages
+            .iter()
+            .map(|kp| device_of(kp.leaf_node().credential()))
+            .collect::<Result<Vec<_>>>()?;
         let mut group = load_group(store, group_id)?;
         let epoch = group.epoch().as_u64();
         let (commit, welcome, _group_info) = group
@@ -275,10 +283,14 @@ impl MlsEngine {
             commit: serialize(&commit)?,
             welcome: Some(serialize(&welcome)?),
             epoch,
+            added,
+            removed: Vec::new(),
         })
     }
 
-    /// Creates a pending commit removing the given devices.
+    /// Creates a pending commit removing every leaf of the given devices
+    /// (e.g. all leaves of a revoked device). Each device must have at least
+    /// one leaf in the group.
     pub fn remove_members(
         &self,
         store: &impl CryptoStore,
@@ -290,16 +302,23 @@ impl MlsEngine {
         }
         let account = account(store)?;
         let mut group = load_group(store, group_id)?;
-        let indices = members
-            .iter()
-            .map(|device| {
-                group
-                    .members()
-                    .find(|m| device_of(&m.credential).is_ok_and(|d| &d == device))
-                    .map(|m| m.index)
-                    .ok_or_else(|| CryptoError::invalid(format!("{device} is not a member")))
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let mut removed = Vec::new();
+        let mut indices = Vec::new();
+        for device in members {
+            if removed.contains(device) {
+                continue;
+            }
+            let leaves = group
+                .members()
+                .filter(|m| device_of(&m.credential).is_ok_and(|d| &d == device))
+                .map(|m| m.index)
+                .collect::<Vec<_>>();
+            if leaves.is_empty() {
+                return Err(CryptoError::invalid(format!("{device} is not a member")));
+            }
+            indices.extend(leaves);
+            removed.push(device.clone());
+        }
         let epoch = group.epoch().as_u64();
         let (commit, welcome, _group_info) = group
             .remove_members(&self.provider(store), &account.signer, &indices)
@@ -308,6 +327,8 @@ impl MlsEngine {
             commit: serialize(&commit)?,
             welcome: welcome.as_ref().map(serialize).transpose()?,
             epoch,
+            added: Vec::new(),
+            removed,
         })
     }
 
@@ -395,6 +416,11 @@ impl MlsEngine {
         let message = deserialize(message)?
             .try_into_protocol_message()
             .map_err(|_| CryptoError::invalid("message is not a group message"))?;
+        if message.wire_format() == WireFormat::PrivateMessage && message.is_handshake_message() {
+            return Err(CryptoError::invalid(
+                "handshake messages must be sent as PublicMessage",
+            ));
+        }
         let current_epoch = group.epoch().as_u64();
         let message_epoch = message.epoch().as_u64();
         if message_epoch > current_epoch {

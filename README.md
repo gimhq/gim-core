@@ -11,7 +11,7 @@ point downwards only
 | Crate | Role |
 |---|---|
 | `crates/gim-common` | ids (`UserId`, `DeviceId`, `GroupId`, `ClientId`, `MessageId`, `DeviceRef`), error helpers, time; no I/O |
-| `crates/gim-proto` | gim-server REST/stream DTOs and the versioned CBOR envelope schema (skeleton) |
+| `crates/gim-proto` | gim-server v1 REST/stream DTOs, gim-hub API v2 DTOs (`v2`, vendored contract in `contract/hub-v2/`) and the versioned CBOR envelope schema |
 | `crates/gim-crypto` | OpenMLS wrapper (`MlsEngine`), `CryptoStore` trait + `MemoryCryptoStore`; no networking |
 | `crates/gim-identity` | root and device Ed25519 keys, `user_id`/`device_id` derivation, signed `DeviceCert` and `DeviceList` (spec: `docs/identity.md`); no I/O |
 | `crates/gim-base` | client state machine without networking, `StateStore` trait (skeleton) |
