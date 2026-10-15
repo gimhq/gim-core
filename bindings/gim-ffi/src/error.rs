@@ -26,6 +26,15 @@ pub enum GimError {
     /// The hub answered with a non-success HTTP status.
     #[error("server error {status}: {reason}")]
     Server { status: u16, reason: String },
+    /// The hub is throttling the call (HTTP 429 `rate_limited`) or a remote
+    /// hub is unavailable (HTTP 503 `peer_unavailable`), and gim-core's
+    /// bounded retries are used up; try again after `retry_after_secs`.
+    #[error("retry after {retry_after_secs} s ({status}): {reason}")]
+    RetryLater {
+        status: u16,
+        retry_after_secs: u64,
+        reason: String,
+    },
     /// The operation was cancelled (sign-out, `stop_sync`, `cancel_send`).
     #[error("cancelled")]
     Cancelled,
@@ -95,6 +104,15 @@ impl From<gim_sdk::TransportError> for GimError {
             },
             E::TooLarge(_) => Self::InvalidInput { reason },
             E::DeviceNotActive(_) => Self::NotRegistered,
+            E::RetryLater {
+                status,
+                retry_after_secs,
+                reason,
+            } => Self::RetryLater {
+                status,
+                retry_after_secs,
+                reason,
+            },
         }
     }
 }

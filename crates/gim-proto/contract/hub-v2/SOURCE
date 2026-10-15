@@ -1,20 +1,26 @@
 gim-hub API v2 contract, vendored verbatim (byte-identical copies).
 
 Repository: gimhq/gim-hub (local checkout: /srv/gimhq/im-client/hub)
-Commit:     7cb68ad (hub main at vendoring time)
+Commit:     e11ad00 (hub main at vendoring time, H3 closed federation)
 Vendored:   2026-10-15
 
 Files (hub path -> this directory):
   openapi.json        -> openapi.json
   docs/api-v2.md      -> api-v2.md
   docs/s2s.md         -> s2s.md
+  docs/federation.md  -> federation.md
+  docs/multihoming.md -> multihoming.md
+  docs/push.md        -> push.md
   proto/s2s.proto     -> s2s.proto
 
 Refresh:
   H=/srv/gimhq/im-client/hub; C=<hub commit>
-  git -C $H show $C:openapi.json    > openapi.json
-  git -C $H show $C:docs/api-v2.md  > api-v2.md
-  git -C $H show $C:docs/s2s.md     > s2s.md
-  git -C $H show $C:proto/s2s.proto > s2s.proto
+  git -C $H show $C:openapi.json        > openapi.json
+  git -C $H show $C:docs/api-v2.md      > api-v2.md
+  git -C $H show $C:docs/s2s.md         > s2s.md
+  git -C $H show $C:docs/federation.md  > federation.md
+  git -C $H show $C:docs/multihoming.md > multihoming.md
+  git -C $H show $C:docs/push.md        > push.md
+  git -C $H show $C:proto/s2s.proto     > s2s.proto
   update Commit/Vendored above, then run `cargo test -p gim-proto` and fix
   gim_proto::v2 until tests/dto_v2.rs passes.

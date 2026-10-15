@@ -636,7 +636,10 @@ impl MlsEngine {
                 account.credential_with_key(),
             )
             .map_err(CryptoError::mls)?;
-        serialize(&MlsMessageOut::from(bundle.key_package().clone()))
+        bundle
+            .key_package()
+            .tls_serialize_detached()
+            .map_err(CryptoError::mls)
     }
 
     /// Validates a leaf's gim credential against the engine's lookup.
@@ -681,10 +684,8 @@ impl MlsEngine {
     }
 
     fn validate_key_package(&self, bytes: &[u8]) -> Result<KeyPackage> {
-        let key_package = match deserialize(bytes)?.extract() {
-            MlsMessageBodyIn::KeyPackage(key_package) => key_package,
-            _ => return Err(CryptoError::invalid("message is not a KeyPackage")),
-        };
+        let key_package = KeyPackageIn::tls_deserialize_exact(bytes)
+            .map_err(|e| CryptoError::invalid(format!("malformed KeyPackage: {e}")))?;
         let key_package = key_package
             .validate(&self.crypto, ProtocolVersion::Mls10)
             .map_err(|e| CryptoError::invalid(format!("invalid KeyPackage: {e}")))?;

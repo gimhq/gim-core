@@ -20,6 +20,22 @@ const GID: &str =
 const CLIENT: &str = "9f1c2a7e-0b44-4d0e-9a51-3c8f1e2d6b70";
 const TS: i64 = 1_760_479_200_000;
 
+/// Federation additions of the contract (hosting records, H3) that
+/// `gim_proto::v2` does not model yet; the federation client (C3) adds them.
+const DEFERRED_SCHEMAS: [&str; 6] = [
+    "CreateHostingEntryRequest",
+    "HostingEntry",
+    "HostingRecord",
+    "HostingRecordExpiring",
+    "HostingRecordExpiringEvent",
+    "PutHostingRecordRequest",
+];
+const DEFERRED_EVENTS: [&str; 1] = ["hosting_record.expiring"];
+const DEFERRED_ROUTES: [&str; 2] = [
+    "/v2/users/{user_id}/hosting-entry",
+    "/v2/users/{user_id}/hosting-record",
+];
+
 fn spec() -> Value {
     serde_json::from_str(include_str!("../contract/hub-v2/openapi.json"))
         .expect("openapi.json parses")
@@ -202,8 +218,9 @@ fn cases() -> Vec<Case> {
             json!({
                 "key_packages": [{"user_id": USER, "device_id": DEVICE, "key_package": b(), "last_resort": false}],
                 "missing": [{"user_id": USER_2}],
+                "unavailable": [{"user_id": USER_2, "device_id": DEVICE_2}],
             }),
-            json!({"key_packages": [], "missing": []}),
+            json!({"key_packages": [], "missing": [], "unavailable": []}),
         ),
         case::<ClaimedKeyPackage>(
             "ClaimedKeyPackage",
@@ -464,6 +481,7 @@ fn every_schema_has_a_dto() {
     let mut ours: BTreeSet<String> = cases().iter().map(|c| c.schema.to_owned()).collect();
     ours.extend(enums().iter().map(|(name, _)| (*name).to_owned()));
     ours.insert("Event".to_owned());
+    ours.extend(DEFERRED_SCHEMAS.iter().map(|name| (*name).to_owned()));
     assert_eq!(
         all, ours,
         "openapi.json schema set changed; update gim_proto::v2"
@@ -502,7 +520,11 @@ fn event_types_match() {
     ];
     assert_eq!(
         keys(mapping),
-        ours.iter().map(|(t, _)| (*t).to_owned()).collect()
+        ours.iter()
+            .map(|(t, _)| *t)
+            .chain(DEFERRED_EVENTS)
+            .map(str::to_owned)
+            .collect()
     );
     for (event_type, schema) in ours {
         assert_eq!(
@@ -514,7 +536,8 @@ fn event_types_match() {
     }
 }
 
-/// Every route in openapi.json is covered by `paths` (31 operations).
+/// Every route in openapi.json but [`DEFERRED_ROUTES`] is covered by
+/// `paths` (34 operations, 3 of them deferred).
 #[test]
 fn paths_cover_openapi() {
     let spec = spec();
@@ -525,7 +548,7 @@ fn paths_cover_openapi() {
         .values()
         .map(|item| item.as_object().unwrap().len())
         .sum();
-    assert_eq!(operations, 31);
+    assert_eq!(operations, 34);
 
     // Builders called with the template names reproduce the spec's paths
     // once the escaped braces are restored.
@@ -565,6 +588,7 @@ fn paths_cover_openapi() {
             .iter()
             .map(|path| path.replace("%7B", "{").replace("%7D", "}")),
     );
+    ours.extend(DEFERRED_ROUTES.iter().map(|route| (*route).to_owned()));
     assert_eq!(routes, ours);
 }
 
@@ -751,6 +775,31 @@ fn unknown_event_type_does_not_fail_the_list() {
     );
     assert_eq!(list.events[1].data.event_type(), "presence");
     assert!(matches!(list.events[2].data, EventData::KeyPackagesLow(_)));
+}
+
+#[test]
+fn message_kind_proposal_and_unknown() {
+    let mut proposal = message_json();
+    proposal["kind"] = json!("proposal");
+    assert_eq!(round_trip::<Message>(proposal).kind, MessageKind::Proposal);
+
+    let mut unknown = message_json();
+    unknown["kind"] = json!("membership_hint");
+    let message: Message = serde_json::from_value(unknown.clone()).unwrap();
+    assert_eq!(message.kind, MessageKind::Unknown);
+
+    // A message event of an unknown kind does not fail the event list.
+    let list: EventList = serde_json::from_value(json!({
+        "events": [event_json(1, "message", unknown), event_json(2, "message", message_json())],
+        "next_cursor": 2
+    }))
+    .unwrap();
+    assert!(
+        matches!(&list.events[0].data, EventData::Message(m) if m.kind == MessageKind::Unknown)
+    );
+    assert!(
+        matches!(&list.events[1].data, EventData::Message(m) if m.kind == MessageKind::Application)
+    );
 }
 
 #[test]

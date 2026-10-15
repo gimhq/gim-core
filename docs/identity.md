@@ -572,6 +572,15 @@ Opening a blob with a recovery code for an expected `user_id`:
 6. The user id derived from the root public key of `root_seed` equals the
    expected `user_id`.
 
+**Restore.** gim-core restores a user on a fresh device by opening the
+backup, reading the user's current signed DeviceList from the hub (a public
+read; the device cannot sign in yet) and verifying it against the recovered
+root key. It then publishes the next list (`seq + 1`) certifying the new
+device. When the other devices are revoked, every device the current list
+certifies moves to `revoked` (explicitly, not dropped); otherwise they all
+stay certified. If a newer list lands concurrently, the list is read and
+rebuilt once.
+
 ### Device link
 
 Adds a new device to a user who already has a device. Implemented in

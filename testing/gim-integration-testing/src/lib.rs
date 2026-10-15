@@ -1,14 +1,18 @@
-//! Tests against a real gim-server container.
+//! Tests against a real gim-hub container.
 //!
-//! Helpers for driving gim-ffi `GimClient`s against the server named by
-//! `GIM_SERVER_URL` (see `scripts/integration-test.sh`). Without it every test
-//! prints a notice and passes, so the default `cargo test` stays offline.
+//! Helpers for driving gim-ffi `GimClient`s (and, for fault injection,
+//! gim-sdk clients, see [`sdk`]) against the hub named by `GIM_HUB_URL` (see
+//! `scripts/integration-test.sh`). The tests are `#[ignore]`d, and without
+//! `GIM_HUB_URL` every test prints a notice and passes, so the default
+//! `cargo test` stays offline.
 //! Modelled on matrix-rust-sdk
 //! `testing/matrix-sdk-integration-testing/src/helpers.rs` (Apache-2.0).
 
 #![forbid(unsafe_code)]
 
-use std::collections::HashMap;
+pub mod sdk;
+
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -25,20 +29,19 @@ use tempfile::TempDir;
 pub const WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// The server under test, or `None` (after printing a notice) when
-/// `GIM_SERVER_URL` is unset and the test should pass without running.
+/// The hub under test, or `None` (after printing a notice) when
+/// `GIM_HUB_URL` is unset and the test should pass without running.
 pub fn server_url(test: &str) -> Option<String> {
-    match std::env::var("GIM_SERVER_URL") {
+    match std::env::var("GIM_HUB_URL") {
         Ok(url) if !url.is_empty() => Some(url),
         _ => {
-            eprintln!("skipping {test}: GIM_SERVER_URL is not set");
+            eprintln!("skipping {test}: GIM_HUB_URL is not set");
             None
         }
     }
 }
 
-/// A handle unique to this run: the server keeps users across tests and
-/// registering an existing handle adds a device to that user.
+/// A handle unique to this run: the hub keeps handles across tests.
 pub fn unique_handle(prefix: &str) -> String {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let nanos = SystemTime::now()
@@ -103,6 +106,35 @@ pub async fn wait_for<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T 
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
+}
+
+/// Like [`wait_for`] for an async check.
+pub async fn eventually<T, F, Fut>(what: &str, mut check: F) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+    loop {
+        if let Some(value) = check().await {
+            return value;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("timed out waiting for {what}");
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// The user ids of the chat's members.
+pub async fn member_ids(client: &GimClient, chat_id: &str) -> BTreeSet<String> {
+    client
+        .chat_members(chat_id.to_string())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|p| p.user_id)
+        .collect()
 }
 
 /// A native-side copy of a list, kept up to date by applying the diffs.
@@ -200,26 +232,29 @@ pub async fn open(server_url: &str, hooks: &Arc<MemoryHooks>) -> Arc<GimClient> 
     create_client(config, hooks.clone()).await.unwrap()
 }
 
-/// One registered account on one device.
+/// One identity on one device.
 pub struct TestUser {
     pub client: Arc<GimClient>,
     pub hooks: Arc<MemoryHooks>,
     pub handle: String,
     pub user_id: String,
+    pub device_id: String,
+    pub recovery_code: String,
 }
 
 impl TestUser {
-    /// Registers a fresh account (handle `<prefix>_<unique>`) and starts sync.
+    /// Creates a fresh identity, claims the handle `<prefix>_<unique>` and
+    /// starts sync.
     pub async fn register(server_url: &str, prefix: &str, display_name: &str) -> Self {
         let hooks = MemoryHooks::new();
         let client = open(server_url, &hooks).await;
         assert_eq!(client.session().await.unwrap(), None);
-        // The FFI does not claim handles yet: `handle` is not on the hub.
-        let handle = unique_handle(prefix);
-        client
+        let recovery_code = client
             .create_identity(display_name.to_string())
             .await
             .unwrap();
+        let handle = unique_handle(prefix);
+        client.claim_handle(handle.clone()).await.unwrap();
         let session = client.session().await.unwrap().unwrap();
         client.start_sync().await.unwrap();
         Self {
@@ -227,7 +262,43 @@ impl TestUser {
             hooks,
             handle,
             user_id: session.user_id,
+            device_id: session.device_id,
+            recovery_code,
         }
+    }
+
+    /// A second device of this user on a fresh data directory, linked with
+    /// the SAS flow (both sides accept) and syncing. Returns it with the SAS
+    /// both devices showed.
+    pub async fn link_device(&self, server_url: &str) -> (Self, String) {
+        let hooks = MemoryHooks::new();
+        let client = open(server_url, &hooks).await;
+        let link = client.start_link(vec![server_url.to_string()]).unwrap();
+        let waiting = {
+            let (client, link) = (client.clone(), link.clone());
+            tokio::spawn(async move { client.wait_link(link).await })
+        };
+        let approval = self.client.approve_link(link.qr_string()).await.unwrap();
+        let new_sas = waiting.await.unwrap().unwrap();
+        assert_eq!(approval.sas(), new_sas, "both devices show the same SAS");
+        client.confirm_link(true).await.unwrap();
+        self.client
+            .confirm_approval(approval.clone(), true)
+            .await
+            .unwrap();
+        let session = client.session().await.unwrap().unwrap();
+        assert_eq!(session.user_id, self.user_id);
+        assert_eq!(session.device_id, approval.device_id());
+        client.start_sync().await.unwrap();
+        let device = Self {
+            client,
+            hooks,
+            handle: self.handle.clone(),
+            user_id: session.user_id,
+            device_id: session.device_id,
+            recovery_code: self.recovery_code.clone(),
+        };
+        (device, new_sas)
     }
 
     pub async fn timeline(&self, chat_id: &str) -> (Arc<Mirror<TimelineItem>>, Arc<TaskHandle>) {

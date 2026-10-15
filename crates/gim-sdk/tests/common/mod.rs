@@ -47,6 +47,9 @@ pub struct Faults {
     pub hidden_lists: Mutex<HashMap<UserId, usize>>,
     /// Users whose DeviceList was requested, in order.
     pub list_requests: Mutex<Vec<UserId>>,
+    /// DeviceLists that land on the hub right before the next
+    /// `put_device_list` calls, one per call (a concurrent upload).
+    pub concurrent_lists: Mutex<VecDeque<(UserId, Vec<u8>)>>,
 }
 
 impl Faults {
@@ -89,6 +92,10 @@ impl FlakyTransport {
 #[async_trait]
 impl Transport for FlakyTransport {
     async fn put_device_list(&self, u: &UserId, list: Vec<u8>) -> TransportResult<()> {
+        let concurrent = self.faults.concurrent_lists.lock().unwrap().pop_front();
+        if let Some((user_id, concurrent)) = concurrent {
+            self.inner.put_device_list(&user_id, concurrent).await?;
+        }
         self.inner.put_device_list(u, list).await
     }
 
@@ -137,7 +144,11 @@ impl Transport for FlakyTransport {
         self.inner.fetch_link_bundle(link_id, wait).await
     }
 
-    async fn device_list(&self, t: &AccessToken, u: &UserId) -> TransportResult<Option<Vec<u8>>> {
+    async fn device_list(
+        &self,
+        t: Option<&AccessToken>,
+        u: &UserId,
+    ) -> TransportResult<Option<Vec<u8>>> {
         self.faults.list_requests.lock().unwrap().push(u.clone());
         if let Some(left @ 1..) = self.faults.hidden_lists.lock().unwrap().get_mut(u) {
             *left -= 1;
@@ -146,7 +157,11 @@ impl Transport for FlakyTransport {
         self.inner.device_list(t, u).await
     }
 
-    async fn user(&self, t: &AccessToken, u: &UserId) -> TransportResult<Option<UserRecord>> {
+    async fn user(
+        &self,
+        t: Option<&AccessToken>,
+        u: &UserId,
+    ) -> TransportResult<Option<UserRecord>> {
         self.inner.user(t, u).await
     }
 

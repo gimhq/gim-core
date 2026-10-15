@@ -30,7 +30,7 @@ use gim_base::StateStore;
 use gim_common::{now_ms, DeviceRef, UserId};
 use gim_identity::link::{open_link_bundle, seal_link_bundle, LinkBundle, LinkOffer, LinkSecret};
 use gim_identity::recovery::{open_root_key_backup, RecoveryCode};
-use gim_identity::{DeviceList, DeviceSigningKey, SignedDeviceCert};
+use gim_identity::{DeviceList, DeviceSigningKey, RootKey, SignedDeviceCert, SignedDeviceList};
 use tokio::time::Instant;
 use zeroize::Zeroizing;
 
@@ -255,13 +255,14 @@ impl<S: StateStore + 'static> Client<S> {
     /// opens the user's recovery backup, and makes this (fresh) client a new
     /// device of the user, signed in with KeyPackages and a new self group.
     ///
-    /// The previous devices are revoked with `revoke_others`. The user's
-    /// current DeviceList cannot be read before signing in, so unless this
-    /// client still caches it, the new list holds only this device: the
-    /// previous devices are dropped (inactive on the hub, rejected and
-    /// removed by peers like revoked ones) rather than listed as revoked,
-    /// and keeping them (`revoke_others == false`) fails with
-    /// [`ClientError::InvalidInput`].
+    /// The user's current DeviceList is always read from the hub (a public
+    /// read, no session needed; the local cache is not used) and verified
+    /// against the recovered root key. The new list is its seq + 1 with this
+    /// device's certificate: with `revoke_others` every previously listed
+    /// device moves to the revoked set, otherwise they all stay listed. If a
+    /// newer list lands concurrently (409), the list is read and rebuilt
+    /// once more. Fails with [`TransportError::NotFound`] if the hub has no
+    /// DeviceList of the user.
     ///
     /// Chats are not rejoined automatically: their members (or another own
     /// device) have to add this device again.
@@ -289,20 +290,24 @@ impl<S: StateStore + 'static> Client<S> {
         let device_seed = random_seed()?;
         let device = DeviceSigningKey::from_seed(&device_seed).public();
 
-        let mut enrolled = None;
-        if let Some(known) = self.inner.device_lists.get(user_id) {
-            let seq = known.seq() + 1;
+        let mut rebuilt = false;
+        let (cert, device_list) = loop {
+            let current = self.hub_device_list(user_id, &root).await?;
+            let seq = current
+                .seq()
+                .checked_add(1)
+                .ok_or_else(|| ClientError::Identity("device list seq overflow".into()))?;
             let cert = SignedDeviceCert::issue(&root, &device, now_ms(), seq);
             let list = if revoke_others {
-                let revoked = known
+                let revoked = current
                     .revoked()
                     .iter()
                     .cloned()
-                    .chain(known.certs().map(|c| c.device_id.clone()))
+                    .chain(current.certs().map(|c| c.device_id.clone()))
                     .collect();
                 DeviceList::new(root.public(), seq, vec![cert.clone()], revoked)
             } else {
-                known.add_cert(cert.clone())
+                current.add_cert(cert.clone())
             }
             .and_then(|list| list.sign(&root))
             .map_err(ClientError::identity)?;
@@ -312,31 +317,12 @@ impl<S: StateStore + 'static> Client<S> {
                 .put_device_list(user_id, list.to_bytes())
                 .await
             {
-                Ok(()) => enrolled = Some((cert, list)),
-                // The hub has a newer list than the cached one.
-                Err(TransportError::Conflict(reason)) if revoke_others => {
-                    tracing::info!(%reason, "cached device list is stale");
+                Ok(()) => break (cert, list),
+                Err(TransportError::Conflict(reason)) if !rebuilt => {
+                    tracing::info!(%reason, "a newer device list landed; rebuilding");
+                    rebuilt = true;
                 }
                 Err(err) => return Err(err.into()),
-            }
-        }
-        let (cert, device_list) = match enrolled {
-            Some(enrolled) => enrolled,
-            None if revoke_others => {
-                // Above any list seq handed out by counting.
-                let seq = now_ms().max(1);
-                let cert = SignedDeviceCert::issue(&root, &device, now_ms(), seq);
-                let list = DeviceList::new(root.public(), seq, vec![cert.clone()], vec![])
-                    .and_then(|list| list.sign(&root))
-                    .map_err(ClientError::identity)?;
-                (cert, list)
-            }
-            None => {
-                return Err(ClientError::InvalidInput(
-                    "keeping the other devices needs the current device list, which cannot be \
-                     read before signing in"
-                        .into(),
-                ))
             }
         };
         self.enroll(Enrollment {
@@ -354,5 +340,27 @@ impl<S: StateStore + 'static> Client<S> {
         .await?;
         self.create_self_group().await?;
         Ok(())
+    }
+
+    /// The user's current DeviceList read from the hub without a session,
+    /// verified against the recovered root key.
+    async fn hub_device_list(&self, user_id: &UserId, root: &RootKey) -> Result<DeviceList> {
+        let bytes = self
+            .inner
+            .transport
+            .device_list(None, user_id)
+            .await?
+            .ok_or_else(|| {
+                TransportError::NotFound(format!("the hub has no device list of {user_id}"))
+            })?;
+        let list = SignedDeviceList::from_bytes(&bytes)
+            .and_then(|signed| signed.verify(user_id))
+            .map_err(ClientError::identity)?;
+        if *list.root_public_key() != root.public() {
+            return Err(ClientError::Identity(
+                "the hub's device list is not signed by the recovered root key".into(),
+            ));
+        }
+        Ok(list)
     }
 }
