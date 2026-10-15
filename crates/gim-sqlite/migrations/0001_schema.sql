@@ -77,7 +77,9 @@ CREATE TABLE crypto_identity (
     user_id TEXT NOT NULL,
     device_id TEXT NOT NULL,
     signature_private_key BLOB NOT NULL,
-    signature_public_key BLOB NOT NULL
+    signature_public_key BLOB NOT NULL,
+    -- Encoded gim MLS credential; NULL for a legacy basic credential.
+    credential BLOB
 );
 
 CREATE TABLE crypto_groups (
