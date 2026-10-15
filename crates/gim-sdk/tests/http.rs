@@ -294,6 +294,7 @@ async fn claim_key_packages_by_user() {
                 "user_id": uid(2), "device_id": did(2), "key_package": "BAU=", "last_resort": false,
             }],
             "missing": [{ "user_id": uid(3) }],
+            "unavailable": [],
         })))
         .mount(&server)
         .await;
