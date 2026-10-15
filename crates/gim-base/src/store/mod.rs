@@ -32,8 +32,9 @@ type StoreResult<T> = Result<T, StoreError>;
 /// Reads, available on the store (committed state) and on a transaction
 /// (including its own uncommitted writes).
 pub trait StateReader {
-    /// All chats, most recently updated first.
+    /// All chats except the self groups, most recently updated first.
     fn chats(&self) -> StoreResult<Vec<Chat>>;
+    /// Any chat, the self groups included.
     fn chat(&self, group_id: &GroupId) -> StoreResult<Option<Chat>>;
 
     /// Up to `limit` messages of the group in timeline order (ascending
@@ -83,6 +84,11 @@ pub trait StateReader {
     /// Latest known signed DeviceList bytes (gim-identity CBOR) of every
     /// user, by user id.
     fn device_lists(&self) -> StoreResult<Vec<(UserId, Vec<u8>)>>;
+
+    /// The self groups (MLS groups of the own user's devices), oldest
+    /// first; the last one is current. Their chats are hidden from
+    /// [`StateReader::chats`].
+    fn self_groups(&self) -> StoreResult<Vec<GroupId>>;
 }
 
 /// A write transaction over state rows and MLS state. Dropping it without
@@ -91,8 +97,8 @@ pub trait StateReader {
 pub trait StoreTxn: StateReader + CryptoStore {
     fn upsert_chat(&mut self, chat: &Chat) -> StoreResult<()>;
     /// Removes the chat with its messages, outbox entries, cursor, parked
-    /// messages, pending commit, departed-member candidates and membership
-    /// events.
+    /// messages, pending commit, departed-member candidates, membership
+    /// events and self group record.
     fn remove_chat(&mut self, group_id: &GroupId) -> StoreResult<()>;
 
     fn upsert_message(&mut self, message: &Message) -> StoreResult<()>;
@@ -126,6 +132,10 @@ pub trait StoreTxn: StateReader + CryptoStore {
 
     /// Replaces the user's stored DeviceList bytes.
     fn upsert_device_list(&mut self, user_id: &UserId, device_list: &[u8]) -> StoreResult<()>;
+
+    /// Records a self group as the current one, unless it is recorded
+    /// already.
+    fn add_self_group(&mut self, group_id: &GroupId) -> StoreResult<()>;
 }
 
 /// State and MLS storage of one device.

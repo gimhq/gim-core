@@ -5,12 +5,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use gim_common::{now_ms, DeviceRef, GroupId, MessageId, UserId};
 use gim_crypto::{decrypt_to_envelope, CryptoError, DecryptedMessage, MlsEngine, ProcessedMessage};
-use gim_proto::envelope::{Content, Envelope, ReceiptKind};
+use gim_identity::SignedDeviceList;
+use gim_proto::envelope::{Contact, Content, Envelope, ReceiptKind};
 
 use crate::model::{
     to_message_id, Chat, ChatKind, ChatMember, DepartedMember, GroupMessage, IncomingEvent,
     Membership, MembershipChangeKind, MembershipEvent, Message, MessageContent, MessageKind,
-    PendingCommit, SendState, StateChange,
+    PendingCommit, SendState, StateChange, UserInfo,
 };
 use crate::{Result, StateReader, StateStore, StoreTxn};
 
@@ -79,6 +80,26 @@ impl BaseClient {
             chat.members = chat_members(txn, &engine.group_members(&*txn, group_id)?)?;
             txn.upsert_chat(&chat)?;
             Ok(vec![StateChange::ChatUpserted(chat)])
+        })
+    }
+
+    /// Creates the MLS group and chat of a new self group (the MLS group
+    /// of the own user's devices, hidden from [`StateReader::chats`]) and
+    /// records it as the current one.
+    pub fn create_self_group<S: StateStore>(
+        &self,
+        store: &S,
+        engine: &MlsEngine,
+        group_id: &GroupId,
+        now_ms: u64,
+    ) -> Result<()> {
+        store.transaction(|txn| {
+            engine.create_group(&*txn, group_id)?;
+            let mut chat = Chat::new(group_id.clone(), ChatKind::Group, now_ms);
+            chat.members = chat_members(txn, &engine.group_members(&*txn, group_id)?)?;
+            txn.upsert_chat(&chat)?;
+            txn.add_self_group(group_id)?;
+            Ok(())
         })
     }
 
@@ -272,9 +293,9 @@ impl BaseClient {
         devices: &[DeviceRef],
     ) -> Result<()> {
         store.transaction(|txn| {
-            for chat in txn.chats()? {
-                let gid = &chat.group_id;
-                if chat.membership != Membership::Joined || !engine.has_group(&*txn, gid)? {
+            for gid in joined_groups(txn)? {
+                let gid = &gid;
+                if !engine.has_group(&*txn, gid)? {
                     continue;
                 }
                 for member in engine.group_members(&*txn, gid)? {
@@ -799,7 +820,147 @@ impl BaseClient {
                 changes.push(StateChange::ChatUpserted(chat));
                 Ok(())
             }
+            Content::Profile { display_name } => {
+                self.apply_profile(txn, &sender.user_id, display_name, changes)
+            }
+            // Self group contents: only from the own user's devices.
+            _ if sender.user_id != self.own.user_id => Ok(()),
+            Content::SelfDeviceList { device_list } => {
+                txn.add_self_group(group_id)?;
+                self.apply_own_device_list(txn, &device_list)
+            }
+            Content::SelfProfile { display_name } => {
+                txn.add_self_group(group_id)?;
+                let own_user = self.own.user_id.clone();
+                self.apply_profile(txn, &own_user, display_name, changes)
+            }
+            Content::SelfContacts { contacts } => {
+                txn.add_self_group(group_id)?;
+                for contact in contacts {
+                    self.apply_contact(txn, contact)?;
+                }
+                Ok(())
+            }
+            Content::SelfReadMarker {
+                group_id: chat_id,
+                seq,
+            } => {
+                txn.add_self_group(group_id)?;
+                self.apply_read_marker(txn, &chat_id, seq, changes)
+            }
         }
+    }
+
+    /// Stores `display_name` as the user's display name (an empty one is
+    /// ignored) and renames the user's members in every chat.
+    fn apply_profile<T: StoreTxn>(
+        &self,
+        txn: &mut T,
+        user_id: &UserId,
+        display_name: String,
+        changes: &mut Vec<StateChange>,
+    ) -> Result<()> {
+        if display_name.is_empty() {
+            return Ok(());
+        }
+        let mut user = txn.user(user_id)?.unwrap_or_else(|| UserInfo {
+            user_id: user_id.clone(),
+            handle: String::new(),
+            display_name: String::new(),
+        });
+        if user.display_name == display_name {
+            return Ok(());
+        }
+        user.display_name = display_name.clone();
+        txn.upsert_user(&user)?;
+        for mut chat in txn.chats()? {
+            let mut renamed = false;
+            for member in &mut chat.members {
+                if &member.device.user_id == user_id
+                    && member.display_name.as_ref() != Some(&display_name)
+                {
+                    member.display_name = Some(display_name.clone());
+                    renamed = true;
+                }
+            }
+            if renamed {
+                txn.upsert_chat(&chat)?;
+                changes.push(StateChange::ChatUpserted(chat));
+            }
+        }
+        Ok(())
+    }
+
+    /// Keeps the own user's DeviceList from the self group if it verifies
+    /// and supersedes the stored one; gim-sdk loads it into its cache.
+    fn apply_own_device_list<T: StoreTxn>(&self, txn: &mut T, bytes: &[u8]) -> Result<()> {
+        let own_user = &self.own.user_id;
+        let Ok(list) = SignedDeviceList::from_bytes(bytes).and_then(|l| l.verify(own_user)) else {
+            return Ok(());
+        };
+        let stored = txn
+            .device_lists()?
+            .into_iter()
+            .find(|(user_id, _)| user_id == own_user)
+            .and_then(|(_, bytes)| {
+                SignedDeviceList::from_bytes(&bytes)
+                    .and_then(|l| l.verify(own_user))
+                    .ok()
+            });
+        if stored.is_none_or(|stored| list.supersedes(&stored).unwrap_or(false)) {
+            txn.upsert_device_list(own_user, bytes)?;
+        }
+        Ok(())
+    }
+
+    /// Adds a contact shared by another own device to the user directory
+    /// cache; known names and handles are kept.
+    fn apply_contact<T: StoreTxn>(&self, txn: &mut T, contact: Contact) -> Result<()> {
+        if contact.user_id == self.own.user_id {
+            return Ok(());
+        }
+        let stored = txn.user(&contact.user_id)?;
+        let mut user = stored.clone().unwrap_or_else(|| UserInfo {
+            user_id: contact.user_id.clone(),
+            handle: String::new(),
+            display_name: String::new(),
+        });
+        if user.handle.is_empty() {
+            user.handle = contact.handle.unwrap_or_default();
+        }
+        if user.display_name.is_empty() {
+            user.display_name = contact.display_name.unwrap_or_default();
+        }
+        if stored.as_ref() != Some(&user) {
+            txn.upsert_user(&user)?;
+        }
+        Ok(())
+    }
+
+    /// Marks the chat read up to `seq`, as another own device did.
+    fn apply_read_marker<T: StoreTxn>(
+        &self,
+        txn: &mut T,
+        group_id: &GroupId,
+        seq: u64,
+        changes: &mut Vec<StateChange>,
+    ) -> Result<()> {
+        let Some(mut chat) = txn.chat(group_id)? else {
+            return Ok(());
+        };
+        if seq <= chat.last_read_seq {
+            return Ok(());
+        }
+        let unread = txn
+            .messages_after(group_id, seq)?
+            .iter()
+            .filter(|m| m.sender.user_id != self.own.user_id && !m.deleted)
+            .count();
+        chat.last_read_seq = seq;
+        chat.unread_count = u32::try_from(unread).unwrap_or(u32::MAX);
+        txn.upsert_chat(&chat)?;
+        changes.push(StateChange::ChatUpserted(chat));
+        Ok(())
     }
 
     /// Inserts a text or media message unless its id is already stored.
@@ -1004,6 +1165,25 @@ pub(crate) fn load_chat<T: StoreTxn>(txn: &T, group_id: &GroupId, now_ms: u64) -
     Ok(txn
         .chat(group_id)?
         .unwrap_or_else(|| Chat::new(group_id.clone(), ChatKind::Group, now_ms)))
+}
+
+/// Joined chats and joined self groups.
+fn joined_groups<T: StoreTxn>(txn: &T) -> Result<Vec<GroupId>> {
+    let mut groups: Vec<GroupId> = txn
+        .chats()?
+        .into_iter()
+        .filter(|c| c.membership == Membership::Joined)
+        .map(|c| c.group_id)
+        .collect();
+    for group_id in txn.self_groups()? {
+        if txn
+            .chat(&group_id)?
+            .is_some_and(|c| c.membership == Membership::Joined)
+        {
+            groups.push(group_id);
+        }
+    }
+    Ok(groups)
 }
 
 fn member_users(chat: &Chat) -> BTreeSet<UserId> {
