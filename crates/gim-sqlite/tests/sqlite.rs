@@ -5,7 +5,7 @@ mod common;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use common::{group, setup, text, Device, NOW};
+use common::{group, key, setup, text, Device, NOW};
 use gim_base::model::{
     AfterCommit, Chat, ChatKind, ChatMember, DepartedMember, GroupCursor, GroupMessage,
     MediaCacheEntry, Membership, MembershipChangeKind, MembershipEvent, Message, MessageContent,
@@ -27,7 +27,7 @@ fn state_and_mls_groups_survive_reopen() {
     let ds = FakeDeliveryService::new();
     let g = group("crew");
     let alice = Device::new("alice");
-    let bob = Device::with_store("bob", SqliteStore::open(dir.path()).unwrap());
+    let bob = Device::with_store("bob", SqliteStore::open(dir.path(), &key()).unwrap());
     assert!(dir.path().join(DATABASE_FILE_NAME).is_file());
     setup(&ds, &g, &[&alice, &bob]);
     let hi = alice.send_text(&ds, &g, "hi");
@@ -45,7 +45,7 @@ fn state_and_mls_groups_survive_reopen() {
         .unwrap();
     drop(bob);
 
-    let bob = Device::with_store("bob", SqliteStore::open(dir.path()).unwrap());
+    let bob = Device::with_store("bob", SqliteStore::open(dir.path(), &key()).unwrap());
     assert_eq!(bob.store.chat(&g).unwrap().unwrap(), chat);
     assert_eq!(bob.store.messages(&g, None, 10).unwrap(), timeline);
     assert_eq!(bob.message(&hi).content, text_content("hi"));
@@ -88,7 +88,7 @@ fn creates_missing_data_dir_owner_only() {
 
     let dir = tempfile::tempdir().unwrap();
     let data_dir = dir.path().join("device").join("data");
-    SqliteStore::open(&data_dir).unwrap();
+    SqliteStore::open(&data_dir, &key()).unwrap();
     assert!(data_dir.join(DATABASE_FILE_NAME).is_file());
     let mode = std::fs::metadata(&data_dir).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o700);
@@ -100,7 +100,7 @@ fn failure_after_mls_processing_rolls_back_epoch_and_rows() {
     let ds = FakeDeliveryService::new();
     let g = group("crew");
     let (alice, carol) = (Device::new("alice"), Device::new("carol"));
-    let bob = Device::with_store("bob", SqliteStore::open(dir.path()).unwrap());
+    let bob = Device::with_store("bob", SqliteStore::open(dir.path(), &key()).unwrap());
     setup(&ds, &g, &[&alice, &bob]);
 
     // Commit: MLS merges the new epoch, then the chat write fails.
@@ -144,7 +144,7 @@ fn failure_after_mls_processing_rolls_back_epoch_and_rows() {
 fn error_in_transaction_rolls_back_mls_group_creation() {
     let dir = tempfile::tempdir().unwrap();
     let g = group("crew");
-    let alice = Device::with_store("alice", SqliteStore::open(dir.path()).unwrap());
+    let alice = Device::with_store("alice", SqliteStore::open(dir.path(), &key()).unwrap());
     let result: Result<(), BaseError> = alice.store.transaction(|txn| {
         alice.engine.create_group(&*txn, &g)?;
         txn.upsert_chat(&Chat::new(g.clone(), ChatKind::Group, NOW))?;
@@ -195,7 +195,7 @@ fn reads_match_memory_store() {
 fn reopen(device: Device, dir: &std::path::Path) -> Device {
     let user = device.me.user_id.as_str().to_owned();
     drop(device);
-    Device::with_store(&user, SqliteStore::open(dir).unwrap())
+    Device::with_store(&user, SqliteStore::open(dir, &key()).unwrap())
 }
 
 fn text_content(body: &str) -> MessageContent {

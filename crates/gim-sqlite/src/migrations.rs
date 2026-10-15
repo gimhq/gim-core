@@ -1,31 +1,33 @@
 //! Embedded, forward-only schema migrations. The schema version is
 //! `PRAGMA user_version`: migration `i` (0-based) moves it from `i` to
 //! `i + 1`. Never edit a released migration; append a new one.
+//!
+//! M2 restarted the history (D5): M1 databases are reset, not migrated.
 
 use gim_base::StoreError;
 use rusqlite::{Connection, TransactionBehavior};
 
-const MIGRATIONS: &[&str] = &[
-    include_str!("../migrations/0001_state.sql"),
-    include_str!("../migrations/0002_crypto.sql"),
-    include_str!("../migrations/0003_commits.sql"),
-    include_str!("../migrations/0004_membership.sql"),
-];
+const MIGRATIONS: &[&str] = &[include_str!("../migrations/0001_schema.sql")];
 
 /// Schema version written by this build.
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
+
+/// `PRAGMA application_id` of a gim database ("GIM2").
+pub const APPLICATION_ID: i32 = 0x4749_4D32;
 
 pub(crate) fn schema_version(conn: &Connection) -> Result<u32, StoreError> {
     conn.pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(StoreError::new)
 }
 
-/// Migrates to [`SCHEMA_VERSION`] in one transaction.
-pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
-    migrate_to(conn, SCHEMA_VERSION)
+pub(crate) fn application_id(conn: &Connection) -> Result<i32, StoreError> {
+    conn.pragma_query_value(None, "application_id", |row| row.get(0))
+        .map_err(StoreError::new)
 }
 
-fn migrate_to(conn: &mut Connection, target: u32) -> Result<(), StoreError> {
+/// Migrates to [`SCHEMA_VERSION`] in one transaction and stamps
+/// [`APPLICATION_ID`].
+pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     let txn = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(StoreError::new)?;
@@ -35,10 +37,12 @@ fn migrate_to(conn: &mut Connection, target: u32) -> Result<(), StoreError> {
             "database schema v{current} is newer than this build (v{SCHEMA_VERSION})"
         )));
     }
-    for sql in &MIGRATIONS[current as usize..target as usize] {
+    for sql in &MIGRATIONS[current as usize..] {
         txn.execute_batch(sql).map_err(StoreError::new)?;
     }
-    txn.pragma_update(None, "user_version", target)
+    txn.pragma_update(None, "user_version", SCHEMA_VERSION)
+        .map_err(StoreError::new)?;
+    txn.pragma_update(None, "application_id", APPLICATION_ID)
         .map_err(StoreError::new)?;
     txn.commit().map_err(StoreError::new)
 }
@@ -59,10 +63,21 @@ mod tests {
     fn migrates_from_empty_to_latest() {
         let mut conn = Connection::open_in_memory().unwrap();
         assert_eq!(schema_version(&conn).unwrap(), 0);
+        assert_eq!(application_id(&conn).unwrap(), 0);
         migrate(&mut conn).unwrap();
         assert_eq!(schema_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert_eq!(application_id(&conn).unwrap(), APPLICATION_ID);
         let tables = tables(&conn);
-        for table in ["chats", "messages", "outbox", "crypto_identity"] {
+        for table in [
+            "chats",
+            "messages",
+            "outbox",
+            "crypto_identity",
+            "crypto_groups",
+            "pending_commits",
+            "departed_members",
+            "membership_events",
+        ] {
             assert!(tables.iter().any(|t| t == table), "{table} in {tables:?}");
         }
         // Idempotent at the latest version.
@@ -71,70 +86,9 @@ mod tests {
     }
 
     #[test]
-    fn migrates_from_v1_keeping_rows() {
+    fn membership_kind_is_checked() {
         let mut conn = Connection::open_in_memory().unwrap();
-        migrate_to(&mut conn, 1).unwrap();
-        assert_eq!(schema_version(&conn).unwrap(), 1);
-        assert!(!tables(&conn).iter().any(|t| t == "crypto_identity"));
-        conn.execute(
-            "INSERT INTO chats (group_id, updated_at_ms, data) VALUES ('crew', 7, x'00')",
-            [],
-        )
-        .unwrap();
-
         migrate(&mut conn).unwrap();
-        assert_eq!(schema_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert!(tables(&conn).iter().any(|t| t == "crypto_identity"));
-        let updated: u64 = conn
-            .query_row(
-                "SELECT updated_at_ms FROM chats WHERE group_id = 'crew'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(updated, 7);
-    }
-
-    #[test]
-    fn migrates_from_v2_keeping_rows() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        migrate_to(&mut conn, 2).unwrap();
-        assert_eq!(schema_version(&conn).unwrap(), 2);
-        assert!(!tables(&conn).iter().any(|t| t == "pending_commits"));
-        conn.execute("INSERT INTO crypto_groups (group_id) VALUES ('crew')", [])
-            .unwrap();
-
-        migrate(&mut conn).unwrap();
-        assert_eq!(schema_version(&conn).unwrap(), SCHEMA_VERSION);
-        let tables = tables(&conn);
-        for table in ["pending_commits", "departed_members"] {
-            assert!(tables.iter().any(|t| t == table), "{table} in {tables:?}");
-        }
-        let groups: u64 = conn
-            .query_row("SELECT COUNT(*) FROM crypto_groups", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(groups, 1);
-    }
-
-    #[test]
-    fn migrates_from_v3_keeping_rows() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        migrate_to(&mut conn, 3).unwrap();
-        assert_eq!(schema_version(&conn).unwrap(), 3);
-        assert!(!tables(&conn).iter().any(|t| t == "membership_events"));
-        conn.execute(
-            "INSERT INTO pending_commits (group_id, data) VALUES ('crew', x'00')",
-            [],
-        )
-        .unwrap();
-
-        migrate(&mut conn).unwrap();
-        assert_eq!(schema_version(&conn).unwrap(), 4);
-        assert!(tables(&conn).iter().any(|t| t == "membership_events"));
-        let commits: u64 = conn
-            .query_row("SELECT COUNT(*) FROM pending_commits", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(commits, 1);
         conn.execute(
             "INSERT INTO membership_events (group_id, seq, user_id, actor, kind, at_ms) \
              VALUES ('crew', 2, 'bob', 'alice', 'added', 7)",
