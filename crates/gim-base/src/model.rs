@@ -15,6 +15,10 @@ pub enum ChatKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Membership {
     Joined,
+    /// This device asked to leave (a [`PendingLeave`]) and stays an MLS
+    /// member until another member commits its removal; nothing can be
+    /// sent meanwhile.
+    Leaving,
     /// This device was removed; history is kept.
     Left,
 }
@@ -259,6 +263,38 @@ pub struct PendingCommit {
 pub struct PendingWelcome {
     pub payload: Vec<u8>,
     pub recipients: Vec<DeviceRef>,
+}
+
+/// This device's Remove proposal for its own leaf, kept while the chat is
+/// [`Membership::Leaving`]: re-posted (same bytes and `client_id`) while
+/// its outcome is unknown, and replaced by a fresh one when the epoch
+/// advances without removing this device. One per group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingLeave {
+    pub group_id: GroupId,
+    pub client_id: ClientId,
+    /// Epoch the proposal was created in.
+    pub epoch: u64,
+    pub payload: Vec<u8>,
+    /// Proposals created since leaving started (or the client started).
+    pub attempts: u32,
+    /// The hub accepted this proposal.
+    pub accepted: bool,
+}
+
+/// A user added to a chat whose hub was unreachable when their KeyPackages
+/// were claimed; the sync loop claims them again until the invite expires.
+/// One per (group, user).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingInvite {
+    pub group_id: GroupId,
+    pub user_id: UserId,
+    /// Unix milliseconds of the first claim; the invite expires a TTL later.
+    pub created_at_ms: u64,
+    /// Unix milliseconds of the next claim.
+    pub next_retry_at_ms: u64,
+    /// Claims after the first one.
+    pub attempts: u32,
 }
 
 /// A device that left a group (a self-remove proposal, or a hub-side

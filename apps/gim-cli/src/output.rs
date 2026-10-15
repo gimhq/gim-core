@@ -14,7 +14,7 @@
 //! - `chats list`: `{"chats": [ChatSummary]}`, ChatSummary =
 //!   `{"id", "kind": "direct"|"group", "name": str|null, "peer_handle": str|null,
 //!   "members": int (distinct users), "unread_count": int,
-//!   "last_message": LastMessage|null, "membership": "joined"|"left"}`,
+//!   "last_message": LastMessage|null, "membership": "joined"|"leaving"|"left"}`,
 //!   LastMessage = `{"id", "sender_user_id", "sent_at_ms", "summary": str}`.
 //!   `name` of a direct chat is the peer's display name (else handle, else
 //!   user id); `peer_handle` is set for direct chats only.
@@ -258,6 +258,7 @@ pub fn kind_name(kind: ChatKind) -> &'static str {
 pub fn membership_name(membership: Membership) -> &'static str {
     match membership {
         Membership::Joined => "joined",
+        Membership::Leaving => "leaving",
         Membership::Left => "left",
     }
 }

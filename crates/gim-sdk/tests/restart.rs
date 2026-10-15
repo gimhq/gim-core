@@ -1,38 +1,48 @@
 //! Restarts (a new `Client` over the reopened `SqliteStore`) in the middle
-//! of group changes and media sends.
+//! of group changes, media sends and pending invites.
 
 mod common;
 
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use gim_base::model::{
-    DepartedMember, MessageContent, MessageKind, PendingCommit, PendingMedia, SendState,
+    Membership, MessageContent, MessageKind, PendingCommit, PendingMedia, SendState,
 };
 use gim_base::{BaseClient, BaseError, StateReader, StateStore, StoreTxn};
 use gim_common::{now_ms, ClientId, GroupId};
 use gim_crypto::MlsEngine;
 use gim_sdk::testing::MemorySecretStorage;
-use gim_sdk::{Client, ClientBuilder, SecretStorage, COMMIT_POST_ATTEMPTS, SESSION_SECRET_KEY};
+use gim_sdk::{
+    Client, ClientBuilder, ClientError, SecretStorage, SyncSettings, COMMIT_POST_ATTEMPTS,
+    SESSION_SECRET_KEY,
+};
 use gim_sqlite::{DbKey, SqliteStore};
 use tempfile::TempDir;
 
-use common::{Device, FlakyTransport};
+use common::{server_handshakes, Device, FlakyTransport};
 
 /// A device on SQLite whose client can be restarted.
 struct Persistent {
     transport: FlakyTransport,
     secrets: Arc<MemorySecretStorage>,
     dir: TempDir,
+    settings: SyncSettings,
 }
 
 impl Persistent {
     fn new(transport: &FlakyTransport) -> Self {
+        Self::with_settings(transport, SyncSettings::default())
+    }
+
+    fn with_settings(transport: &FlakyTransport, settings: SyncSettings) -> Self {
         Self {
             transport: transport.clone(),
             secrets: Arc::new(MemorySecretStorage::new()),
             dir: tempfile::tempdir().unwrap(),
+            settings,
         }
     }
 
@@ -47,6 +57,7 @@ impl Persistent {
         )
         .unwrap()
         .data_dir(self.dir.path())
+        .sync_settings(self.settings)
         .build()
         .unwrap()
     }
@@ -141,45 +152,88 @@ async fn commit_that_never_arrived_is_posted_after_restart() {
 }
 
 #[tokio::test]
-async fn departed_member_is_still_removed_after_restart() {
+async fn a_leave_proposal_left_uncommitted_is_committed_after_restart() {
     let transport = FlakyTransport::new();
     let alice = Device::register(&transport, "alice").await;
     let node = Persistent::new(&transport);
     let bob = node.register("bob").await;
-    let carol = Device::register(&transport, "carol").await;
     let bob_id = bob.session().unwrap().device.user_id;
     let g = alice
         .client
-        .create_group_chat(None, &[bob_id, carol.user_id()])
+        .create_group_chat(None, &[bob_id])
         .await
         .unwrap();
     bob.sync_once().await.unwrap();
-    carol.sync().await;
     let service = transport.inner.service();
 
-    // Bob sees carol leave; alice (leaf 0) is the one to remove her.
-    carol.client.leave(&g).await.unwrap();
-    bob.sync_once().await.unwrap();
-    let departed = vec![DepartedMember {
-        group_id: g.clone(),
-        device: carol.device(),
-    }];
-    assert_eq!(bob.store().departed_members().unwrap(), departed);
-    assert_eq!(service.epoch(&g), Ok(1));
-
-    let bob = node.restart(bob).await;
-    assert_eq!(bob.store().departed_members().unwrap(), departed);
-    assert_eq!(service.epoch(&g), Ok(1));
-
-    // Alice leaves before removing carol: bob is now the lowest remaining
-    // leaf and removes both, carol from the record kept across the restart.
+    // Bob, the only member left, commits alice's leave; the posts fail.
     alice.client.leave(&g).await.unwrap();
-    bob.sync_once().await.unwrap();
+    transport
+        .faults
+        .fail_posts(MessageKind::Commit, false, COMMIT_POST_ATTEMPTS as usize);
+    assert!(bob.sync_once().await.is_err());
+    assert_eq!(service.epoch(&g), Ok(1));
+
+    // The commit of unknown outcome is re-posted on restore.
+    let bob = node.restart(bob).await;
     assert_eq!(service.epoch(&g), Ok(2));
+    assert_eq!(bob.store().pending_commit(&g).unwrap(), None);
     let members = bob.store().chat(&g).unwrap().unwrap().members;
     assert_eq!(members.len(), 1);
-    assert_eq!(members[0].device, bob.session().unwrap().device);
-    assert!(bob.store().departed_members().unwrap().is_empty());
+    alice.sync().await;
+    assert_eq!(
+        alice.store.chat(&g).unwrap().unwrap().membership,
+        Membership::Left
+    );
+}
+
+#[tokio::test]
+async fn leaving_survives_a_restart() {
+    let transport = FlakyTransport::new();
+    let alice = Device::register(&transport, "alice").await;
+    let node = Persistent::new(&transport);
+    let bob = node.register("bob").await;
+    let bob_id = bob.session().unwrap().device.user_id;
+    let g = alice
+        .client
+        .create_group_chat(None, &[bob_id])
+        .await
+        .unwrap();
+    bob.sync_once().await.unwrap();
+    let service = transport.inner.service();
+
+    // The proposal never reaches the hub.
+    transport
+        .faults
+        .fail_posts(MessageKind::Commit, false, COMMIT_POST_ATTEMPTS as usize);
+    assert!(bob.leave(&g).await.is_err());
+    let leave = bob.store().pending_leave(&g).unwrap().unwrap();
+    assert!(!leave.accepted);
+    assert_eq!(server_handshakes(&transport, &g), 1);
+
+    let bob = node.restart(bob).await;
+    assert_eq!(
+        bob.store().chat(&g).unwrap().unwrap().membership,
+        Membership::Leaving
+    );
+    assert!(matches!(
+        bob.send_text(&g, "still here?", None).await,
+        Err(ClientError::Base(BaseError::InvalidState(_)))
+    ));
+    // Re-submitted on restore with the same client_id.
+    let resent = bob.store().pending_leave(&g).unwrap().unwrap();
+    assert!(resent.accepted);
+    assert_eq!(resent.client_id, leave.client_id);
+    assert_eq!(server_handshakes(&transport, &g), 2);
+
+    alice.sync().await;
+    assert_eq!(service.epoch(&g), Ok(2));
+    bob.sync_once().await.unwrap();
+    assert_eq!(
+        bob.store().chat(&g).unwrap().unwrap().membership,
+        Membership::Left
+    );
+    assert_eq!(bob.store().pending_leave(&g).unwrap(), None);
 }
 
 #[tokio::test]
@@ -322,4 +376,109 @@ async fn outgoing_copies_are_deleted_once_sent_cancelled_or_orphaned() {
     fs::write(alice.outgoing_dir().join("stray"), b"").unwrap();
     let alice = node.restart(alice).await;
     assert_eq!(outgoing_entries(&alice), vec!["queued"]);
+}
+
+fn invite_settings(invite_ttl: Duration) -> SyncSettings {
+    SyncSettings {
+        invite_retry: Duration::from_millis(20),
+        invite_ttl,
+        ..SyncSettings::default()
+    }
+}
+
+fn hub_members(transport: &FlakyTransport, group_id: &GroupId) -> Vec<gim_common::UserId> {
+    let info = transport.inner.service().group(group_id).unwrap();
+    info.members.into_iter().map(|d| d.user_id).collect()
+}
+
+#[tokio::test]
+async fn pending_invite_survives_a_restart_and_is_added_after_it() {
+    let transport = FlakyTransport::new();
+    let node = Persistent::with_settings(&transport, invite_settings(Duration::from_secs(3600)));
+    let alice = node.register("alice").await;
+    let bob = Device::register(&transport, "bob").await;
+    transport
+        .faults
+        .unreachable
+        .lock()
+        .unwrap()
+        .insert(bob.user_id());
+    let g = alice
+        .create_group_chat(Some("crew".into()), &[bob.user_id()])
+        .await
+        .unwrap();
+    assert_eq!(alice.pending_invites(&g), vec![bob.user_id()]);
+    let stored = alice.store().pending_invites().unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(
+        (&stored[0].group_id, &stored[0].user_id),
+        (&g, &bob.user_id())
+    );
+
+    let alice = node.restart(alice).await;
+    assert_eq!(alice.pending_invites(&g), vec![bob.user_id()]);
+
+    transport.faults.unreachable.lock().unwrap().clear();
+    alice.start_sync().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    // The stored invite is removed once the commit adding bob returned.
+    while !hub_members(&transport, &g).contains(&bob.user_id())
+        || !alice.store().pending_invites().unwrap().is_empty()
+    {
+        assert!(Instant::now() < deadline, "bob never added");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    alice.stop_sync().unwrap();
+    assert!(alice.pending_invites(&g).is_empty());
+}
+
+#[tokio::test]
+async fn pending_invite_ttl_counts_from_the_first_claim_across_restarts() {
+    let ttl = Duration::from_millis(400);
+    let transport = FlakyTransport::new();
+    let node = Persistent::with_settings(&transport, invite_settings(ttl));
+    let alice = node.register("alice").await;
+    let bob = Device::register(&transport, "bob").await;
+    transport
+        .faults
+        .unreachable
+        .lock()
+        .unwrap()
+        .insert(bob.user_id());
+    let g = alice
+        .create_group_chat(None, &[bob.user_id()])
+        .await
+        .unwrap();
+    let created_at_ms = alice.store().pending_invites().unwrap()[0].created_at_ms;
+
+    // A claim that fails again is recorded, the first claim time kept.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    alice.retry_pending_invites().await.unwrap();
+    let retried = alice.store().pending_invites().unwrap();
+    assert_eq!(retried[0].attempts, 1);
+    assert_eq!(retried[0].created_at_ms, created_at_ms);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let alice = node.restart(alice).await;
+    let restarted_ms = now_ms();
+    let reloaded = alice.store().pending_invites().unwrap();
+    assert_eq!(reloaded, retried);
+    let mut changes = alice.subscribe_changes();
+
+    // Expires a TTL after the first claim, not after the restart.
+    let expiry_ms = created_at_ms + ttl.as_millis() as u64;
+    tokio::time::sleep(Duration::from_millis(
+        (expiry_ms + 20).saturating_sub(now_ms()),
+    ))
+    .await;
+    assert!(now_ms() < restarted_ms + ttl.as_millis() as u64);
+    assert_eq!(alice.retry_pending_invites().await.unwrap(), None);
+    assert!(alice.pending_invites(&g).is_empty());
+    assert!(alice.store().pending_invites().unwrap().is_empty());
+    let removed = std::iter::from_fn(|| changes.try_recv().ok()).any(|c| {
+        matches!(c, gim_base::model::StateChange::MembershipChanged(e)
+            if e.user_id == bob.user_id()
+                && e.kind == gim_base::model::MembershipChangeKind::Removed)
+    });
+    assert!(removed);
 }

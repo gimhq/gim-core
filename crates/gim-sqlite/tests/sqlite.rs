@@ -9,8 +9,8 @@ use common::{group, key, setup, text, Device, NOW};
 use gim_base::model::{
     Chat, ChatKind, ChatMember, DepartedMember, GroupCursor, GroupMessage, MediaCacheEntry,
     Membership, MembershipChangeKind, MembershipEvent, Message, MessageContent, MessageKind,
-    OutboxEntry, OutboxKind, OutboxState, PendingCommit, PendingMedia, PendingWelcome,
-    PreparedPayload, SendState, UserInfo,
+    OutboxEntry, OutboxKind, OutboxState, PendingCommit, PendingInvite, PendingLeave, PendingMedia,
+    PendingWelcome, PreparedPayload, SendState, UserInfo,
 };
 use gim_base::{
     BaseError, MemoryStore, StateReader, StateStore, StoreError, StoreTxn, WriteTarget,
@@ -172,6 +172,20 @@ fn reads_match_memory_store() {
     sqlite.transaction(|txn| Ok(write_rows(txn)?)).unwrap();
     assert_same_reads(&memory, &sqlite);
     assert_eq!(sqlite.pending_commits().unwrap().len(), 3);
+    assert_eq!(sqlite.pending_leaves().unwrap().len(), 2);
+    let invites = sqlite.pending_invites().unwrap();
+    let order: Vec<(&str, &str)> = invites
+        .iter()
+        .map(|i| (i.group_id.as_str(), i.user_id.as_str()))
+        .collect();
+    assert_eq!(
+        order,
+        [("anchor", "erin"), ("crew", "dave"), ("crew", "erin")]
+    );
+    assert_eq!(
+        sqlite.chat(&group("anchor")).unwrap().unwrap().membership,
+        Membership::Leaving
+    );
     assert_eq!(sqlite.departed_members().unwrap().len(), 3);
     assert_eq!(sqlite.device_lists().unwrap().len(), 2);
     let crew = sqlite.membership_events(&group("crew")).unwrap();
@@ -191,6 +205,13 @@ fn reads_match_memory_store() {
         })
         .unwrap();
     assert_same_reads(&memory, &sqlite);
+    // Removing the chat removes its pending leave and invites.
+    assert_eq!(sqlite.pending_leave(&group("crew")).unwrap(), None);
+    assert!(sqlite.pending_leave(&group("anchor")).unwrap().is_some());
+    let invites = sqlite.pending_invites().unwrap();
+    assert_eq!(invites.len(), 1);
+    assert_eq!(invites[0].group_id, group("anchor"));
+    assert_eq!(invites[0].attempts, 1);
 }
 
 fn reopen(device: Device, dir: &std::path::Path) -> Device {
@@ -279,7 +300,9 @@ fn write_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
     dm.membership = Membership::Left;
     txn.upsert_chat(&dm)?;
     // Same updated_at as crew: ties are ordered by group id.
-    txn.upsert_chat(&Chat::new(group("anchor"), ChatKind::Group, NOW))?;
+    let mut anchor = Chat::new(group("anchor"), ChatKind::Group, NOW);
+    anchor.membership = Membership::Leaving;
+    txn.upsert_chat(&anchor)?;
 
     // Inserted out of order; two unsent own messages.
     for (message_id, seq, sent_at) in [
@@ -392,6 +415,19 @@ fn write_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
     ))?;
     txn.upsert_pending_commit(&commit("dm", None))?;
     txn.upsert_pending_commit(&commit("anchor", None))?;
+    for g in ["crew", "anchor"] {
+        txn.upsert_pending_leave(&PendingLeave {
+            group_id: group(g),
+            client_id: ClientId::new(format!("leave-{g}")).unwrap(),
+            epoch: 4,
+            payload: vec![7, 1],
+            attempts: 1,
+            accepted: false,
+        })?;
+    }
+    for (g, user) in [("crew", "erin"), ("anchor", "erin"), ("crew", "dave")] {
+        txn.upsert_pending_invite(&invite(g, user))?;
+    }
     for (user, data) in [("bob", vec![1, 2]), ("alice", vec![3])] {
         txn.upsert_device_list(&UserId::new(user).unwrap(), &data)?;
     }
@@ -417,6 +453,16 @@ fn write_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
         txn.add_membership_event(&membership(g, seq, user, actor, kind))?;
     }
     Ok(())
+}
+
+fn invite(g: &str, user: &str) -> PendingInvite {
+    PendingInvite {
+        group_id: group(g),
+        user_id: UserId::new(user).unwrap(),
+        created_at_ms: NOW,
+        next_retry_at_ms: NOW + 5,
+        attempts: 0,
+    }
 }
 
 fn membership(
@@ -463,10 +509,20 @@ fn update_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
     txn.upsert_pending_commit(&retried)?;
     txn.upsert_device_list(&UserId::new("bob").unwrap(), &[4])?;
     txn.remove_pending_commit(&group("anchor"))?;
+    let mut renewed = txn.pending_leave(&group("anchor"))?.unwrap();
+    renewed.epoch = 5;
+    renewed.attempts = 2;
+    renewed.accepted = true;
+    txn.upsert_pending_leave(&renewed)?;
     txn.remove_departed_member(&DepartedMember {
         group_id: group("crew"),
         device: device("dave", "phone"),
     })?;
+    let mut retried = invite("anchor", "erin");
+    retried.attempts = 1;
+    retried.next_retry_at_ms = NOW + 30;
+    txn.upsert_pending_invite(&retried)?;
+    txn.remove_pending_invite(&group("crew"), &UserId::new("dave").unwrap())?;
     txn.add_membership_event(&membership(
         "crew",
         12,
@@ -513,6 +569,10 @@ fn assert_same_reads(expected: &impl StateReader, actual: &impl StateReader) {
             expected.pending_commit(&g).unwrap()
         );
         assert_eq!(
+            actual.pending_leave(&g).unwrap(),
+            expected.pending_leave(&g).unwrap()
+        );
+        assert_eq!(
             actual.membership_events(&g).unwrap(),
             expected.membership_events(&g).unwrap()
         );
@@ -520,6 +580,14 @@ fn assert_same_reads(expected: &impl StateReader, actual: &impl StateReader) {
     assert_eq!(
         actual.pending_commits().unwrap(),
         expected.pending_commits().unwrap()
+    );
+    assert_eq!(
+        actual.pending_leaves().unwrap(),
+        expected.pending_leaves().unwrap()
+    );
+    assert_eq!(
+        actual.pending_invites().unwrap(),
+        expected.pending_invites().unwrap()
     );
     assert_eq!(
         actual.departed_members().unwrap(),

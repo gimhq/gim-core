@@ -22,12 +22,13 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex, Notify};
 
 use crate::identity::merge_directory_user;
+use crate::invites::{load_pending_invites, PendingInvites};
 use crate::send::TypingState;
 use crate::stream::ConnectionState;
 use crate::sync::SyncSettings;
 use crate::transport::{
-    AccessToken, ClaimedKeyPackage, CommitAccepted, OutgoingCommit, PostError, Transport,
-    TransportError,
+    AccessToken, ClaimedKeyPackage, CommitAccepted, KeyPackageClaim, OutgoingCommit, PostError,
+    Transport, TransportError,
 };
 use crate::{ClientError, Result, SecretStorage, SecretStorageError};
 
@@ -38,6 +39,10 @@ pub const MAX_COMMIT_RETRIES: u32 = 3;
 /// Posts of the same commit (same `client_id`) while its outcome is
 /// unknown, before the call gives up and keeps it pending.
 pub const COMMIT_POST_ATTEMPTS: u32 = 3;
+/// Leave proposals created for one leave (counted again from each
+/// [`Client::restore_session`]): one per epoch that ended without removing
+/// this device. Then the chat stays leaving until the next start.
+pub const MAX_LEAVE_PROPOSALS: u32 = 5;
 /// [`SecretStorage`] key of the serialized [`Session`].
 pub const SESSION_SECRET_KEY: &str = "gim.session";
 /// [`SecretStorage`] key of the user's root key (32-byte Ed25519 seed).
@@ -55,6 +60,13 @@ const CONNECTION_CAPACITY: usize = 64;
 /// Delay before re-posting a commit after an unknown outcome, times the
 /// attempt number.
 const COMMIT_REPOST_DELAY: Duration = Duration::from_millis(100);
+/// Longest `Retry-After` of a peer failure (502/503) waited for before
+/// re-posting a commit within one call; a longer one keeps the commit
+/// pending for a later resubmission.
+const COMMIT_RETRY_AFTER_MAX: Duration = Duration::from_secs(10);
+/// Delay before the sync loop resubmits a pending commit that failed at a
+/// peer hub without a `Retry-After`.
+const PEER_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 /// A signed-in device: who it is and its session token. Persisted in
 /// [`SecretStorage`] next to the root and device keys; the MLS identity
@@ -168,7 +180,8 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
     }
 
     /// A client without a session; call [`Client::create_identity`] or
-    /// [`Client::restore_session`] next. Loads the stored DeviceLists.
+    /// [`Client::restore_session`] next. Loads the stored DeviceLists and
+    /// pending invites.
     ///
     /// Creates the data directory and its `tmp` subdirectory owner-only
     /// (0700 on Unix). Fails with [`ClientError::InvalidInput`] if no data
@@ -187,6 +200,7 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
                 tracing::warn!(%user_id, error = %err, "dropping a stored device list");
             }
         }
+        let pending_invites = load_pending_invites(&*self.store)?;
         Ok(Client {
             inner: Arc::new(Inner {
                 store: self.store,
@@ -210,6 +224,12 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
                 connection_changes: broadcast::channel(CONNECTION_CAPACITY).0,
                 resolved_users: Default::default(),
                 link_pending: AtomicBool::new(false),
+                proposal_timers: Default::default(),
+                hosting_lock: Mutex::new(()),
+                hosting_wake: Notify::new(),
+                pending_invites: std::sync::Mutex::new(pending_invites),
+                invite_wake: Notify::new(),
+                commit_retry_at: Default::default(),
             }),
         })
     }
@@ -293,12 +313,29 @@ pub(crate) struct Inner<S> {
     pub(crate) resolved_users: std::sync::Mutex<HashSet<UserId>>,
     /// A linked identity waits for [`Client::confirm_link`].
     pub(crate) link_pending: AtomicBool,
+    /// (group, epoch) whose pending Proposals this device commits after a
+    /// delay unless another member did.
+    proposal_timers: std::sync::Mutex<HashSet<(GroupId, u64)>>,
+    /// Serializes hosting record publications.
+    pub(crate) hosting_lock: Mutex<()>,
+    /// Cuts the hosting record renewal wait short.
+    pub(crate) hosting_wake: Notify,
+    /// Invitees whose hub was unreachable when they were added; retried by
+    /// the sync loop. Mirrored to the store.
+    pub(crate) pending_invites: std::sync::Mutex<PendingInvites>,
+    /// Cuts the pending invite retry wait short.
+    pub(crate) invite_wake: Notify,
+    /// Unix milliseconds before which the sync loop does not resubmit a
+    /// group's pending commit, after a peer hub failure.
+    pub(crate) commit_retry_at: std::sync::Mutex<HashMap<GroupId, u64>>,
 }
 
 #[derive(Clone)]
 pub(crate) enum CommitOp {
     Add(Vec<ClaimedKeyPackage>),
     Remove(Vec<DeviceRef>),
+    /// The Proposals pending in the group, by reference.
+    Proposals,
 }
 
 enum Resolved {
@@ -309,9 +346,18 @@ enum Resolved {
     Conflict,
 }
 
-/// Whether the hub may have accepted a request that failed this way.
+/// Whether the hub may have accepted a request that failed this way; such
+/// requests are resent unchanged. Peer hub failures (502/503) count: the
+/// owning hub may have sequenced the request before the failure.
 pub(crate) fn outcome_unknown(err: &TransportError) -> bool {
-    matches!(err, TransportError::Network(_) | TransportError::Server(_))
+    matches!(err, TransportError::Network(_) | TransportError::Server(_)) || err.is_peer_failure()
+}
+
+/// The hub owning a group: the `<hub_id>` prefix of its id. Commits and
+/// messages of the group are sequenced there; this device's own hub only
+/// forwards them when it is another one.
+pub(crate) fn owner_hub(group_id: &GroupId) -> Option<&str> {
+    group_id.as_str().split_once('/').map(|(hub, _)| hub)
 }
 
 impl<S: StateStore + 'static> Client<S> {
@@ -396,12 +442,27 @@ impl<S: StateStore + 'static> Client<S> {
         // group.
         let _guard = self.inner.group_lock.lock().await;
         let resumed = match self.resolve_pending_commits(&session).await {
-            Ok(()) => self.remove_departed(&session).await,
+            Ok(()) => match self.remove_departed(&session).await {
+                Ok(()) => self.commit_pending_proposals(&session).await,
+                err => err,
+            },
             err => err,
         };
         if let Err(err) = resumed {
             tracing::warn!(%err, "resuming unfinished group changes failed");
         }
+        // A new start allows new leave proposals.
+        self.run(|store, _| {
+            store.transaction(|txn| {
+                for mut leave in txn.pending_leaves()? {
+                    leave.attempts = 0;
+                    txn.upsert_pending_leave(&leave)?;
+                }
+                Ok(())
+            })
+        })
+        .await?;
+        self.resume_leaves(&session).await;
         Ok(true)
     }
 
@@ -441,13 +502,17 @@ impl<S: StateStore + 'static> Client<S> {
         let session = self.require_session()?;
         let _guard = self.inner.group_lock.lock().await;
         let members = self.chat_devices(group_id).await?;
-        let key_packages = self.claim_key_packages(&session, users, &members).await?;
-        if key_packages.is_empty() {
+        let claim = self.claim_key_packages(&session, users, &members).await?;
+        self.add_pending_invites(group_id, &claim.unavailable).await;
+        if claim.key_packages.is_empty() {
+            if !claim.unavailable.is_empty() {
+                return Ok(());
+            }
             return Err(ClientError::InvalidInput(
                 "no device to add has a KeyPackage".into(),
             ));
         }
-        self.commit(&session, group_id, CommitOp::Add(key_packages))
+        self.commit(&session, group_id, CommitOp::Add(claim.key_packages))
             .await
             .map(drop)
     }
@@ -470,46 +535,139 @@ impl<S: StateStore + 'static> Client<S> {
         Ok(())
     }
 
-    /// Leaves the group: submits a Proposal removing this device (one of the
-    /// remaining members commits it), drops the local MLS group, and keeps
-    /// the chat history as `Left` with the own user's `Left` membership
-    /// event.
+    /// Leaves the group: submits a Proposal removing this device and
+    /// returns once the hub accepted it, with the chat `Leaving` (nothing
+    /// can be sent; see [`gim_base::model::Membership::Leaving`]). Another
+    /// member commits the Proposal; applying that commit drops the local MLS
+    /// group and keeps the chat history as `Left` with the own user's `Left`
+    /// membership event. If an epoch ends without removing this device, a
+    /// fresh Proposal is sent (see [`MAX_LEAVE_PROPOSALS`]).
+    ///
+    /// If the outcome stays unknown (network errors), the chat stays
+    /// `Leaving` and the Proposal is re-posted on the next sync or start.
+    /// A Proposal the hub refuses for good returns the chat to `Joined`.
     pub async fn leave(&self, group_id: &GroupId) -> Result<()> {
         let session = self.require_session()?;
         let _guard = self.inner.group_lock.lock().await;
         self.resolve_pending_commit(&session, group_id).await?;
-        let mut attempt = 0;
+        let gid = group_id.clone();
+        let chat = self
+            .run(move |store, _| {
+                store
+                    .chat(&gid)?
+                    .ok_or_else(|| BaseError::NotFound(format!("chat {gid}")))
+            })
+            .await?;
+        match chat.membership {
+            Membership::Left => {
+                return Err(ClientError::InvalidInput(format!("left chat {group_id}")))
+            }
+            Membership::Leaving => {}
+            Membership::Joined => {
+                let (gid, base) = (group_id.clone(), BaseClient::new(session.device.clone()));
+                let (_, changes) = self
+                    .run(move |store, engine| {
+                        base.start_leave(store, engine, &gid, new_client_id()?, now_ms())
+                    })
+                    .await?;
+                self.emit(&changes);
+            }
+        }
+        self.advance_leave(&session, group_id).await
+    }
+
+    /// Posts the group's pending leave until the hub accepted it: again
+    /// (same bytes) while its outcome is unknown, renewed for the current
+    /// epoch once its epoch ended. Done if the chat is no longer leaving.
+    async fn advance_leave(&self, session: &Session, group_id: &GroupId) -> Result<()> {
+        let base = BaseClient::new(session.device.clone());
+        let mut stale = 0;
         loop {
-            attempt += 1;
             let gid = group_id.clone();
-            let proposal = self
+            let state = self
                 .run(move |store, engine| {
-                    store.transaction(|txn| Ok(engine.leave_group(&*txn, &gid)?))
+                    store.transaction(|txn| {
+                        let Some(leave) = txn.pending_leave(&gid)? else {
+                            return Ok(None);
+                        };
+                        let leaving = txn
+                            .chat(&gid)?
+                            .is_some_and(|c| c.membership == Membership::Leaving)
+                            && engine.has_group(&*txn, &gid)?;
+                        if !leaving {
+                            txn.remove_pending_leave(&gid)?;
+                            return Ok(None);
+                        }
+                        Ok(Some((leave, engine.group_epoch(&*txn, &gid)?)))
+                    })
                 })
                 .await?;
-            let commit = OutgoingCommit {
-                client_id: new_client_id()?,
-                mls_message: proposal,
+            let Some((mut leave, epoch)) = state else {
+                return Ok(());
+            };
+            if leave.epoch < epoch {
+                if leave.attempts >= MAX_LEAVE_PROPOSALS {
+                    return Err(ClientError::CommitConflict(leave.attempts));
+                }
+                let (gid, b) = (group_id.clone(), base.clone());
+                leave = self
+                    .run(move |store, engine| b.renew_leave(store, engine, &gid, new_client_id()?))
+                    .await?;
+            } else if leave.accepted {
+                return Ok(());
+            }
+            let proposal = OutgoingCommit {
+                client_id: leave.client_id.clone(),
+                mls_message: leave.payload,
                 welcome: None,
                 welcome_recipients: vec![],
             };
-            match self.submit_until_known(group_id, commit).await {
-                Ok(_) => break,
-                Err(PostError::StaleEpoch { .. }) if attempt <= MAX_COMMIT_RETRIES => {
-                    self.sync_locked(&session).await?;
+            match self.submit_until_known(group_id, proposal).await {
+                Ok(_) => {
+                    let (gid, b) = (group_id.clone(), base.clone());
+                    let client_id = leave.client_id;
+                    return self
+                        .run(move |store, _| b.leave_accepted(store, &gid, &client_id))
+                        .await;
+                }
+                // An epoch ended: catch up, then renew the proposal.
+                Err(PostError::StaleEpoch { .. }) if stale < MAX_COMMIT_RETRIES => {
+                    stale += 1;
+                    self.sync_locked(session).await?;
                 }
                 Err(PostError::StaleEpoch { .. }) => {
-                    return Err(ClientError::CommitConflict(attempt))
+                    return Err(ClientError::CommitConflict(stale + 1))
                 }
-                Err(PostError::Transport(err)) => return Err(err.into()),
+                Err(PostError::Transport(err)) if outcome_unknown(&err) => return Err(err.into()),
+                Err(PostError::Transport(err)) => {
+                    tracing::warn!(%group_id, error = %err, "leave proposal refused; staying in the group");
+                    let (gid, b) = (group_id.clone(), base.clone());
+                    let changes = self
+                        .run(move |store, engine| b.abort_leave(store, engine, &gid))
+                        .await?;
+                    self.emit(&changes);
+                    return Err(err.into());
+                }
             }
         }
-        let (gid, base) = (group_id.clone(), BaseClient::new(session.device.clone()));
-        let changes = self
-            .run(move |store, engine| base.leave_chat(store, engine, &gid, now_ms()))
-            .await?;
-        self.emit(&changes);
-        Ok(())
+    }
+
+    /// Advances every pending leave (see [`Client::leave`]); failures are
+    /// logged and retried on the next sync or start. Caller holds the group
+    /// lock.
+    pub(crate) async fn resume_leaves(&self, session: &Session) {
+        let leaves = match self.run(|store, _| Ok(store.pending_leaves()?)).await {
+            Ok(leaves) => leaves,
+            Err(err) => {
+                tracing::warn!(%err, "cannot read the pending leaves");
+                return;
+            }
+        };
+        for leave in leaves {
+            if let Err(err) = self.advance_leave(session, &leave.group_id).await {
+                tracing::warn!(group_id = %leave.group_id, %err, "leave proposal not delivered; retrying later");
+            }
+        }
     }
 
     /// Queues `content` and runs an outbox pass (see
@@ -554,18 +712,28 @@ impl<S: StateStore + 'static> Client<S> {
     ) -> Result<(GroupId, bool)> {
         let session = session.clone();
         let _guard = self.inner.group_lock.lock().await;
-        let key_packages = self.claim_key_packages(&session, users, &[]).await?;
+        let claim = self.claim_key_packages(&session, users, &[]).await?;
+        // Always on the own hub, which then owns the group.
         let group_id = self
             .authed(|t| async move { self.inner.transport.create_group(&t, kind).await })
             .await?;
+        if owner_hub(&group_id)
+            .is_some_and(|hub| !session.hub_id.is_empty() && hub != session.hub_id)
+        {
+            tracing::warn!(%group_id, hub_id = %session.hub_id, "the own hub created a group it does not own");
+        }
         let (gid, base) = (group_id.clone(), BaseClient::new(session.device.clone()));
         let changes = self
             .run(move |store, engine| base.create_chat(store, engine, &gid, kind, name, now_ms()))
             .await?;
         self.emit(&changes);
-        let added = !key_packages.is_empty();
+        // Invitees on unreachable hubs are added later by the sync loop; a
+        // chat with only those starts with this user alone.
+        self.add_pending_invites(&group_id, &claim.unavailable)
+            .await;
+        let added = !claim.key_packages.is_empty();
         if added {
-            self.commit(&session, &group_id, CommitOp::Add(key_packages))
+            self.commit(&session, &group_id, CommitOp::Add(claim.key_packages))
                 .await?;
         }
         Ok((group_id, added))
@@ -749,6 +917,18 @@ impl<S: StateStore + 'static> Client<S> {
                                 };
                                 (output, Some(welcome))
                             }
+                            CommitOp::Proposals => {
+                                let Some(output) = engine.commit_pending_proposals(&*txn, &gid)?
+                                else {
+                                    return Ok(false);
+                                };
+                                let welcome =
+                                    output.welcome.clone().map(|payload| PendingWelcome {
+                                        payload,
+                                        recipients: output.added.clone(),
+                                    });
+                                (output, welcome)
+                            }
                             CommitOp::Remove(devices) => {
                                 let members = engine.group_members(&*txn, &gid)?;
                                 let devices: Vec<DeviceRef> = devices
@@ -825,7 +1005,9 @@ impl<S: StateStore + 'static> Client<S> {
             welcome,
             welcome_recipients,
         };
-        match self.submit_until_known(group_id, commit).await {
+        let submitted = self.submit_until_known(group_id, commit).await;
+        self.schedule_commit_retry(group_id, &submitted);
+        match submitted {
             Ok(accepted) => {
                 let (gid, base) = (group_id.clone(), BaseClient::new(session.device.clone()));
                 let changes = self
@@ -846,12 +1028,79 @@ impl<S: StateStore + 'static> Client<S> {
                     })
                 })
                 .await?;
+                // Messages held back while the commit was pending (see
+                // `Client::defer_group_events`), e.g. the competing commit.
+                self.apply_parked(session, group_id).await?;
                 match err {
                     PostError::StaleEpoch { .. } => Ok(Resolved::Conflict),
                     PostError::Transport(err) => Err(err.into()),
                 }
             }
         }
+    }
+
+    /// After a peer hub failure, the sync loop waits for the `Retry-After`
+    /// (or [`PEER_RETRY_DELAY`]) before resubmitting the group's commit;
+    /// any other outcome clears the wait.
+    fn schedule_commit_retry(
+        &self,
+        group_id: &GroupId,
+        submitted: &Result<CommitAccepted, PostError>,
+    ) {
+        let mut retry_at = self
+            .inner
+            .commit_retry_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match submitted {
+            Err(PostError::Transport(err)) if err.is_peer_failure() => {
+                let delay = err.retry_after().unwrap_or(PEER_RETRY_DELAY);
+                tracing::info!(%group_id, owner_hub = ?owner_hub(group_id), ?delay, error = %err, "commit failed at a peer hub; kept pending");
+                retry_at.insert(group_id.clone(), now_ms() + delay.as_millis() as u64);
+            }
+            _ => {
+                retry_at.remove(group_id);
+            }
+        }
+    }
+
+    /// Settles every pending commit like [`Client::resolve_pending_commits`],
+    /// except those failing at a peer hub (or waiting to be resubmitted
+    /// after such a failure): their groups are returned with the error, and
+    /// the other groups go on.
+    pub(crate) async fn resolve_pending_commits_deferring(
+        &self,
+        session: &Session,
+    ) -> Result<BTreeMap<GroupId, ClientError>> {
+        let pending = self.run(|store, _| Ok(store.pending_commits()?)).await?;
+        let mut deferred = BTreeMap::new();
+        for commit in pending {
+            let group_id = commit.group_id;
+            let waiting = self
+                .inner
+                .commit_retry_at
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&group_id)
+                .map(|at| at.saturating_sub(now_ms()))
+                .filter(|left| *left > 0);
+            if let Some(left) = waiting {
+                let err = TransportError::PeerUnavailable {
+                    retry_after_secs: Some(left.div_ceil(1000)),
+                    reason: format!("pending commit of {group_id} waits for its owning hub"),
+                };
+                deferred.insert(group_id, err.into());
+                continue;
+            }
+            match self.resolve_pending_commit(session, &group_id).await {
+                Ok(_) => {}
+                Err(ClientError::Transport(err)) if err.is_peer_failure() => {
+                    deferred.insert(group_id, err.into());
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(deferred)
     }
 
     /// Settles every pending commit; stops at the first error.
@@ -865,8 +1114,10 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Submits `commit`, again while the outcome is unknown, up to
-    /// [`COMMIT_POST_ATTEMPTS`] times. Safe because the hub recognizes a
-    /// resubmitted Commit by its hash (and a Proposal by its `client_id`).
+    /// [`COMMIT_POST_ATTEMPTS`] times, after the hub's `Retry-After` when it
+    /// gives one (up to [`COMMIT_RETRY_AFTER_MAX`]). Safe because the hub
+    /// recognizes a resubmitted Commit by its hash (and a Proposal by its
+    /// `client_id`).
     async fn submit_until_known(
         &self,
         group_id: &GroupId,
@@ -890,7 +1141,14 @@ impl<S: StateStore + 'static> Client<S> {
                 Err(PostError::Transport(err))
                     if outcome_unknown(&err) && attempt < COMMIT_POST_ATTEMPTS =>
                 {
-                    tokio::time::sleep(COMMIT_REPOST_DELAY * attempt).await;
+                    let delay = match err.retry_after() {
+                        Some(delay) if delay > COMMIT_RETRY_AFTER_MAX => {
+                            return Err(PostError::Transport(err))
+                        }
+                        Some(delay) => delay,
+                        None => COMMIT_REPOST_DELAY * attempt,
+                    };
+                    tokio::time::sleep(delay).await;
                 }
                 submitted => return submitted,
             }
@@ -903,9 +1161,172 @@ impl<S: StateStore + 'static> Client<S> {
             .map(drop)
     }
 
-    /// Commits the MLS removal of devices that left a group (a leave
-    /// Proposal, a revocation, or a hub-side removal) but are still in the
-    /// tree. Only the
+    /// Commits the Proposals pending in joined groups (a member leaving,
+    /// ...) by reference. One member does it at once: the member device
+    /// with the lowest device id among those no Proposal removes. The others
+    /// wait a random delay within [`SyncSettings::proposal_commit_delay_min`]
+    /// and `_max`, and commit only if the Proposals are still pending in the
+    /// same epoch (the chosen member was offline). Caller holds the group
+    /// lock.
+    pub(crate) async fn commit_pending_proposals(&self, session: &Session) -> Result<()> {
+        let own = session.device.clone();
+        let pending = self
+            .run(move |store, engine| {
+                store.transaction(|txn| {
+                    let mut pending = Vec::new();
+                    for chat in txn.chats()? {
+                        let gid = chat.group_id;
+                        if chat.membership != Membership::Joined
+                            || !engine.has_group(&*txn, &gid)?
+                        {
+                            continue;
+                        }
+                        let proposals = engine.pending_proposals(&*txn, &gid)?;
+                        if proposals.is_empty() {
+                            continue;
+                        }
+                        let removed: BTreeSet<DeviceRef> =
+                            proposals.into_iter().filter_map(|p| p.removed).collect();
+                        let committer = engine
+                            .group_members(&*txn, &gid)?
+                            .into_iter()
+                            .filter(|m| !removed.contains(m))
+                            .min_by(|a, b| {
+                                (a.device_id.as_str(), a.user_id.as_str())
+                                    .cmp(&(b.device_id.as_str(), b.user_id.as_str()))
+                            });
+                        let epoch = engine.group_epoch(&*txn, &gid)?;
+                        pending.push((gid, epoch, committer.as_ref() == Some(&own)));
+                    }
+                    Ok(pending)
+                })
+            })
+            .await?;
+        for (group_id, epoch, chosen) in pending {
+            if chosen {
+                self.commit_proposals_now(session, &group_id).await?;
+            } else {
+                self.schedule_proposal_commit(group_id, epoch);
+            }
+        }
+        Ok(())
+    }
+
+    /// Commits the group's pending Proposals. Proposals the hub refuses to
+    /// see committed (e.g. no longer pending there) are dropped, so they
+    /// are not committed again; unknown outcomes keep the commit pending.
+    pub(crate) async fn commit_proposals_now(
+        &self,
+        session: &Session,
+        group_id: &GroupId,
+    ) -> Result<()> {
+        match self.commit(session, group_id, CommitOp::Proposals).await {
+            Ok(_) => Ok(()),
+            Err(ClientError::Transport(err)) if outcome_unknown(&err) => Err(err.into()),
+            Err(err) => {
+                tracing::warn!(%group_id, %err, "cannot commit the pending proposals; dropping them");
+                let gid = group_id.clone();
+                self.run(move |store, engine| {
+                    store.transaction(|txn| {
+                        if engine.has_group(&*txn, &gid)? {
+                            engine.clear_pending_proposals(&*txn, &gid)?;
+                        }
+                        Ok(())
+                    })
+                })
+                .await
+            }
+        }
+    }
+
+    /// Commits the group's Proposals of `epoch` after a random delay,
+    /// unless another member committed them meanwhile.
+    fn schedule_proposal_commit(&self, group_id: GroupId, epoch: u64) {
+        let key = (group_id, epoch);
+        let timers = || {
+            self.inner
+                .proposal_timers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+        };
+        if !timers().insert(key.clone()) {
+            return;
+        }
+        let settings = self.inner.sync_settings;
+        let delay = jittered(
+            settings.proposal_commit_delay_min,
+            settings.proposal_commit_delay_max,
+        );
+        tracing::debug!(group_id = %key.0, epoch, ?delay, "another member should commit the pending proposals");
+        let client = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            client
+                .inner
+                .proposal_timers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&key);
+            let (group_id, epoch) = key;
+            if let Err(err) = client.commit_proposals_if_pending(&group_id, epoch).await {
+                tracing::debug!(%group_id, %err, "committing the pending proposals failed");
+            }
+        });
+    }
+
+    async fn commit_proposals_if_pending(&self, group_id: &GroupId, epoch: u64) -> Result<()> {
+        let session = self.require_session()?;
+        let _guard = self.inner.group_lock.lock().await;
+        // The chosen member's commit may be waiting on the hub.
+        self.sync_locked(&session).await?;
+        let gid = group_id.clone();
+        let pending = self
+            .run(move |store, engine| {
+                store.transaction(|txn| {
+                    Ok(txn
+                        .chat(&gid)?
+                        .is_some_and(|c| c.membership == Membership::Joined)
+                        && engine.has_group(&*txn, &gid)?
+                        && engine.group_epoch(&*txn, &gid)? == epoch
+                        && !engine.pending_proposals(&*txn, &gid)?.is_empty())
+                })
+            })
+            .await?;
+        if !pending {
+            return Ok(());
+        }
+        tracing::info!(%group_id, epoch, "committing pending proposals another member did not commit");
+        self.commit_proposals_now(&session, group_id).await
+    }
+
+    /// Commits the group's pending Proposals, if any, so that this device
+    /// can encrypt again: MLS refuses application messages while Proposals
+    /// are pending. Caller holds the group lock.
+    pub(crate) async fn commit_proposals_before_send(
+        &self,
+        session: &Session,
+        group_id: &GroupId,
+    ) -> Result<()> {
+        let gid = group_id.clone();
+        let pending = self
+            .run(move |store, engine| {
+                store.transaction(|txn| {
+                    Ok(txn
+                        .chat(&gid)?
+                        .is_some_and(|c| c.membership == Membership::Joined)
+                        && engine.has_group(&*txn, &gid)?
+                        && !engine.pending_proposals(&*txn, &gid)?.is_empty())
+                })
+            })
+            .await?;
+        if pending {
+            self.commit_proposals_now(session, group_id).await?;
+        }
+        Ok(())
+    }
+
+    /// Commits the MLS removal of devices that left a group (a revocation,
+    /// or a hub-side removal) but are still in the tree. Only the
     /// remaining member with the lowest leaf index does it, so members do
     /// not race each other; the others keep the candidates until the
     /// removal commit reaches them. Candidates no longer in the tree, or of
@@ -954,6 +1375,12 @@ impl<S: StateStore + 'static> Client<S> {
             let op = CommitOp::Remove(devices.clone());
             // Merging the removal drops the candidates (gim-base).
             if let Err(err) = self.commit(session, &group_id, op).await {
+                // The commit stays pending until the owning hub is back; the
+                // other groups go on.
+                if matches!(&err, ClientError::Transport(e) if e.is_peer_failure()) {
+                    tracing::info!(%group_id, error = %err, "removal of departed members deferred");
+                    continue;
+                }
                 if !matches!(&err, ClientError::Transport(e) if outcome_unknown(e)) {
                     // Not retried: a definitive failure would repeat on
                     // every sync.
@@ -1030,13 +1457,14 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Claims a KeyPackage of every active device of `users` and of this
-    /// user's other devices, except this device and `exclude`.
+    /// user's other devices, except this device and `exclude`. Also returns
+    /// the requested users (not this one) whose hub was unavailable.
     pub(crate) async fn claim_key_packages(
         &self,
         session: &Session,
         users: &[UserId],
         exclude: &[DeviceRef],
-    ) -> Result<Vec<ClaimedKeyPackage>> {
+    ) -> Result<KeyPackageClaim> {
         let users: Vec<UserId> = users
             .iter()
             .chain([&session.device.user_id])
@@ -1047,20 +1475,38 @@ impl<S: StateStore + 'static> Client<S> {
         let claimed = self
             .authed(|t| {
                 let users = users.clone();
-                async move { self.inner.transport.claim_key_packages(&t, &users).await }
+                async move {
+                    self.inner
+                        .transport
+                        .claim_key_packages_federated(&t, &users)
+                        .await
+                }
             })
             .await?;
         // Only requested users, one KeyPackage per device: the hub must not
         // pick who joins.
         let mut seen = BTreeSet::new();
-        Ok(claimed
+        let key_packages: Vec<ClaimedKeyPackage> = claimed
+            .key_packages
             .into_iter()
             .filter(|k| users.contains(&k.device.user_id) && seen.insert(k.device.clone()))
             .filter(|k| k.device != session.device && !exclude.contains(&k.device))
-            .collect())
+            .collect();
+        let unavailable = claimed
+            .unavailable
+            .into_iter()
+            .filter(|u| *u != session.device.user_id && users.contains(u))
+            .filter(|u| !key_packages.iter().any(|k| k.device.user_id == *u))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        Ok(KeyPackageClaim {
+            key_packages,
+            unavailable,
+        })
     }
 
-    async fn chat_devices(&self, group_id: &GroupId) -> Result<Vec<DeviceRef>> {
+    pub(crate) async fn chat_devices(&self, group_id: &GroupId) -> Result<Vec<DeviceRef>> {
         let gid = group_id.clone();
         let chat = self
             .run(move |store, _| {
@@ -1160,6 +1606,17 @@ impl<S: StateStore + 'static> Client<S> {
             .unwrap_or_else(|e| e.into_inner()) = None;
         Ok(self.inner.secrets.delete(SESSION_SECRET_KEY)?)
     }
+}
+
+/// A random duration in `[min, max]`.
+fn jittered(min: Duration, max: Duration) -> Duration {
+    let mut bytes = [0u8; 8];
+    // A fixed delay is still correct, only less spread out.
+    let _ = rustls::crypto::ring::default_provider()
+        .secure_random
+        .fill(&mut bytes);
+    let span = max.saturating_sub(min).as_millis() as u64;
+    min + Duration::from_millis(u64::from_le_bytes(bytes) % (span + 1))
 }
 
 pub(crate) fn new_client_id() -> Result<ClientId, BaseError> {

@@ -11,14 +11,20 @@ This document is normative for the payload (section 2) and the provider mapping 
 
 `PUT /v2/push/registration` (bearer auth) stores the calling device's registration, replacing any
 previous one (one per device); `DELETE` removes it. Both return 204. The body is
-`{provider, token, app_id?, sandbox?}` (see `openapi.json`):
+`{provider, token, app_id?, sandbox?, p256dh?, auth?}` (see `openapi.json`):
 
-| `provider` | `token` | `app_id` | `sandbox` |
-|---|---|---|---|
-| `apns` | APNs device token: 64-200 hex digits (even), stored lowercase | APNs topic (bundle ID); defaults to `GIM_HUB_PUSH_APNS_TOPIC` | use the APNs sandbox |
-| `fcm` | FCM registration token: at least 32 chars of `A-Z a-z 0-9 - _ : .` | ignored | ignored |
-| `unifiedpush` | endpoint URL: `https`, no credentials, not `localhost` or a non-public IP (loopback, private, link-local, CGNAT, NAT64, 6to4, ...) | ignored | ignored |
-| `log` | any string without control characters | ignored | ignored |
+| `provider` | `token` | `app_id` | `sandbox` | `p256dh`, `auth` |
+|---|---|---|---|---|
+| `apns` | APNs device token: 64-200 hex digits (even), stored lowercase | APNs topic (bundle ID); defaults to `GIM_HUB_PUSH_APNS_TOPIC` | use the APNs sandbox | ignored |
+| `fcm` | FCM registration token: at least 32 chars of `A-Z a-z 0-9 - _ : .` | ignored | ignored | ignored |
+| `unifiedpush` | endpoint URL: `https`, no credentials, not `localhost` or a non-public IP (loopback, private, link-local, CGNAT, NAT64, 6to4, ...) | ignored | ignored | required (section 3) |
+| `log` | any string without control characters | ignored | ignored | ignored |
+
+For `unifiedpush`, `p256dh` is the device's Web Push public key (base64url, padding optional, of
+the 65-byte uncompressed P-256 point; it must be a valid curve point) and `auth` its
+authentication secret (base64url of 16 bytes), as defined by RFC 8291. Both are required; a
+missing or malformed value is 400 `validation_failed`. Other providers ignore both fields and do
+not store them.
 
 Every token is 1-4096 bytes; `app_id` is 1-255 chars of `A-Z a-z 0-9 . - _ :`. Invalid input is
 400 `validation_failed`. Registrations are accepted for every provider even when the hub has no
@@ -38,32 +44,46 @@ removed with the device.
   "gid": "<gid>",
   "seq": 42,
   "message_id": "<message_id>",
-  "sender_user_id": "<user_id>",
   "collapse_id": "<message_id>",
   "mls_message": "<base64>"
 }
 ```
 
 - `v`: payload version, `1`. Clients ignore unknown fields.
-- `type`: the event type. `message` and `welcome` always; `group.member_added` and
-  `group.member_removed` only when the hub sets `GIM_HUB_PUSH_MEMBER_EVENTS=true`.
+- `type`: the event type. `message` (except kind `proposal`, section 4) and `welcome` always;
+  `group.member_added` and `group.member_removed` only when the hub sets
+  `GIM_HUB_PUSH_MEMBER_EVENTS=true`.
 - `gid`, `seq`: the group and per-group sequence number of the message (for `welcome` and
   membership events: of the Commit that produced them).
 - `message_id`: the hub's ID of the stored message at `(gid, seq)`. If the hub does not store that
   message, a stand-in: the first 16 bytes of `SHA-256(gid || 0x00 || seq as u64 big-endian)`,
   lowercase hex.
-- `sender_user_id`: the sender of the message or Welcome; for membership events the user who
-  committed the change.
 - `collapse_id`: always equal to `message_id`, so a device collapses duplicate pushes for the same
   message (e.g. from several hubs of a multi-homed user, arch §9.5).
-- `mls_message` (optional): standard base64 of the MLS message (`message`) or the MLS Welcome
-  (`welcome`, only when the Welcome has no separate ratchet tree). Present only if the encoded
-  provider payload stays within the provider limit (section 3); otherwise omitted and the client
-  fetches `GET /v2/groups/{gid}/messages?from_seq={seq}` (or `GET /v2/welcomes/pending`). Never
-  present for membership events.
+- `mls_message` (optional): standard base64 of the MLS message (`message`) or of the TLS-encoded
+  MLSMessage (wire_format = mls_welcome) carrying the Welcome (`welcome`, the same bytes as the
+  event's `welcome` field; only when the Welcome has no separate ratchet tree). Present only if
+  the encoded provider payload stays within the provider limit (section 3); otherwise omitted and
+  the client fetches `GET /v2/groups/{gid}/messages?from_seq={seq}` (or
+  `GET /v2/welcomes/pending`). Never present for membership events.
 
-The hub never sees plaintext; `mls_message` is the same ciphertext the event stream carries. The
-metadata fields (`gid`, `seq`, `sender_user_id`) are visible to the push provider.
+The payload never names the sender: it is inside the MLS ciphertext. The hub never sees
+plaintext; `mls_message` is the same ciphertext the event stream carries. For APNs and FCM the
+metadata fields (`gid`, `seq`, `message_id`) are visible to the push provider; UnifiedPush bodies
+are end-to-end encrypted to the device (section 3).
+
+### Minimal mode
+
+With `GIM_HUB_PUSH_MINIMAL=true` (default `false`) every push carries exactly
+
+```json
+{"v": 1, "type": "wake", "collapse_id": "<message_id>"}
+```
+
+with no `gid`, `seq`, `message_id` or `mls_message`; the client syncs `GET /v2/events`. Provider
+envelopes are unchanged: APNs alert vs. background push type and priority, FCM priority and
+UnifiedPush urgency are still chosen from the underlying event type, and collapse ids
+(`apns-collapse-id`, `collapse_key`, `topic`) are the same.
 
 ## 3. Provider mapping
 
@@ -117,18 +137,32 @@ reused until a minute before it expires. Data-only message:
 
 ### UnifiedPush
 
-`POST <token>` (the endpoint URL) with the payload JSON as body, at most 4096 bytes (`mls_message`
-inlined only if it fits), and headers `content-type: application/json`, `ttl: 86400`,
-`urgency: high` (`normal` for membership events) and `topic: <collapse_id>` when it is a valid
-Web Push topic (at most 32 base64url characters). The body is not Web Push encrypted (RFC 8291).
-The hub refuses to connect if the endpoint's host resolves to any non-public address (checked on
+`POST <token>` (the endpoint URL). The body is the payload JSON encrypted with Web Push message
+encryption (RFC 8291) in the `aes128gcm` content coding (RFC 8188), for the registration's
+`p256dh` and `auth`:
+
+- A fresh P-256 key pair (`as_public`) and a random 16-byte `salt` per push.
+- `ecdh_secret = ECDH(as_private, p256dh)`; `IKM = HKDF-SHA-256(salt = auth, IKM = ecdh_secret,
+  info = "WebPush: info" || 0x00 || p256dh || as_public, L = 32)`.
+- `PRK = HKDF-Extract(salt, IKM)`; `CEK = HKDF-Expand(PRK, "Content-Encoding: aes128gcm" || 0x00,
+  16)`; `NONCE = HKDF-Expand(PRK, "Content-Encoding: nonce" || 0x00, 12)`.
+- One record: `AES-128-GCM(CEK, NONCE, payload || 0x02)` (no further padding).
+- Body: `salt (16) || rs = 4096 (u32 big-endian) || idlen = 65 || as_public (65) || ciphertext`.
+
+The encrypted body is at most 4096 bytes. Encryption adds 103 bytes (86-byte header, padding
+delimiter, 16-byte tag), so `mls_message` is inlined only if the payload JSON is at most 3993
+bytes. Headers: `content-encoding: aes128gcm`, `content-type: application/octet-stream`,
+`ttl: 86400`, `urgency: high` (`normal` for membership events) and `topic: <collapse_id>` when it
+is a valid Web Push topic (at most 32 base64url characters). A registration without `p256dh`/`auth`
+(stored before they were required) gets no push (permanent failure) until the device registers
+again. The hub refuses to connect if the endpoint's host resolves to any non-public address (checked on
 every send, so DNS rebinding cannot reach internal hosts) and does not follow redirects (a 3xx is a
 permanent failure).
 
 ### log
 
-Writes a structured log line (target `gim_hub_push::log`) and records the payload (as for
-UnifiedPush: plain JSON, 4096-byte limit) in an in-memory ring of the last 256 pushes.
+Writes a structured log line (target `gim_hub_push::log`) and records the payload (plain JSON,
+4096-byte limit) in an in-memory ring of the last 256 pushes.
 
 ## 4. Dispatch
 
@@ -136,6 +170,8 @@ UnifiedPush: plain JSON, 4096-byte limit) in an in-memory ring of the last 256 p
   (events from before the start are not pushed). For each `message`/`welcome` event (and
   membership events if enabled) addressed to a device that is active and has a registration, it
   queues a push. The sender's own device never gets a `message` event, so it gets no push.
+- MLS Proposals are not pushed: a `message` event of kind `proposal` changes nothing until a Commit
+  covers it, and that Commit (and its membership events) is pushed as usual.
 - Queue: at most one pending push per device; a newer one replaces it. At most
   `GIM_HUB_PUSH_QUEUE_CAPACITY` devices are queued; further pushes are dropped (counted and
   logged). Four workers send concurrently.
