@@ -1159,6 +1159,11 @@ dependencies = [
 [[package]]
 name = "gim-integration-testing"
 version = "0.1.0"
+dependencies = [
+ "gim-ffi",
+ "tempfile",
+ "tokio",
+]
 
 [[package]]
 name = "gim-proto"
@@ -1185,6 +1190,7 @@ dependencies = [
  "gim-crypto",
  "gim-proto",
  "gim-sdk",
+ "gim-sqlite",
  "gim-test",
  "reqwest",
  "rustls",

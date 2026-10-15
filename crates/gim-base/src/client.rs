@@ -6,8 +6,8 @@ use gim_crypto::{decrypt_to_envelope, CryptoError, DecryptedMessage, MlsEngine, 
 use gim_proto::envelope::{Content, Envelope, ReceiptKind};
 
 use crate::model::{
-    to_message_id, Chat, ChatKind, ChatMember, GroupMessage, IncomingEvent, Membership, Message,
-    MessageContent, MessageKind, SendState, StateChange,
+    to_message_id, AfterCommit, Chat, ChatKind, ChatMember, DepartedMember, GroupMessage,
+    IncomingEvent, Membership, Message, MessageContent, MessageKind, SendState, StateChange,
 };
 use crate::{Result, StateReader, StateStore, StoreTxn};
 
@@ -56,7 +56,9 @@ impl BaseClient {
     }
 
     /// Merges this device's pending commit after gim-server accepted it at
-    /// `seq`, and updates the chat members.
+    /// `seq`, and updates the chat members. The persisted
+    /// [`crate::model::PendingCommit`] is deleted, or marked merged if a
+    /// follow-up is still to be done.
     pub fn merge_own_commit<S: StateStore>(
         &self,
         store: &S,
@@ -66,6 +68,14 @@ impl BaseClient {
     ) -> Result<Vec<StateChange>> {
         store.transaction(|txn| {
             engine.merge_pending_commit(&*txn, group_id)?;
+            if let Some(mut pending) = txn.pending_commit(group_id)? {
+                if pending.then == AfterCommit::Nothing {
+                    txn.remove_pending_commit(group_id)?;
+                } else {
+                    pending.merged = true;
+                    txn.upsert_pending_commit(&pending)?;
+                }
+            }
             let mut changes = Vec::new();
             self.update_membership(txn, engine, group_id, None, &mut changes)?;
             mark_applied(txn, group_id, seq)?;
@@ -114,13 +124,14 @@ impl BaseClient {
                 // Membership comes from MLS commits and Welcomes.
                 IncomingEvent::MemberAdded { .. } => {}
                 IncomingEvent::MemberRemoved { group_id, device } => {
-                    if device == self.own {
-                        if let Some(mut chat) = txn.chat(&group_id)? {
-                            if chat.membership == Membership::Joined {
-                                chat.membership = Membership::Left;
-                                txn.upsert_chat(&chat)?;
-                                changes.push(StateChange::ChatUpserted(chat));
-                            }
+                    if device != self.own {
+                        // Left the fan-out list but maybe not the MLS tree.
+                        txn.add_departed_member(&DepartedMember { group_id, device })?;
+                    } else if let Some(mut chat) = txn.chat(&group_id)? {
+                        if chat.membership == Membership::Joined {
+                            chat.membership = Membership::Left;
+                            txn.upsert_chat(&chat)?;
+                            changes.push(StateChange::ChatUpserted(chat));
                         }
                     }
                 }
@@ -330,12 +341,23 @@ impl BaseClient {
     ) -> Result<()> {
         let now = now_ms();
         let mut chat = load_chat(txn, group_id, now)?;
-        match removed {
+        let members = match removed {
             Some(removed) => {
                 chat.membership = Membership::Left;
                 chat.members.retain(|m| !removed.contains(&m.device));
+                Vec::new()
             }
-            None => chat.members = chat_members(txn, &engine.group_members(&*txn, group_id)?)?,
+            None => {
+                let members = engine.group_members(&*txn, group_id)?;
+                chat.members = chat_members(txn, &members)?;
+                members
+            }
+        };
+        // Departed members no longer in the tree need no removal commit.
+        for departed in txn.departed_members()? {
+            if &departed.group_id == group_id && !members.contains(&departed.device) {
+                txn.remove_departed_member(&departed)?;
+            }
         }
         chat.updated_at_ms = chat.updated_at_ms.max(now);
         txn.upsert_chat(&chat)?;

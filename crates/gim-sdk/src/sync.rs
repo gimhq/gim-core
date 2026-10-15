@@ -403,19 +403,6 @@ impl<S: StateStore + 'static> Client<S> {
                 _ => None,
             })
             .collect();
-        {
-            let mut departed = self.departed();
-            for event in &events {
-                if let IncomingEvent::MemberRemoved { group_id, device } = event {
-                    if *device != session.device {
-                        departed
-                            .entry(group_id.clone())
-                            .or_default()
-                            .insert(device.clone());
-                    }
-                }
-            }
-        }
         let base = BaseClient::new(session.device.clone());
         let mut changes = self
             .run(move |store, engine| {

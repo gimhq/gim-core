@@ -30,7 +30,7 @@ pub use client::{
 };
 pub use error::{ClientError, Result};
 pub use http::{HttpConfig, HttpTransport};
-pub use media::DOWNLOAD_PIECE;
+pub use media::{DOWNLOAD_PIECE, OUTGOING_DIR};
 pub use outbox::OutboxSender;
 pub use secrets::{SecretStorage, SecretStorageError};
 pub use send::TYPING_INTERVAL;
