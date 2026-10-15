@@ -5,6 +5,7 @@
 
 use std::collections::VecDeque;
 use std::ops::Range;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -172,8 +173,8 @@ impl Transport for FlakyTransport {
         self.inner.group_messages(t, g, after_seq, limit).await
     }
 
-    async fn upload_blob(&self, t: &AccessToken, data: Vec<u8>) -> TransportResult<String> {
-        self.inner.upload_blob(t, data).await
+    async fn upload_blob(&self, t: &AccessToken, file: &Path) -> TransportResult<String> {
+        self.inner.upload_blob(t, file).await
     }
 
     async fn download_blob(

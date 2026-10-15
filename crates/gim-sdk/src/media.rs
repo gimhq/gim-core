@@ -36,26 +36,30 @@ impl<S: StateStore + 'static> Client<S> {
         let encrypted = self.tmp_dir().join(format!("upload-{message_id}"));
         let source = PathBuf::from(&pending.local_path);
         let tmp = encrypted.clone();
-        let (encryption, dimensions, data) = blocking(move || {
+        let (encryption, dimensions) = blocking(move || {
             let dimensions = image_dimensions(&source)?;
             let input = BufReader::new(File::open(&source)?);
             // Left over from an interrupted attempt.
             let _ = fs::remove_file(&tmp);
             let encrypted = (|| {
-                let output = BufWriter::new(create_private(&tmp)?);
-                let encryption = MediaEncryptor::new()?.encrypt(input, output)?;
-                Ok::<_, ClientError>((encryption, fs::read(&tmp)?))
+                let mut output = BufWriter::new(create_private(&tmp)?);
+                let encryption = MediaEncryptor::new()?.encrypt(input, &mut output)?;
+                output.flush()?;
+                Ok::<_, ClientError>(encryption)
             })();
-            let _ = fs::remove_file(&tmp);
-            let (encryption, data) = encrypted?;
-            Ok((encryption, dimensions, data))
+            if encrypted.is_err() {
+                let _ = fs::remove_file(&tmp);
+            }
+            Ok((encrypted?, dimensions))
         })
         .await?;
-        let blob_id = self
+        let uploaded = self
             .inner
             .transport
-            .upload_blob(&session.token, data)
-            .await?;
+            .upload_blob(&session.token, &encrypted)
+            .await;
+        let _ = fs::remove_file(&encrypted);
+        let blob_id = uploaded?;
         Ok(MediaInfo {
             blob_id,
             key: encryption.key,

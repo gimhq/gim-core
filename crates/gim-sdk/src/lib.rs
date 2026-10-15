@@ -13,6 +13,7 @@
 
 mod client;
 mod error;
+pub mod http;
 mod media;
 mod outbox;
 mod secrets;
@@ -26,6 +27,7 @@ pub use client::{
     SESSION_SECRET_KEY,
 };
 pub use error::{ClientError, Result};
+pub use http::{HttpConfig, HttpTransport};
 pub use media::DOWNLOAD_PIECE;
 pub use outbox::OutboxSender;
 pub use secrets::{SecretStorage, SecretStorageError};
