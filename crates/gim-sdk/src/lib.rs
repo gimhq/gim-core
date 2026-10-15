@@ -18,6 +18,8 @@ mod media;
 mod outbox;
 mod secrets;
 mod send;
+pub mod stream;
+mod sync;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod transport;
@@ -32,4 +34,6 @@ pub use media::DOWNLOAD_PIECE;
 pub use outbox::OutboxSender;
 pub use secrets::{SecretStorage, SecretStorageError};
 pub use send::TYPING_INTERVAL;
-pub use transport::{Transport, TransportError};
+pub use stream::ConnectionState;
+pub use sync::{SyncSettings, BACKFILL_PAGE};
+pub use transport::{EventStream, Transport, TransportError};

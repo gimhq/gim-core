@@ -53,10 +53,12 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// The network is back: entries waiting for their backoff are retried
-    /// on the next pass, which is started now.
+    /// on the next pass, which is started now, and a sync loop waiting to
+    /// reconnect reconnects now.
     pub fn network_reachable(&self) {
         self.inner.force_flush.store(true, Ordering::SeqCst);
         self.wake_outbox();
+        self.wake_sync();
     }
 
     pub(crate) fn wake_outbox(&self) {
