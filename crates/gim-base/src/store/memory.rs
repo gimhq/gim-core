@@ -16,7 +16,8 @@ use openmls_memory_storage::MemoryStorage;
 
 use super::{StateReader, StateStore, StoreResult, StoreTxn};
 use crate::model::{
-    Chat, GroupCursor, GroupMessage, MediaCacheEntry, Message, OutboxEntry, OutboxState, UserInfo,
+    Chat, DepartedMember, GroupCursor, GroupMessage, MediaCacheEntry, MembershipEvent, Message,
+    OutboxEntry, OutboxState, PendingCommit, UserInfo,
 };
 use crate::{BaseError, StoreError};
 
@@ -39,6 +40,9 @@ struct Rows {
     parked: BTreeMap<(GroupId, u64), GroupMessage>,
     media: BTreeMap<String, MediaCacheEntry>,
     users: BTreeMap<UserId, UserInfo>,
+    pending_commits: BTreeMap<GroupId, PendingCommit>,
+    departed: BTreeSet<DepartedMember>,
+    membership: BTreeMap<(GroupId, u64, UserId), MembershipEvent>,
 }
 
 #[derive(Debug, Default)]
@@ -210,6 +214,26 @@ impl StateReader for MemoryStore {
     fn user(&self, user_id: &UserId) -> StoreResult<Option<UserInfo>> {
         read(&self.rows)?.user(user_id)
     }
+
+    fn pending_commit(&self, group_id: &GroupId) -> StoreResult<Option<PendingCommit>> {
+        Ok(read(&self.rows)?.pending_commits.get(group_id).cloned())
+    }
+
+    fn pending_commits(&self) -> StoreResult<Vec<PendingCommit>> {
+        Ok(read(&self.rows)?
+            .pending_commits
+            .values()
+            .cloned()
+            .collect())
+    }
+
+    fn departed_members(&self) -> StoreResult<Vec<DepartedMember>> {
+        Ok(read(&self.rows)?.departed.iter().cloned().collect())
+    }
+
+    fn membership_events(&self, group_id: &GroupId) -> StoreResult<Vec<MembershipEvent>> {
+        read(&self.rows)?.membership_events(group_id)
+    }
 }
 
 impl StateReader for MemoryTxn {
@@ -273,6 +297,22 @@ impl StateReader for MemoryTxn {
     fn user(&self, user_id: &UserId) -> StoreResult<Option<UserInfo>> {
         self.rows.user(user_id)
     }
+
+    fn pending_commit(&self, group_id: &GroupId) -> StoreResult<Option<PendingCommit>> {
+        Ok(self.rows.pending_commits.get(group_id).cloned())
+    }
+
+    fn pending_commits(&self) -> StoreResult<Vec<PendingCommit>> {
+        Ok(self.rows.pending_commits.values().cloned().collect())
+    }
+
+    fn departed_members(&self) -> StoreResult<Vec<DepartedMember>> {
+        Ok(self.rows.departed.iter().cloned().collect())
+    }
+
+    fn membership_events(&self, group_id: &GroupId) -> StoreResult<Vec<MembershipEvent>> {
+        self.rows.membership_events(group_id)
+    }
 }
 
 impl StoreTxn for MemoryTxn {
@@ -290,6 +330,9 @@ impl StoreTxn for MemoryTxn {
         rows.outbox.retain(|_, e| &e.group_id != group_id);
         rows.group_cursors.remove(group_id);
         rows.parked.retain(|(g, _), _| g != group_id);
+        rows.pending_commits.remove(group_id);
+        rows.departed.retain(|d| &d.group_id != group_id);
+        rows.membership.retain(|(g, _, _), _| g != group_id);
         Ok(())
     }
 
@@ -359,6 +402,34 @@ impl StoreTxn for MemoryTxn {
 
     fn upsert_user(&mut self, user: &UserInfo) -> StoreResult<()> {
         self.rows.users.insert(user.user_id.clone(), user.clone());
+        Ok(())
+    }
+
+    fn upsert_pending_commit(&mut self, commit: &PendingCommit) -> StoreResult<()> {
+        self.rows
+            .pending_commits
+            .insert(commit.group_id.clone(), commit.clone());
+        Ok(())
+    }
+
+    fn remove_pending_commit(&mut self, group_id: &GroupId) -> StoreResult<()> {
+        self.rows.pending_commits.remove(group_id);
+        Ok(())
+    }
+
+    fn add_departed_member(&mut self, member: &DepartedMember) -> StoreResult<()> {
+        self.rows.departed.insert(member.clone());
+        Ok(())
+    }
+
+    fn remove_departed_member(&mut self, member: &DepartedMember) -> StoreResult<()> {
+        self.rows.departed.remove(member);
+        Ok(())
+    }
+
+    fn add_membership_event(&mut self, event: &MembershipEvent) -> StoreResult<()> {
+        let key = (event.group_id.clone(), event.seq, event.user_id.clone());
+        self.rows.membership.insert(key, event.clone());
         Ok(())
     }
 }
@@ -528,6 +599,15 @@ impl Rows {
 
     fn user(&self, user_id: &UserId) -> StoreResult<Option<UserInfo>> {
         Ok(self.users.get(user_id).cloned())
+    }
+
+    fn membership_events(&self, group_id: &GroupId) -> StoreResult<Vec<MembershipEvent>> {
+        Ok(self
+            .membership
+            .iter()
+            .filter(|((g, _, _), _)| g == group_id)
+            .map(|(_, e)| e.clone())
+            .collect())
     }
 }
 

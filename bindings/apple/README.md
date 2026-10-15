@@ -25,10 +25,11 @@ out/swift/
 
 ## build-xcframework.sh
 
-Builds the `libgim_core.a` static library for `aarch64-apple-ios`,
-`aarch64-apple-ios-sim` and `x86_64-apple-ios` (`IPHONEOS_DEPLOYMENT_TARGET=18.0`),
-merges the two simulator slices with `lipo`, generates the Swift bindings from
-the device library and packages:
+Builds the `libgim_core.a` static library for `aarch64-apple-ios` (device) and
+`aarch64-apple-ios-sim` (simulator) with `IPHONEOS_DEPLOYMENT_TARGET=18.0`,
+generates the Swift bindings from the device library, strips debug and local
+symbols (`strip -S -x`, checking that the `uniffi_gim_core_fn_*` exports
+remain) and packages:
 
 ```
 out/ios/
@@ -42,3 +43,20 @@ out/ios/
 The iOS client vendors `GIMCore.xcframework.zip` and `Sources/GIMCore`,
 pinned by `GIM_CORE_VERSION`. The script is idempotent: `out/ios` is rebuilt
 from scratch on every run.
+
+### Size
+
+GitHub rejects files over 100 MB, and the iOS client vendors the zip, so it
+must stay below 50 MB (the CI `xcframework` job fails at 50,000,000 bytes and
+prints the slice and zip sizes). What keeps it small:
+
+- No `x86_64-apple-ios` slice: the simulator slice is Apple silicon only.
+  **Intel-Mac simulators are not supported.**
+- `cargo rustc --crate-type staticlib`: built together with gim-ffi's `lib`
+  crate type, the archive also carries every dependency's rlib objects with
+  embedded bitcode next to the LTO output (about 5x larger).
+- `[profile.release-apple]` in the root `Cargo.toml`: `release` with
+  `opt-level = "s"`, fat LTO, one codegen unit, no debug info, `panic =
+  "unwind"` (UniFFI needs it). A profile `strip` does not apply to static
+  libraries, hence the explicit `strip -S -x`.
+

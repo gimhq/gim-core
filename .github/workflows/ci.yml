@@ -51,10 +51,21 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-ios, aarch64-apple-ios-sim, x86_64-apple-ios
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim
       - uses: Swatinem/rust-cache@v2
       - name: Build GIMCore.xcframework
         run: bash scripts/build-xcframework.sh
+      - name: Check GIMCore.xcframework size
+        run: |
+          du -sh out/ios/GIMCore.xcframework/*/
+          find out/ios/GIMCore.xcframework -name '*.a' -exec ls -l {} +
+          size=$(stat -f %z out/ios/GIMCore.xcframework.zip)
+          echo "GIMCore.xcframework.zip: $size bytes"
+          limit=50000000
+          if [ "$size" -ge "$limit" ]; then
+            echo "error: GIMCore.xcframework.zip is $size bytes (limit $limit)"
+            exit 1
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: gim-core-ios-${{ github.sha }}

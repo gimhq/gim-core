@@ -111,7 +111,9 @@ impl State {
                 // The last message preview may have changed.
                 StateChange::MessageUpserted(message) => Some(&message.group_id),
                 StateChange::MessageRemoved { group_id, .. } => Some(group_id),
-                StateChange::Typing { .. } | StateChange::KeyPackagesLow => None,
+                StateChange::Typing { .. }
+                | StateChange::MembershipChanged(_)
+                | StateChange::KeyPackagesLow => None,
             })
             .collect();
         if touched.is_empty() {

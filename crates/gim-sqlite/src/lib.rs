@@ -18,7 +18,8 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use gim_base::model::{
-    Chat, GroupCursor, GroupMessage, MediaCacheEntry, Message, OutboxEntry, UserInfo,
+    Chat, DepartedMember, GroupCursor, GroupMessage, MediaCacheEntry, MembershipEvent, Message,
+    OutboxEntry, PendingCommit, UserInfo,
 };
 use gim_base::{BaseError, StateReader, StateStore, StoreError, StoreTxn, WriteTarget};
 use gim_common::{DeviceRef, GroupId, MessageId, UserId};
@@ -28,8 +29,11 @@ use rusqlite::{params, Connection, Transaction, TransactionBehavior};
 
 pub use migrations::SCHEMA_VERSION;
 
-use reader::{bound, outbox_state_str, sql_err, Reader};
-use rows::{encode, ChatData, MemberRow, MessageData, OutboxData, OutboxKindRow, ParkedData};
+use reader::{bound, membership_kind_str, outbox_state_str, sql_err, Reader};
+use rows::{
+    encode, ChatData, MemberRow, MessageData, OutboxData, OutboxKindRow, ParkedData,
+    PendingCommitData,
+};
 
 type StoreResult<T> = Result<T, StoreError>;
 
@@ -258,6 +262,26 @@ macro_rules! delegate_reader {
                 let $this = self;
                 Reader($conn).user(user_id)
             }
+
+            fn pending_commit(&self, group_id: &GroupId) -> StoreResult<Option<PendingCommit>> {
+                let $this = self;
+                Reader($conn).pending_commit(group_id)
+            }
+
+            fn pending_commits(&self) -> StoreResult<Vec<PendingCommit>> {
+                let $this = self;
+                Reader($conn).pending_commits()
+            }
+
+            fn departed_members(&self) -> StoreResult<Vec<DepartedMember>> {
+                let $this = self;
+                Reader($conn).departed_members()
+            }
+
+            fn membership_events(&self, group_id: &GroupId) -> StoreResult<Vec<MembershipEvent>> {
+                let $this = self;
+                Reader($conn).membership_events(group_id)
+            }
         }
     };
 }
@@ -293,6 +317,9 @@ impl StoreTxn for SqliteTxn<'_> {
             "outbox",
             "group_cursors",
             "parked_messages",
+            "pending_commits",
+            "departed_members",
+            "membership_events",
         ] {
             self.execute(
                 &format!("DELETE FROM {table} WHERE group_id = ?1"),
@@ -433,6 +460,62 @@ impl StoreTxn for SqliteTxn<'_> {
         self.execute(
             "INSERT OR REPLACE INTO users (user_id, handle, display_name) VALUES (?1, ?2, ?3)",
             params![user.user_id.as_str(), user.handle, user.display_name],
+        )
+    }
+
+    fn upsert_pending_commit(&mut self, commit: &PendingCommit) -> StoreResult<()> {
+        self.execute(
+            "INSERT OR REPLACE INTO pending_commits (group_id, data) VALUES (?1, ?2)",
+            params![
+                commit.group_id.as_str(),
+                encode(&PendingCommitData::from(commit))?
+            ],
+        )
+    }
+
+    fn remove_pending_commit(&mut self, group_id: &GroupId) -> StoreResult<()> {
+        self.execute(
+            "DELETE FROM pending_commits WHERE group_id = ?1",
+            [group_id.as_str()],
+        )
+    }
+
+    fn add_departed_member(&mut self, member: &DepartedMember) -> StoreResult<()> {
+        self.execute(
+            "INSERT OR IGNORE INTO departed_members (group_id, user_id, device_id) \
+             VALUES (?1, ?2, ?3)",
+            params![
+                member.group_id.as_str(),
+                member.device.user_id.as_str(),
+                member.device.device_id.as_str()
+            ],
+        )
+    }
+
+    fn remove_departed_member(&mut self, member: &DepartedMember) -> StoreResult<()> {
+        self.execute(
+            "DELETE FROM departed_members \
+             WHERE group_id = ?1 AND user_id = ?2 AND device_id = ?3",
+            params![
+                member.group_id.as_str(),
+                member.device.user_id.as_str(),
+                member.device.device_id.as_str()
+            ],
+        )
+    }
+
+    fn add_membership_event(&mut self, event: &MembershipEvent) -> StoreResult<()> {
+        self.execute(
+            "INSERT OR REPLACE INTO membership_events \
+             (group_id, seq, user_id, actor, kind, at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                event.group_id.as_str(),
+                event.seq,
+                event.user_id.as_str(),
+                event.actor.as_str(),
+                membership_kind_str(event.kind),
+                event.at_ms
+            ],
         )
     }
 }

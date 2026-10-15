@@ -22,7 +22,8 @@ use gim_crypto::CryptoStore;
 pub use memory::{MemoryStore, MemoryTxn, WriteTarget};
 
 use crate::model::{
-    Chat, GroupCursor, GroupMessage, MediaCacheEntry, Message, OutboxEntry, UserInfo,
+    Chat, DepartedMember, GroupCursor, GroupMessage, MediaCacheEntry, MembershipEvent, Message,
+    OutboxEntry, PendingCommit, UserInfo,
 };
 use crate::{BaseError, StoreError};
 
@@ -68,6 +69,16 @@ pub trait StateReader {
     fn media_entries(&self) -> StoreResult<Vec<MediaCacheEntry>>;
 
     fn user(&self, user_id: &UserId) -> StoreResult<Option<UserInfo>>;
+
+    fn pending_commit(&self, group_id: &GroupId) -> StoreResult<Option<PendingCommit>>;
+    /// All pending commits, by group id.
+    fn pending_commits(&self) -> StoreResult<Vec<PendingCommit>>;
+
+    /// All departed-member candidates, by group id then device.
+    fn departed_members(&self) -> StoreResult<Vec<DepartedMember>>;
+
+    /// Membership events of the group, ascending by seq, then user id.
+    fn membership_events(&self, group_id: &GroupId) -> StoreResult<Vec<MembershipEvent>>;
 }
 
 /// A write transaction over state rows and MLS state. Dropping it without
@@ -75,8 +86,9 @@ pub trait StateReader {
 /// back everything, MLS state included.
 pub trait StoreTxn: StateReader + CryptoStore {
     fn upsert_chat(&mut self, chat: &Chat) -> StoreResult<()>;
-    /// Removes the chat with its messages, outbox entries, cursor and
-    /// parked messages.
+    /// Removes the chat with its messages, outbox entries, cursor, parked
+    /// messages, pending commit, departed-member candidates and membership
+    /// events.
     fn remove_chat(&mut self, group_id: &GroupId) -> StoreResult<()>;
 
     fn upsert_message(&mut self, message: &Message) -> StoreResult<()>;
@@ -96,6 +108,17 @@ pub trait StoreTxn: StateReader + CryptoStore {
     fn remove_media(&mut self, blob_id: &str) -> StoreResult<()>;
 
     fn upsert_user(&mut self, user: &UserInfo) -> StoreResult<()>;
+
+    /// Replaces the group's pending commit, if any.
+    fn upsert_pending_commit(&mut self, commit: &PendingCommit) -> StoreResult<()>;
+    fn remove_pending_commit(&mut self, group_id: &GroupId) -> StoreResult<()>;
+
+    /// Records a candidate; recording it again changes nothing.
+    fn add_departed_member(&mut self, member: &DepartedMember) -> StoreResult<()>;
+    fn remove_departed_member(&mut self, member: &DepartedMember) -> StoreResult<()>;
+
+    /// Replaces any event with the same (group, seq, user).
+    fn add_membership_event(&mut self, event: &MembershipEvent) -> StoreResult<()>;
 }
 
 /// State and MLS storage of one device.

@@ -1,13 +1,16 @@
 //! Event processing: turns stream events into state rows inside one store
 //! transaction per event, MLS state included.
 
+use std::collections::BTreeSet;
+
 use gim_common::{now_ms, DeviceRef, GroupId, MessageId, UserId};
 use gim_crypto::{decrypt_to_envelope, CryptoError, DecryptedMessage, MlsEngine, ProcessedMessage};
 use gim_proto::envelope::{Content, Envelope, ReceiptKind};
 
 use crate::model::{
-    to_message_id, Chat, ChatKind, ChatMember, GroupMessage, IncomingEvent, Membership, Message,
-    MessageContent, MessageKind, SendState, StateChange,
+    to_message_id, AfterCommit, Chat, ChatKind, ChatMember, DepartedMember, GroupMessage,
+    IncomingEvent, Membership, MembershipChangeKind, MembershipEvent, Message, MessageContent,
+    MessageKind, SendState, StateChange,
 };
 use crate::{Result, StateReader, StateStore, StoreTxn};
 
@@ -56,7 +59,9 @@ impl BaseClient {
     }
 
     /// Merges this device's pending commit after gim-server accepted it at
-    /// `seq`, and updates the chat members.
+    /// `seq`, and updates the chat members. The persisted
+    /// [`crate::model::PendingCommit`] is deleted, or marked merged if a
+    /// follow-up is still to be done.
     pub fn merge_own_commit<S: StateStore>(
         &self,
         store: &S,
@@ -66,8 +71,17 @@ impl BaseClient {
     ) -> Result<Vec<StateChange>> {
         store.transaction(|txn| {
             engine.merge_pending_commit(&*txn, group_id)?;
+            if let Some(mut pending) = txn.pending_commit(group_id)? {
+                if pending.then == AfterCommit::Nothing {
+                    txn.remove_pending_commit(group_id)?;
+                } else {
+                    pending.merged = true;
+                    txn.upsert_pending_commit(&pending)?;
+                }
+            }
             let mut changes = Vec::new();
-            self.update_membership(txn, engine, group_id, None, &mut changes)?;
+            let own_user = self.own.user_id.clone();
+            self.update_membership(txn, engine, group_id, seq, &own_user, None, &mut changes)?;
             mark_applied(txn, group_id, seq)?;
             self.drain_parked(txn, engine, group_id, &mut changes)?;
             Ok(changes)
@@ -114,13 +128,14 @@ impl BaseClient {
                 // Membership comes from MLS commits and Welcomes.
                 IncomingEvent::MemberAdded { .. } => {}
                 IncomingEvent::MemberRemoved { group_id, device } => {
-                    if device == self.own {
-                        if let Some(mut chat) = txn.chat(&group_id)? {
-                            if chat.membership == Membership::Joined {
-                                chat.membership = Membership::Left;
-                                txn.upsert_chat(&chat)?;
-                                changes.push(StateChange::ChatUpserted(chat));
-                            }
+                    if device != self.own {
+                        // Left the fan-out list but maybe not the MLS tree.
+                        txn.add_departed_member(&DepartedMember { group_id, device })?;
+                    } else if let Some(mut chat) = txn.chat(&group_id)? {
+                        if chat.membership == Membership::Joined {
+                            chat.membership = Membership::Left;
+                            txn.upsert_chat(&chat)?;
+                            changes.push(StateChange::ChatUpserted(chat));
                         }
                     }
                 }
@@ -270,12 +285,21 @@ impl BaseClient {
                 changes,
             )?,
             DecryptedMessage::Handshake(ProcessedMessage::Commit {
+                sender,
                 removed,
                 self_removed,
                 ..
             }) => {
                 let removed = self_removed.then_some(removed.as_slice());
-                self.update_membership(txn, engine, group_id, removed, changes)?
+                self.update_membership(
+                    txn,
+                    engine,
+                    group_id,
+                    message.seq,
+                    &sender.user_id,
+                    removed,
+                    changes,
+                )?
             }
             DecryptedMessage::Handshake(_) => {}
         }
@@ -309,6 +333,16 @@ impl BaseClient {
         chat.updated_at_ms = chat.updated_at_ms.max(now);
         txn.upsert_chat(&chat)?;
         changes.push(StateChange::ChatUpserted(chat));
+        let event = MembershipEvent {
+            group_id: group_id.clone(),
+            seq: message.seq,
+            user_id: self.own.user_id.clone(),
+            actor: message.sender.user_id.clone(),
+            kind: MembershipChangeKind::Added,
+            at_ms: now,
+        };
+        txn.add_membership_event(&event)?;
+        changes.push(StateChange::MembershipChanged(event));
         // Messages that arrived before the Welcome may be decryptable now;
         // anything older than the Welcome is not for this device.
         self.drain_parked(txn, engine, group_id, changes)?;
@@ -318,28 +352,176 @@ impl BaseClient {
         Ok(Outcome::Applied)
     }
 
-    /// Refreshes the member list after a commit. `removed` is set when the
+    /// Refreshes the member list after the commit of `actor` at `seq` and
+    /// records the users it added or removed (`Left` for those who left the
+    /// fan-out list themselves). `removed` is set when the
     /// commit removed this device; the group is gone then.
+    #[allow(clippy::too_many_arguments)]
     fn update_membership<T: StoreTxn>(
         &self,
         txn: &mut T,
         engine: &MlsEngine,
         group_id: &GroupId,
+        seq: u64,
+        actor: &UserId,
         removed: Option<&[DeviceRef]>,
         changes: &mut Vec<StateChange>,
     ) -> Result<()> {
         let now = now_ms();
         let mut chat = load_chat(txn, group_id, now)?;
-        match removed {
+        let users_before = member_users(&chat);
+        let members = match removed {
             Some(removed) => {
                 chat.membership = Membership::Left;
                 chat.members.retain(|m| !removed.contains(&m.device));
+                Vec::new()
             }
-            None => chat.members = chat_members(txn, &engine.group_members(&*txn, group_id)?)?,
+            None => {
+                let members = engine.group_members(&*txn, group_id)?;
+                chat.members = chat_members(txn, &members)?;
+                members
+            }
+        };
+        // Departed members no longer in the tree need no removal commit.
+        let mut departed_users = BTreeSet::new();
+        for departed in txn.departed_members()? {
+            if &departed.group_id == group_id && !members.contains(&departed.device) {
+                departed_users.insert(departed.device.user_id.clone());
+                txn.remove_departed_member(&departed)?;
+            }
         }
         chat.updated_at_ms = chat.updated_at_ms.max(now);
+        let users_after = member_users(&chat);
         txn.upsert_chat(&chat)?;
         changes.push(StateChange::ChatUpserted(chat));
+        let added = users_after
+            .difference(&users_before)
+            .map(|u| (u, MembershipChangeKind::Added));
+        // A user who left the fan-out list by themselves is removed from
+        // the tree by another member's commit.
+        let gone = users_before.difference(&users_after).map(|u| {
+            let kind = if u == actor || departed_users.contains(u) {
+                MembershipChangeKind::Left
+            } else {
+                MembershipChangeKind::Removed
+            };
+            (u, kind)
+        });
+        for (user_id, kind) in added.chain(gone) {
+            let event = MembershipEvent {
+                group_id: group_id.clone(),
+                seq,
+                user_id: user_id.clone(),
+                actor: actor.clone(),
+                kind,
+                at_ms: now,
+            };
+            txn.add_membership_event(&event)?;
+            changes.push(StateChange::MembershipChanged(event));
+        }
+        Ok(())
+    }
+
+    /// Applies messages of the group's server history that are older than
+    /// the stored timeline (gim-sdk's history backfill), in one
+    /// transaction. Only application messages of other devices are
+    /// decrypted: handshakes are long applied, own messages cannot be
+    /// decrypted, and messages from before this device joined (or whose
+    /// keys are gone) fail to decrypt and are skipped. Text and media are
+    /// inserted without counting as unread; typing and group info are
+    /// stale and ignored. The group cursor is not touched: these seqs were
+    /// applied (or passed over) already. Idempotent through message ids.
+    pub fn apply_history<S: StateStore>(
+        &self,
+        store: &S,
+        engine: &MlsEngine,
+        messages: Vec<GroupMessage>,
+    ) -> Result<Vec<StateChange>> {
+        store.transaction(|txn| {
+            let mut changes = Vec::new();
+            for message in messages {
+                if message.kind != MessageKind::Application || message.sender == self.own {
+                    continue;
+                }
+                let group_id = &message.group_id;
+                let decrypted = match decrypt_to_envelope(engine, &*txn, group_id, &message.payload)
+                {
+                    Ok(decrypted) => decrypted,
+                    Err(err @ (CryptoError::Store { .. } | CryptoError::NoPendingCommit)) => {
+                        return Err(err.into())
+                    }
+                    Err(_) => continue,
+                };
+                let DecryptedMessage::Envelope {
+                    sender, envelope, ..
+                } = decrypted
+                else {
+                    continue;
+                };
+                self.apply_history_envelope(
+                    txn,
+                    group_id,
+                    message.seq,
+                    &sender,
+                    envelope,
+                    &mut changes,
+                )?;
+            }
+            Ok(changes)
+        })
+    }
+
+    fn apply_history_envelope<T: StoreTxn>(
+        &self,
+        txn: &mut T,
+        group_id: &GroupId,
+        seq: u64,
+        sender: &DeviceRef,
+        envelope: Envelope,
+        changes: &mut Vec<StateChange>,
+    ) -> Result<()> {
+        let content = match envelope.content {
+            Content::Typing { .. } | Content::GroupInfo { .. } => return Ok(()),
+            Content::Text { body } => MessageContent::Text { body },
+            Content::Media { media, caption } => MessageContent::Media { media, caption },
+            _ => {
+                return self.apply_envelope(
+                    txn,
+                    group_id,
+                    Some(seq),
+                    sender,
+                    envelope,
+                    now_ms(),
+                    changes,
+                )
+            }
+        };
+        if txn.message(&envelope.message_id)?.is_some() {
+            return Ok(());
+        }
+        let message = Message {
+            message_id: envelope.message_id,
+            group_id: group_id.clone(),
+            seq: Some(seq),
+            sender: sender.clone(),
+            sent_at_ms: envelope.sent_at_ms,
+            content,
+            reply_to: envelope.reply_to,
+            edited: false,
+            deleted: false,
+            reactions: Default::default(),
+            send_state: (sender.user_id == self.own.user_id).then_some(SendState::Sent),
+            receipts: Default::default(),
+        };
+        txn.upsert_message(&message)?;
+        let mut chat = load_chat(txn, group_id, message.sent_at_ms)?;
+        if seq > chat.last_seq {
+            chat.last_seq = seq;
+            chat.last_message_id = Some(message.message_id.clone());
+            txn.upsert_chat(&chat)?;
+            changes.push(StateChange::ChatUpserted(chat));
+        }
+        changes.push(StateChange::MessageUpserted(message));
         Ok(())
     }
 
@@ -639,6 +821,13 @@ pub(crate) fn load_chat<T: StoreTxn>(txn: &T, group_id: &GroupId, now_ms: u64) -
     Ok(txn
         .chat(group_id)?
         .unwrap_or_else(|| Chat::new(group_id.clone(), ChatKind::Group, now_ms)))
+}
+
+fn member_users(chat: &Chat) -> BTreeSet<UserId> {
+    chat.members
+        .iter()
+        .map(|m| m.device.user_id.clone())
+        .collect()
 }
 
 fn chat_members<T: StoreTxn>(txn: &T, devices: &[DeviceRef]) -> Result<Vec<ChatMember>> {

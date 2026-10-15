@@ -1,10 +1,10 @@
 //! Send API: messages, edits, deletes, reactions, read receipts and typing
 //! notifications.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use gim_base::model::PendingMedia;
+use gim_base::model::{ChatKind, PendingMedia};
 use gim_base::{new_message_id, BaseClient, BaseError, StateStore};
 use gim_common::{now_ms, GroupId, MessageId};
 use gim_crypto::encrypt_envelope;
@@ -64,6 +64,55 @@ impl<S: StateStore + 'static> Client<S> {
         self.emit(&changes);
         self.flush_outbox().await?;
         Ok(message_id)
+    }
+
+    /// Renames the group chat and/or replaces its avatar (`None` leaves a
+    /// field unchanged) and shares it with the members in a group info
+    /// message. The avatar file (path, MIME type) is encrypted and uploaded
+    /// before this returns.
+    pub async fn set_group_info(
+        &self,
+        group_id: &GroupId,
+        name: Option<String>,
+        avatar: Option<(PathBuf, String)>,
+    ) -> Result<MessageId> {
+        let session = self.require_session()?;
+        if name.is_none() && avatar.is_none() {
+            return Err(ClientError::InvalidInput("nothing to change".into()));
+        }
+        let gid = group_id.clone();
+        let chat = self
+            .run(move |store, _| {
+                store
+                    .chat(&gid)?
+                    .ok_or_else(|| BaseError::NotFound(format!("chat {gid}")))
+            })
+            .await?;
+        if chat.kind != ChatKind::Group {
+            return Err(ClientError::InvalidInput(
+                "direct chats have no group info".into(),
+            ));
+        }
+        let avatar = match avatar {
+            Some((path, mime)) => {
+                let local_path = path
+                    .to_str()
+                    .ok_or_else(|| ClientError::InvalidInput("path is not UTF-8".into()))?
+                    .to_string();
+                let pending = PendingMedia {
+                    local_path,
+                    mime,
+                    caption: None,
+                };
+                Some(
+                    self.upload_media(&session, &new_message_id()?, pending)
+                        .await?,
+                )
+            }
+            None => None,
+        };
+        self.send(group_id, Content::GroupInfo { name, avatar })
+            .await
     }
 
     /// Replaces the text of an own message, or the caption of own media.

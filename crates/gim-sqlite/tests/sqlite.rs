@@ -7,8 +7,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use common::{group, setup, text, Device, NOW};
 use gim_base::model::{
-    Chat, ChatKind, ChatMember, GroupCursor, GroupMessage, MediaCacheEntry, Membership, Message,
-    MessageContent, MessageKind, OutboxEntry, OutboxKind, OutboxState, PendingMedia,
+    AfterCommit, Chat, ChatKind, ChatMember, DepartedMember, GroupCursor, GroupMessage,
+    MediaCacheEntry, Membership, MembershipChangeKind, MembershipEvent, Message, MessageContent,
+    MessageKind, OutboxEntry, OutboxKind, OutboxState, PendingCommit, PendingMedia, PendingWelcome,
     PreparedPayload, SendState, UserInfo,
 };
 use gim_base::{
@@ -170,6 +171,12 @@ fn reads_match_memory_store() {
     memory.transaction(|txn| Ok(write_rows(txn)?)).unwrap();
     sqlite.transaction(|txn| Ok(write_rows(txn)?)).unwrap();
     assert_same_reads(&memory, &sqlite);
+    assert_eq!(sqlite.pending_commits().unwrap().len(), 3);
+    assert_eq!(sqlite.departed_members().unwrap().len(), 3);
+    let crew = sqlite.membership_events(&group("crew")).unwrap();
+    let order: Vec<(u64, &str)> = crew.iter().map(|e| (e.seq, e.user_id.as_str())).collect();
+    assert_eq!(order, [(3, "bob"), (3, "carol"), (9, "bob")]);
+    assert_eq!(crew[2].kind, MembershipChangeKind::Removed);
     memory.transaction(|txn| Ok(update_rows(txn)?)).unwrap();
     sqlite.transaction(|txn| Ok(update_rows(txn)?)).unwrap();
     assert_same_reads(&memory, &sqlite);
@@ -367,7 +374,68 @@ fn write_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
         handle: "alice".into(),
         display_name: "Alice".into(),
     })?;
+
+    let commit = |g: &str, then| PendingCommit {
+        group_id: group(g),
+        client_id: ClientId::new(format!("commit-{g}")).unwrap(),
+        epoch: 4,
+        payload: vec![4, 2],
+        merged: false,
+        then,
+    };
+    txn.upsert_pending_commit(&commit(
+        "crew",
+        AfterCommit::Welcome(PendingWelcome {
+            client_id: ClientId::new("welcome-crew").unwrap(),
+            epoch: 5,
+            payload: vec![5],
+            recipients: vec![device("carol", "laptop"), device("dave", "phone")],
+        }),
+    ))?;
+    txn.upsert_pending_commit(&commit(
+        "dm",
+        AfterCommit::RemoveFromFanOut(vec![device("bob", "tablet")]),
+    ))?;
+    txn.upsert_pending_commit(&commit("anchor", AfterCommit::Nothing))?;
+    for (g, user, dev) in [
+        ("crew", "dave", "phone"),
+        ("crew", "carol", "laptop"),
+        ("dm", "bob", "tablet"),
+        ("crew", "carol", "laptop"),
+    ] {
+        txn.add_departed_member(&DepartedMember {
+            group_id: group(g),
+            device: device(user, dev),
+        })?;
+    }
+    for (g, seq, user, actor, kind) in [
+        ("crew", 9, "bob", "bob", MembershipChangeKind::Left),
+        ("crew", 3, "carol", "alice", MembershipChangeKind::Added),
+        ("crew", 3, "bob", "alice", MembershipChangeKind::Added),
+        ("dm", 2, "bob", "alice", MembershipChangeKind::Removed),
+        // Replaces the first row.
+        ("crew", 9, "bob", "alice", MembershipChangeKind::Removed),
+    ] {
+        txn.add_membership_event(&membership(g, seq, user, actor, kind))?;
+    }
     Ok(())
+}
+
+fn membership(
+    g: &str,
+    seq: u64,
+    user: &str,
+    actor: &str,
+    kind: MembershipChangeKind,
+) -> MembershipEvent {
+    MembershipEvent {
+        group_id: group(g),
+        seq,
+        user_id: UserId::new(user).unwrap(),
+        actor: UserId::new(actor).unwrap(),
+        kind,
+        at_ms: NOW + seq,
+    }
 }
 
 fn update_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
@@ -392,6 +460,21 @@ fn update_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
         handle: "alice".into(),
         display_name: "Alice M.".into(),
     })?;
+    let mut merged = txn.pending_commit(&group("crew"))?.unwrap();
+    merged.merged = true;
+    txn.upsert_pending_commit(&merged)?;
+    txn.remove_pending_commit(&group("anchor"))?;
+    txn.remove_departed_member(&DepartedMember {
+        group_id: group("crew"),
+        device: device("dave", "phone"),
+    })?;
+    txn.add_membership_event(&membership(
+        "crew",
+        12,
+        "dave",
+        "carol",
+        MembershipChangeKind::Added,
+    ))?;
     Ok(())
 }
 
@@ -426,7 +509,23 @@ fn assert_same_reads(expected: &impl StateReader, actual: &impl StateReader) {
             actual.parked_messages(&g).unwrap(),
             expected.parked_messages(&g).unwrap()
         );
+        assert_eq!(
+            actual.pending_commit(&g).unwrap(),
+            expected.pending_commit(&g).unwrap()
+        );
+        assert_eq!(
+            actual.membership_events(&g).unwrap(),
+            expected.membership_events(&g).unwrap()
+        );
     }
+    assert_eq!(
+        actual.pending_commits().unwrap(),
+        expected.pending_commits().unwrap()
+    );
+    assert_eq!(
+        actual.departed_members().unwrap(),
+        expected.departed_members().unwrap()
+    );
     for message_id in ["m1", "m2", "m4", "u1", "u3", "d1", "none"].map(id) {
         assert_eq!(
             actual.message(&message_id).unwrap(),
