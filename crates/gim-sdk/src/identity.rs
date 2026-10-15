@@ -5,8 +5,8 @@
 use std::collections::BTreeSet;
 
 use gim_base::model::UserInfo;
-use gim_base::{BaseClient, StateStore, StoreTxn};
-use gim_common::{now_ms, DeviceRef, UserId};
+use gim_base::{BaseClient, StateReader, StateStore, StoreTxn};
+use gim_common::{now_ms, DeviceId, DeviceRef, UserId};
 use gim_identity::recovery::{seal_root_key_backup, RecoveryCode};
 use gim_identity::{DeviceList, DeviceSigningKey, RootKey, SignedDeviceCert, SignedDeviceList};
 use zeroize::Zeroizing;
@@ -16,17 +16,17 @@ use crate::transport::{TransportError, UserRecord};
 use crate::{Client, ClientError, Result};
 
 /// A new device of a user, ready to be enrolled with the hub.
-struct Enrollment {
-    root_seed: Zeroizing<[u8; 32]>,
-    device_seed: Zeroizing<[u8; 32]>,
-    cert: SignedDeviceCert,
-    device_list: SignedDeviceList,
+pub(crate) struct Enrollment {
+    pub(crate) root_seed: Zeroizing<[u8; 32]>,
+    pub(crate) device_seed: Zeroizing<[u8; 32]>,
+    pub(crate) cert: SignedDeviceCert,
+    pub(crate) device_list: SignedDeviceList,
     /// Sealed root key backup to upload (new identities only).
-    backup: Option<Vec<u8>>,
-    me: UserInfo,
+    pub(crate) backup: Option<Vec<u8>>,
+    pub(crate) me: UserInfo,
 }
 
-fn random_seed() -> Result<Zeroizing<[u8; 32]>> {
+pub(crate) fn random_seed() -> Result<Zeroizing<[u8; 32]>> {
     let mut seed = Zeroizing::new([0u8; 32]);
     rustls::crypto::ring::default_provider()
         .secure_random
@@ -38,10 +38,12 @@ fn random_seed() -> Result<Zeroizing<[u8; 32]>> {
 impl<S: StateStore + 'static> Client<S> {
     /// Creates a new user: a root key, this device's signing key certified
     /// by it, and the user's first DeviceList. Uploads the DeviceList, signs
-    /// in, uploads the root key backup sealed with a new recovery code, and
-    /// uploads [`KEY_PACKAGE_BATCH`] KeyPackages plus a last-resort one. The
+    /// in, uploads the root key backup sealed with a new recovery code,
+    /// uploads [`KEY_PACKAGE_BATCH`] KeyPackages plus a last-resort one, and
+    /// creates the self group (the MLS group of the user's devices). The
     /// keys stay in [`crate::SecretStorage`]; the display name is kept
-    /// locally (the hub has no profiles).
+    /// locally and shared through the self group and with chats (the hub
+    /// has no profiles).
     ///
     /// Returns the recovery code. It is stored nowhere: show it to the user
     /// once.
@@ -78,81 +80,21 @@ impl<S: StateStore + 'static> Client<S> {
             },
         })
         .await?;
+        self.create_self_group().await?;
         Ok(code)
     }
 
     /// [`Client::create_identity`] and [`Client::claim_handle`]: returns the
     /// recovery code.
-    ///
-    /// With a test transport, a handle registered before through it gets
-    /// another device of the same user instead (a stand-in for device
-    /// linking), and there is no recovery code.
-    pub async fn register(&self, handle: &str, display_name: &str) -> Result<Option<RecoveryCode>> {
-        #[cfg(any(test, feature = "testing"))]
-        if let Some(linking) = self.inner.transport.test_linking() {
-            if let Some(root_seed) = linking.root_seed(handle) {
-                self.link_test_device(linking, root_seed, handle, display_name)
-                    .await?;
-                return Ok(None);
-            }
-        }
+    pub async fn register(&self, handle: &str, display_name: &str) -> Result<RecoveryCode> {
         let code = self.create_identity(display_name).await?;
         self.claim_handle(handle).await?;
-        #[cfg(any(test, feature = "testing"))]
-        if let Some(linking) = self.inner.transport.test_linking() {
-            if let Some(seed) = self.inner.secrets.get(ROOT_KEY_SECRET_KEY)? {
-                if let Ok(seed) = <[u8; 32]>::try_from(seed.as_slice()) {
-                    linking.remember(handle, &seed);
-                }
-            }
-        }
-        Ok(Some(code))
+        Ok(code)
     }
 
-    /// Adds this device to the user owning `handle` with that user's root
-    /// key, as a link would.
-    #[cfg(any(test, feature = "testing"))]
-    async fn link_test_device(
-        &self,
-        linking: &crate::testing::TestLinking,
-        root_seed: Zeroizing<[u8; 32]>,
-        handle: &str,
-        display_name: &str,
-    ) -> Result<()> {
-        if self.session().is_some() {
-            return Err(ClientError::AlreadyLoggedIn);
-        }
-        let root = RootKey::from_seed(&root_seed);
-        let user_id = root.public().user_id();
-        let current = linking
-            .device_list(&user_id)
-            .ok_or_else(|| ClientError::InvalidInput(format!("no device list of {user_id}")))?;
-        let current = SignedDeviceList::from_bytes(&current)
-            .and_then(|list| list.verify(&user_id))
-            .map_err(ClientError::identity)?;
-        let device_seed = random_seed()?;
-        let device = DeviceSigningKey::from_seed(&device_seed).public();
-        let cert = SignedDeviceCert::issue(&root, &device, now_ms(), current.seq() + 1);
-        let device_list = current
-            .add_cert(cert.clone())
-            .and_then(|list| list.sign(&root))
-            .map_err(ClientError::identity)?;
-        self.enroll(Enrollment {
-            root_seed,
-            device_seed,
-            cert,
-            device_list,
-            backup: None,
-            me: UserInfo {
-                user_id,
-                handle: handle.to_string(),
-                display_name: display_name.to_string(),
-            },
-        })
-        .await
-    }
-
-    async fn enroll(&self, enrollment: Enrollment) -> Result<()> {
+    /// Stores the device's keys and MLS identity, uploads the DeviceList,
+    /// signs in, uploads the recovery backup (if any) and KeyPackages.
+    pub(crate) async fn enroll(&self, enrollment: Enrollment) -> Result<()> {
         let Enrollment {
             root_seed,
             device_seed,
@@ -271,7 +213,7 @@ impl<S: StateStore + 'static> Client<S> {
             .await
     }
 
-    async fn own_user(&self) -> Result<Option<UserInfo>> {
+    pub(crate) async fn own_user(&self) -> Result<Option<UserInfo>> {
         let user_id = self.require_session()?.device.user_id;
         self.run(move |store, _| Ok(store.user(&user_id)?)).await
     }
@@ -297,16 +239,26 @@ impl<S: StateStore + 'static> Client<S> {
         };
         let mut user = self.accept_user(record).await?;
         user.handle = handle.to_string();
-        if user.display_name.is_empty() {
-            user.display_name = handle.to_string();
-        }
-        let stored = user.clone();
-        self.run(move |store, _| store.transaction(|txn| Ok(txn.upsert_user(&stored)?)))
+        let fetched = user.clone();
+        let (user, new) = self
+            .run(move |store, _| {
+                store.transaction(|txn| {
+                    let stored = txn.user(&fetched.user_id)?;
+                    let user = merge_directory_user(stored.as_ref(), fetched);
+                    txn.upsert_user(&user)?;
+                    Ok((user, stored.is_none()))
+                })
+            })
             .await?;
+        if new {
+            self.share_contact(&user).await;
+        }
         Ok(Some(user))
     }
 
-    /// Takes the DeviceList of a directory record and returns the profile.
+    /// Takes the DeviceList of a directory record and returns the profile;
+    /// the display name is empty unless the directory has one (see
+    /// [`merge_directory_user`]).
     pub(crate) async fn accept_user(&self, record: UserRecord) -> Result<UserInfo> {
         if let Err(err) = self
             .accept_device_list(&record.user_id, &record.device_list)
@@ -316,16 +268,14 @@ impl<S: StateStore + 'static> Client<S> {
         }
         Ok(UserInfo {
             user_id: record.user_id,
-            display_name: record
-                .display_name
-                .or_else(|| record.handle.clone())
-                .unwrap_or_default(),
+            display_name: record.display_name.unwrap_or_default(),
             handle: record.handle.unwrap_or_default(),
         })
     }
 
     /// Verifies a user's signed DeviceList and keeps it if it supersedes the
-    /// known one. Returns the devices it newly revokes.
+    /// known one. Returns the devices it newly revokes, or newly drops (a
+    /// restore from the recovery code cannot name the lost devices).
     pub(crate) async fn accept_device_list(
         &self,
         user_id: &UserId,
@@ -351,11 +301,23 @@ impl<S: StateStore + 'static> Client<S> {
             .device_lists
             .get(user_id)
             .expect("the list was just stored");
-        Ok(list
+        let mut gone: Vec<DeviceId> = list
             .revoked()
             .iter()
             .filter(|d| before.as_ref().is_none_or(|b| !b.is_revoked(d)))
-            .map(|d| DeviceRef::new(user_id.clone(), d.clone()))
+            .cloned()
+            .collect();
+        if let Some(before) = &before {
+            gone.extend(
+                before
+                    .certs()
+                    .map(|c| c.device_id.clone())
+                    .filter(|d| !list.contains(d) && !list.is_revoked(d)),
+            );
+        }
+        Ok(gone
+            .into_iter()
+            .map(|d| DeviceRef::new(user_id.clone(), d))
             .collect())
     }
 
@@ -430,4 +392,45 @@ impl<S: StateStore + 'static> Client<S> {
         self.run(move |store, engine| base.record_revoked(store, engine, &revoked))
             .await
     }
+}
+
+/// Characters of a user id shown when a user has neither a display name nor
+/// a handle.
+const SHORT_USER_ID_LEN: usize = 12;
+
+/// The name shown for a user without a display name: the handle, else the
+/// start of the user id.
+pub(crate) fn fallback_name(user: &UserInfo) -> String {
+    if user.handle.is_empty() {
+        user.user_id
+            .as_str()
+            .chars()
+            .take(SHORT_USER_ID_LEN)
+            .collect()
+    } else {
+        user.handle.clone()
+    }
+}
+
+/// A directory profile merged into the cached one: the handle is updated,
+/// a display name the user announced (`profile` content) is kept over the
+/// fallback; without either, the fallback name is stored.
+pub(crate) fn merge_directory_user(stored: Option<&UserInfo>, mut fetched: UserInfo) -> UserInfo {
+    if !fetched.display_name.is_empty() {
+        return fetched;
+    }
+    if let Some(stored) = stored {
+        if fetched.handle.is_empty() {
+            fetched.handle = stored.handle.clone();
+        }
+        let announced = !stored.display_name.is_empty()
+            && stored.display_name != fallback_name(stored)
+            && stored.display_name != stored.handle;
+        if announced {
+            fetched.display_name = stored.display_name.clone();
+            return fetched;
+        }
+    }
+    fetched.display_name = fallback_name(&fetched);
+    fetched
 }

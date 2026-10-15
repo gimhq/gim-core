@@ -6,11 +6,11 @@ use std::sync::{Arc, Mutex};
 use futures_util::StreamExt;
 use gim_base::model::{ChatKind as BaseChatKind, Membership, MessageContent as BaseContent};
 use gim_base::{BaseError, StateReader};
-use gim_common::{GroupId, MessageId, UserId};
+use gim_common::{DeviceId, GroupId, MessageId, UserId};
 use gim_sdk::transport::Transport;
 use gim_sdk::{
-    Client, ClientBuilder, HttpTransport, OutboxSender, DEVICE_KEY_SECRET_KEY, OUTGOING_DIR,
-    ROOT_KEY_SECRET_KEY, SESSION_SECRET_KEY,
+    Client, ClientBuilder, HttpTransport, OutboxSender, RecoveryCode, DEVICE_KEY_SECRET_KEY,
+    OUTGOING_DIR, ROOT_KEY_SECRET_KEY, SESSION_SECRET_KEY,
 };
 use gim_sqlite::{DbKey, SqliteStore, DATABASE_FILE_NAME};
 use tokio::sync::{broadcast, watch};
@@ -20,8 +20,8 @@ use url::Url;
 use crate::error::parse_id;
 use crate::hooks::HookSecrets;
 use crate::{
-    ChatListDiff, ChatListListener, ConnectionState, GimError, PlatformHooks, Session, TaskHandle,
-    Timeline, UserProfile,
+    ChatListDiff, ChatListListener, ConnectionState, DeviceInfo, GimError, LinkSession,
+    PendingApproval, PlatformHooks, Session, TaskHandle, Timeline, UserProfile,
 };
 
 type Sdk = Client<SqliteStore>;
@@ -159,6 +159,7 @@ pub struct GimClient {
     sdk: Sdk,
     hooks: Arc<dyn PlatformHooks>,
     data_dir: PathBuf,
+    local_state_reset: bool,
     signed_out: AtomicBool,
     shared: Arc<Shared>,
     sync: Mutex<Option<SyncTasks>>,
@@ -180,11 +181,15 @@ impl GimClient {
         let transport = transport(&server_url)?;
         let secrets = Arc::new(HookSecrets(hooks.clone()));
         let dir = data_dir.clone();
-        let builder = tokio::task::spawn_blocking(move || {
-            ClientBuilder::open(transport, secrets, |key, new_key| {
-                SqliteStore::open_or_reset(&dir, &DbKey::new(*key), new_key)
-                    .map_err(BaseError::from)
-            })
+        let (builder, local_state_reset) = tokio::task::spawn_blocking(move || {
+            let mut reset = false;
+            let builder = ClientBuilder::open(transport, secrets, |key, new_key| {
+                let opened = SqliteStore::open_or_reset(&dir, &DbKey::new(*key), new_key)
+                    .map_err(BaseError::from)?;
+                reset = opened.1;
+                Ok::<_, BaseError>(opened)
+            })?;
+            Ok::<_, GimError>((builder, reset))
         })
         .await??;
         let sdk = builder.data_dir(&data_dir).build()?;
@@ -197,6 +202,7 @@ impl GimClient {
             sdk,
             hooks,
             data_dir,
+            local_state_reset,
             signed_out: AtomicBool::new(false),
             shared,
             sync: Mutex::new(None),
@@ -333,7 +339,8 @@ fn remove_if_exists(path: &Path) -> std::io::Result<()> {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl GimClient {
-    /// The persisted session, or `None` before `register`.
+    /// The persisted session, or `None` before an identity exists on this
+    /// device (`create_identity`, `restore_from_recovery` or a device link).
     pub async fn session(&self) -> Result<Option<Session>, GimError> {
         let Some(session) = self.sdk()?.session() else {
             return Ok(None);
@@ -360,6 +367,139 @@ impl GimClient {
     pub async fn create_identity(&self, display_name: String) -> Result<String, GimError> {
         let code = self.sdk()?.create_identity(&display_name).await?;
         Ok(code.to_string())
+    }
+
+    /// Restores the user on this (fresh) device from its recovery code
+    /// after losing every device: becomes a new device of `user_id`, signed
+    /// in, with a new self group. Chats are not rejoined automatically.
+    ///
+    /// With `revoke_others` the previous devices are revoked. Keeping them
+    /// (`revoke_others == false`) needs the user's current DeviceList
+    /// cached locally, which a fresh install does not have: it then fails
+    /// with `InvalidInput`.
+    pub async fn restore_from_recovery(
+        &self,
+        user_id: String,
+        recovery_code: String,
+        revoke_others: bool,
+    ) -> Result<(), GimError> {
+        let sdk = self.sdk()?;
+        let user_id: UserId = parse_id("user_id", user_id)?;
+        let code: RecoveryCode = recovery_code.parse().map_err(|e| GimError::InvalidInput {
+            reason: format!("recovery_code: {e}"),
+        })?;
+        Ok(sdk
+            .restore_from_recovery(&user_id, &code, revoke_others)
+            .await?)
+    }
+
+    /// New device: starts a link. Show `LinkSession.qr_string()` as a QR
+    /// code and call `wait_link`. `hubs` are the hub URLs the old device
+    /// may post the bundle to.
+    pub fn start_link(&self, hubs: Vec<String>) -> Result<Arc<LinkSession>, GimError> {
+        let link = self.sdk()?.start_link(hubs)?;
+        Ok(Arc::new(LinkSession(link)))
+    }
+
+    /// New device: waits (up to 10 minutes) for the old device to approve
+    /// the link, then signs in as a new device of that user. Returns the
+    /// SAS to compare with the one the old device shows; finish with
+    /// `confirm_link`.
+    pub async fn wait_link(&self, link: Arc<LinkSession>) -> Result<String, GimError> {
+        let linked = self.sdk()?.wait_link(&link.0).await?;
+        Ok(linked.sas.to_string())
+    }
+
+    /// New device: the user compared the SAS. `false` (mismatch) deletes
+    /// the linked identity, the local database and the keystore secrets
+    /// like `sign_out`; create a new client afterwards.
+    pub async fn confirm_link(&self, accepted: bool) -> Result<(), GimError> {
+        self.sdk()?.confirm_link(accepted).await?;
+        if !accepted {
+            self.sign_out().await?;
+        }
+        Ok(())
+    }
+
+    /// Old device: approves the link offer scanned from the new device's QR
+    /// code. Certifies the new device and sends it the user's keys; returns
+    /// the pending approval carrying the SAS to compare.
+    pub async fn approve_link(&self, qr_string: String) -> Result<Arc<PendingApproval>, GimError> {
+        let approval = self.sdk()?.approve_link(&qr_string).await?;
+        Ok(Arc::new(PendingApproval(approval)))
+    }
+
+    /// Old device: the user compared the SAS. `true` adds the new device to
+    /// the user's devices and to every joined chat (the new device must
+    /// have finished `wait_link`); `false` revokes it.
+    pub async fn confirm_approval(
+        &self,
+        approval: Arc<PendingApproval>,
+        accepted: bool,
+    ) -> Result<(), GimError> {
+        Ok(self.sdk()?.confirm_approval(&approval.0, accepted).await?)
+    }
+
+    /// The devices of the signed-in user.
+    pub async fn devices(&self) -> Result<Vec<DeviceInfo>, GimError> {
+        let devices = self.sdk()?.devices().await?;
+        Ok(devices.into_iter().map(Into::into).collect())
+    }
+
+    /// The devices of any user, from the user's current DeviceList; empty
+    /// for an unknown user.
+    pub async fn user_devices(&self, user_id: String) -> Result<Vec<DeviceInfo>, GimError> {
+        let user_id: UserId = parse_id("user_id", user_id)?;
+        let devices = self.sdk()?.user_devices(&user_id).await?;
+        Ok(devices.into_iter().map(Into::into).collect())
+    }
+
+    /// Revokes another device of the signed-in user and removes it from
+    /// every chat. `InvalidInput` for the current device.
+    pub async fn revoke_device(&self, device_id: String) -> Result<(), GimError> {
+        let device_id: DeviceId = parse_id("device_id", device_id)?;
+        Ok(self.sdk()?.revoke_device(&device_id).await?)
+    }
+
+    /// The signed-in user's id; `None` without a session.
+    pub fn user_id(&self) -> Option<String> {
+        let session = self.sdk().ok()?.session()?;
+        Some(session.device.user_id.into())
+    }
+
+    /// Whether opening this client discarded an existing local database
+    /// (undecryptable, e.g. its key was lost, or incompatible). The session
+    /// is gone with it: show onboarding and tell the user that local
+    /// history was lost.
+    pub fn local_state_reset(&self) -> bool {
+        self.local_state_reset
+    }
+
+    /// Sets the signed-in user's display name; synced to the user's other
+    /// devices and announced to every joined chat.
+    pub async fn set_display_name(&self, name: String) -> Result<(), GimError> {
+        Ok(self.sdk()?.set_display_name(&name).await?)
+    }
+
+    /// Claims `handle` in the hub directory, so others find the user with
+    /// `find_user`; `Server(409)` if it is taken.
+    pub async fn claim_handle(&self, handle: String) -> Result<(), GimError> {
+        Ok(self.sdk()?.claim_handle(&handle).await?)
+    }
+
+    /// Releases the handle claimed with `claim_handle`; `InvalidInput` if
+    /// there is none.
+    pub async fn release_handle(&self) -> Result<(), GimError> {
+        let sdk = self.sdk()?;
+        let own = self.own_user()?;
+        let handle = self
+            .read(move |store| Ok(store.user(&own)?.map(|u| u.handle)))
+            .await?
+            .filter(|h| !h.is_empty())
+            .ok_or_else(|| GimError::InvalidInput {
+                reason: "no handle claimed".to_string(),
+            })?;
+        Ok(sdk.release_handle(&handle).await?)
     }
 
     /// Stops sync and deletes the session, local data and keystore secrets.
@@ -631,10 +771,20 @@ impl GimClient {
         Ok(sdk.mark_read(&group_id).await?)
     }
 
+    /// Reports whether the user is typing. Call it with `true` on every
+    /// keystroke (notifications are rate-limited) and with `false` when
+    /// typing stops; see `stop_typing`.
     pub async fn set_typing(&self, chat_id: String, active: bool) -> Result<(), GimError> {
         let sdk = self.sdk()?;
         let group_id: GroupId = parse_id("chat_id", chat_id)?;
         Ok(sdk.set_typing(&group_id, active).await?)
+    }
+
+    /// Tells the chat the user stopped typing (the input was cleared, the
+    /// message sent or the chat closed); same as `set_typing(chat_id,
+    /// false)`. Does nothing unless typing was reported.
+    pub async fn stop_typing(&self, chat_id: String) -> Result<(), GimError> {
+        self.set_typing(chat_id, false).await
     }
 
     /// Downloads and decrypts an attachment to `dest_path` and returns the

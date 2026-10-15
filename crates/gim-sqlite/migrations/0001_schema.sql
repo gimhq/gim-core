@@ -109,6 +109,15 @@ CREATE TABLE device_lists (
     data BLOB NOT NULL
 );
 
+-- Self groups (MLS groups of the own user's devices), in the order they
+-- were recorded; the last one is current. Their chats are hidden from the
+-- chat list.
+
+CREATE TABLE self_groups (
+    n INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id TEXT NOT NULL UNIQUE
+);
+
 -- Users joining or leaving a chat, one row per (group, seq, user), recorded
 -- when the commit or Welcome that did it is applied.
 

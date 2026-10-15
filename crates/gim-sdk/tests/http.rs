@@ -827,6 +827,15 @@ async fn timeouts_and_connect_failures_are_network_errors() {
         http.group_info(&token(), &gid("g_1")).await,
         Err(TransportError::Network(_))
     ));
+
+    // The URL in the error keeps its path but loses its query.
+    match http.group_messages(&token(), &gid("g_1"), 7, 10).await {
+        Err(TransportError::Network(message)) => {
+            assert!(message.contains("/v2/groups/g_1"), "{message}");
+            assert!(!message.contains('?'), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -841,4 +850,130 @@ async fn base_url_path_prefix_is_kept() {
     .await;
     let http = transport_at(&format!("{}/api/", server.uri()));
     http.group_info(&token(), &gid("g_1")).await.unwrap();
+}
+
+#[tokio::test]
+async fn recovery_backup_put_and_get() {
+    let server = MockServer::start().await;
+    let route = format!("/v2/users/{}/recovery-backup", uid(1));
+    let backup = json!({ "user_id": uid(1), "backup": "AQI=", "updated_at": 7 });
+    Mock::given(method("PUT"))
+        .and(path(route.as_str()))
+        .and(header("authorization", BEARER))
+        .and(body_json(json!({ "backup": "AQI=" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&backup))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(route.as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&backup))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/users/{}/recovery-backup", uid(2))))
+        .respond_with(ResponseTemplate::new(404).set_body_json(error_body("not_found")))
+        .mount(&server)
+        .await;
+    let http = transport(&server);
+    http.put_recovery_backup(&token(), &user(1), vec![1, 2])
+        .await
+        .unwrap();
+    assert_eq!(http.recovery_backup(&user(1)).await, Ok(Some(vec![1, 2])));
+    assert_eq!(http.recovery_backup(&user(2)).await, Ok(None));
+    // The restore path has no session.
+    let requests = server.received_requests().await.unwrap();
+    assert!(requests
+        .iter()
+        .filter(|r| r.method.as_str() == "GET")
+        .all(|r| r.headers.get("authorization").is_none()));
+}
+
+#[tokio::test]
+async fn link_bundles_post_and_fetch_once() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v2/link-bundles"))
+        .and(header("authorization", BEARER))
+        .and(body_json(json!({
+            "link_id": "00ff",
+            "sealed_bundle": "AQID",
+            // Clamped to the hub's maximum.
+            "expires_in": 600,
+        })))
+        .respond_with(
+            ResponseTemplate::new(201).set_body_json(json!({ "link_id": "00ff", "expires_at": 9 })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    // The hub deletes the bundle on the first fetch.
+    Mock::given(method("GET"))
+        .and(path("/v2/link-bundles/00ff"))
+        .and(query_param("wait", "30"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "link_id": "00ff", "sealed_bundle": "AQID" })),
+        )
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/link-bundles/00ff"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(error_body("not_found")))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    let http = transport(&server);
+    http.post_link_bundle(&token(), "00ff", vec![1, 2, 3], Duration::from_secs(900))
+        .await
+        .unwrap();
+    // `wait` is clamped to 30 s.
+    assert_eq!(
+        http.fetch_link_bundle("00ff", Duration::from_secs(45))
+            .await,
+        Ok(Some(vec![1, 2, 3]))
+    );
+    assert_eq!(
+        http.fetch_link_bundle("00ff", Duration::ZERO).await,
+        Ok(None)
+    );
+    let requests = server.received_requests().await.unwrap();
+    let fetches: Vec<_> = requests
+        .iter()
+        .filter(|r| r.method.as_str() == "GET")
+        .collect();
+    assert_eq!(fetches.len(), 2);
+    assert_eq!(fetches[1].url.query(), Some("wait=0"));
+    assert!(fetches
+        .iter()
+        .all(|r| r.headers.get("authorization").is_none()));
+}
+
+#[tokio::test]
+async fn get_device_list() {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "GET",
+        &format!("/v2/users/{}/device-list", uid(2)),
+        ResponseTemplate::new(200)
+            .set_body_json(json!({ "user_id": uid(2), "device_list": "AQI=" })),
+    )
+    .await;
+    mount(
+        &server,
+        "GET",
+        &format!("/v2/users/{}/device-list", uid(3)),
+        ResponseTemplate::new(404).set_body_json(error_body("not_found")),
+    )
+    .await;
+    let http = transport(&server);
+    assert_eq!(
+        http.device_list(&token(), &user(2)).await,
+        Ok(Some(vec![1, 2]))
+    );
+    assert_eq!(http.device_list(&token(), &user(3)).await, Ok(None));
 }

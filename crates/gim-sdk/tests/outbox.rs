@@ -105,6 +105,8 @@ async fn retry_after_lost_reply_keeps_one_server_message() {
         .create_direct_chat(&bob.user_id())
         .await
         .unwrap();
+    // Alice's profile was announced on creation.
+    let announced = server_messages(&transport, &g, &alice.device()).len();
 
     // The server stores the message but the reply never arrives, twice.
     transport
@@ -125,7 +127,7 @@ async fn retry_after_lost_reply_keeps_one_server_message() {
     }
     assert_eq!(alice.message(&id).send_state, Some(SendState::Sent));
     assert!(alice.store.outbox_entry(&id).unwrap().is_none());
-    let posted = server_messages(&transport, &g, &alice.device());
+    let posted = server_messages(&transport, &g, &alice.device()).split_off(announced);
     assert_eq!(posted.len(), 1);
     assert_eq!(posted[0].client_id.as_str(), id.as_str());
     assert_eq!(alice.message(&id).seq, Some(posted[0].seq));
@@ -149,6 +151,7 @@ async fn failed_entry_blocks_nothing_and_can_be_retried_or_cancelled() {
         .create_direct_chat(&bob.user_id())
         .await
         .unwrap();
+    let announced = server_messages(&transport, &g, &alice.device()).len();
 
     transport
         .faults
@@ -162,7 +165,10 @@ async fn failed_entry_blocks_nothing_and_can_be_retried_or_cancelled() {
         0
     );
     for _ in 1..MAX_SEND_ATTEMPTS {
-        assert!(server_messages(&transport, &g, &alice.device()).is_empty());
+        assert_eq!(
+            server_messages(&transport, &g, &alice.device()).len(),
+            announced
+        );
         alice.client.network_reachable();
         alice.client.flush_outbox().await.unwrap();
     }
@@ -205,6 +211,7 @@ async fn epoch_change_between_enqueue_and_send_reencrypts() {
         .await
         .unwrap();
     bob.sync().await;
+    let announced = server_messages(&transport, &g, &alice.device()).len();
 
     transport
         .faults
@@ -221,7 +228,7 @@ async fn epoch_change_between_enqueue_and_send_reencrypts() {
     alice.client.network_reachable();
     alice.client.flush_outbox().await.unwrap();
     assert_eq!(alice.message(&id).send_state, Some(SendState::Sent));
-    let posted = server_messages(&transport, &g, &alice.device());
+    let posted = server_messages(&transport, &g, &alice.device()).split_off(announced);
     assert_eq!(posted.len(), 1);
     assert_eq!(posted[0].epoch, 2);
 
@@ -346,11 +353,15 @@ async fn typing_is_sent_directly_and_rate_limited() {
         .create_direct_chat(&bob.user_id())
         .await
         .unwrap();
+    let announced = server_messages(&transport, &g, &alice.device()).len();
 
     for _ in 0..3 {
         alice.client.set_typing(&g, true).await.unwrap();
     }
-    assert_eq!(server_messages(&transport, &g, &alice.device()).len(), 1);
+    assert_eq!(
+        server_messages(&transport, &g, &alice.device()).len(),
+        announced + 1
+    );
     assert!(alice.store.outbox_entries().unwrap().is_empty());
     let changes = bob.sync().await;
     let typing = StateChange::Typing {
@@ -362,7 +373,10 @@ async fn typing_is_sent_directly_and_rate_limited() {
 
     alice.client.set_typing(&g, false).await.unwrap();
     alice.client.set_typing(&g, false).await.unwrap();
-    assert_eq!(server_messages(&transport, &g, &alice.device()).len(), 2);
+    assert_eq!(
+        server_messages(&transport, &g, &alice.device()).len(),
+        announced + 2
+    );
     let changes = bob.sync().await;
     assert!(changes.contains(&StateChange::Typing {
         group_id: g.clone(),

@@ -188,6 +188,7 @@ impl StateReader for Reader<'_> {
     fn chats(&self) -> StoreResult<Vec<Chat>> {
         self.chats_where(
             "SELECT group_id, updated_at_ms, data FROM chats \
+             WHERE group_id NOT IN (SELECT group_id FROM self_groups) \
              ORDER BY updated_at_ms DESC, group_id",
             [],
         )
@@ -407,5 +408,10 @@ impl StateReader for Reader<'_> {
             [],
             |row| Ok((user_id(get(row, 0)?)?, get(row, 1)?)),
         )
+    }
+    fn self_groups(&self) -> StoreResult<Vec<GroupId>> {
+        self.query("SELECT group_id FROM self_groups ORDER BY n", [], |row| {
+            group_id(get(row, 0)?)
+        })
     }
 }

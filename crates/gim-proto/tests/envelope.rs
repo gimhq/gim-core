@@ -1,7 +1,7 @@
 use ciborium::Value;
-use gim_common::MessageId;
+use gim_common::{GroupId, MessageId, UserId};
 use gim_proto::envelope::{
-    decode, encode, Content, Envelope, MediaInfo, ReceiptKind, ENVELOPE_VERSION,
+    decode, encode, Contact, Content, Envelope, MediaInfo, ReceiptKind, ENVELOPE_VERSION,
 };
 use gim_proto::ProtoError;
 
@@ -71,6 +71,34 @@ fn all_contents() -> Vec<Content> {
         Content::GroupInfo {
             name: None,
             avatar: None,
+        },
+        Content::Profile {
+            display_name: "Eleni".into(),
+        },
+        Content::SelfDeviceList {
+            device_list: vec![0x82, 0x40, 0x40],
+        },
+        Content::SelfProfile {
+            display_name: "Eleni on Hydra".into(),
+        },
+        Content::SelfContacts {
+            contacts: vec![
+                Contact {
+                    user_id: UserId::new("ubob").unwrap(),
+                    handle: Some("bob".into()),
+                    display_name: Some("Bob".into()),
+                },
+                Contact {
+                    user_id: UserId::new("ucarol").unwrap(),
+                    handle: None,
+                    display_name: None,
+                },
+            ],
+        },
+        Content::SelfContacts { contacts: vec![] },
+        Content::SelfReadMarker {
+            group_id: GroupId::new("hub/abc").unwrap(),
+            seq: 42,
         },
     ]
 }
@@ -245,6 +273,106 @@ fn rejects_wrong_media_key_length() {
 fn rejects_invalid_message_id() {
     let mut value = to_value(&encode(&envelope(Content::Typing { active: true })).unwrap());
     *entry_mut(map_mut(&mut value), "id") = Value::Text("a/b".into());
+    assert!(matches!(
+        decode(&to_bytes(&value)),
+        Err(ProtoError::Malformed { .. })
+    ));
+}
+
+fn content_map(env: &Envelope) -> Vec<(String, Value)> {
+    let value = to_value(&encode(env).unwrap());
+    let content = value
+        .as_map()
+        .unwrap()
+        .iter()
+        .find(|(k, _)| k.as_text() == Some("c"))
+        .unwrap()
+        .1
+        .clone();
+    content
+        .as_map()
+        .unwrap()
+        .iter()
+        .map(|(k, v)| (k.as_text().unwrap().to_owned(), v.clone()))
+        .collect()
+}
+
+#[test]
+fn profile_and_self_group_tags() {
+    let tag = |content: Content| {
+        content_map(&envelope(content))
+            .into_iter()
+            .find(|(k, _)| k == "t")
+            .and_then(|(_, v)| v.as_text().map(str::to_owned))
+            .unwrap()
+    };
+    assert_eq!(
+        tag(Content::Profile {
+            display_name: "x".into()
+        }),
+        "profile"
+    );
+    assert_eq!(
+        tag(Content::SelfDeviceList {
+            device_list: vec![1]
+        }),
+        "self.device_list"
+    );
+    assert_eq!(
+        tag(Content::SelfProfile {
+            display_name: "x".into()
+        }),
+        "self.profile"
+    );
+    assert_eq!(
+        tag(Content::SelfContacts { contacts: vec![] }),
+        "self.contacts"
+    );
+    assert_eq!(
+        tag(Content::SelfReadMarker {
+            group_id: GroupId::new("hub/abc").unwrap(),
+            seq: 1
+        }),
+        "self.read_marker"
+    );
+
+    let marker = content_map(&envelope(Content::SelfReadMarker {
+        group_id: GroupId::new("hub/abc").unwrap(),
+        seq: 7,
+    }));
+    let keys: Vec<&str> = marker.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, ["t", "g", "s"]);
+    let list = content_map(&envelope(Content::SelfDeviceList {
+        device_list: vec![1, 2],
+    }));
+    assert_eq!(list[1], ("dl".to_owned(), Value::Bytes(vec![1, 2])));
+
+    // A contact without optional fields is just its id.
+    let contacts = content_map(&envelope(Content::SelfContacts {
+        contacts: vec![Contact {
+            user_id: UserId::new("ubob").unwrap(),
+            handle: None,
+            display_name: None,
+        }],
+    }));
+    assert_eq!(
+        contacts[1].1,
+        Value::Array(vec![Value::Map(vec![(
+            Value::Text("id".into()),
+            Value::Text("ubob".into())
+        )])])
+    );
+}
+
+#[test]
+fn rejects_invalid_read_marker_group() {
+    let env = envelope(Content::SelfReadMarker {
+        group_id: GroupId::new("hub/abc").unwrap(),
+        seq: 1,
+    });
+    let mut value = to_value(&encode(&env).unwrap());
+    let content = map_mut(entry_mut(map_mut(&mut value), "c"));
+    *entry_mut(content, "g") = Value::Text(String::new());
     assert!(matches!(
         decode(&to_bytes(&value)),
         Err(ProtoError::Malformed { .. })
