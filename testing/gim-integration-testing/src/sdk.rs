@@ -17,8 +17,8 @@ use gim_common::{ClientId, DeviceRef, GroupId, UserId};
 use gim_sdk::testing::MemorySecretStorage;
 use gim_sdk::transport::{
     AccessToken, Challenge, ClaimedKeyPackage, CommitAccepted, EventBatch, EventStream, GroupInfo,
-    KeyPackageCount, OutgoingCommit, PostError, SessionError, SessionToken, Transport,
-    TransportError, TransportResult, UserRecord,
+    HostingEntryGrant, KeyPackageCount, OutgoingCommit, PostError, SessionError, SessionToken,
+    StoredHostingRecord, Transport, TransportError, TransportResult, UserRecord,
 };
 use gim_sdk::{Client, ClientBuilder, HttpTransport, SecretStorage};
 use tempfile::TempDir;
@@ -272,6 +272,27 @@ impl Transport for FaultyHub {
 
     async fn upload_blob(&self, t: &AccessToken, file: &Path) -> TransportResult<String> {
         self.inner.upload_blob(t, file).await
+    }
+
+    async fn create_hosting_entry(
+        &self,
+        t: &AccessToken,
+        u: &UserId,
+        priority: u8,
+    ) -> TransportResult<HostingEntryGrant> {
+        self.inner.create_hosting_entry(t, u, priority).await
+    }
+
+    async fn put_hosting_record(
+        &self,
+        u: &UserId,
+        record: Vec<u8>,
+    ) -> TransportResult<StoredHostingRecord> {
+        self.inner.put_hosting_record(u, record).await
+    }
+
+    async fn hosting_record(&self, u: &UserId) -> TransportResult<Option<StoredHostingRecord>> {
+        self.inner.hosting_record(u).await
     }
 
     async fn download_blob(

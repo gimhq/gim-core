@@ -4,7 +4,10 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::time::Duration;
 
-use gim_core::{ChatKind, ConnectionState, GimError, MessageContent, ReactionGroup, SendState};
+use gim_core::{
+    ChatKind, ConnectionState, GimError, MembershipChangeKind, MessageContent, ReactionGroup,
+    SendState, TimelineItem,
+};
 use gim_integration_testing::{
     eventually, member_ids, message, messages, open, server_url, text, timeline, MemoryHooks,
     Recorder, TestUser,
@@ -557,19 +560,28 @@ async fn group_add_remove() {
         .all(|m| text(m) != Some("after carol")));
 }
 
-/// Leaving sends a PublicMessage self-Remove Proposal, which gim-hub
-/// e11ad00 rejects ("mls_message is not a Commit"); gim-hub H3-FX3 accepts
-/// it. Runs only with `GIM_HUB_FX3=1`.
+/// Whether the timeline shows `name` leaving.
+fn left(items: &[TimelineItem], name: &str) -> bool {
+    items.iter().any(|item| {
+        matches!(
+            item,
+            TimelineItem::MembershipChange {
+                user_name,
+                change: MembershipChangeKind::Left,
+                ..
+            } if user_name == name
+        )
+    })
+}
+
+/// Leaving submits a self-Remove Proposal; Alice's client, the only other
+/// member, commits it by reference.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs a gim-hub: scripts/integration-test.sh"]
 async fn group_leave() {
     let Some(url) = server_url("group_leave") else {
         return;
     };
-    if std::env::var("GIM_HUB_FX3").as_deref() != Ok("1") {
-        eprintln!("group_leave skipped: needs gim-hub H3-FX3 (leave via PublicMessage Proposal); set GIM_HUB_FX3=1");
-        return;
-    }
     let alice = TestUser::register(&url, "alice", "Alice").await;
     let bob = TestUser::register(&url, "bob", "Bob").await;
 
@@ -579,6 +591,7 @@ async fn group_leave() {
         .await
         .unwrap();
     let (bob_timeline, _bob_handle) = bob.timeline(&chat).await;
+    let (alice_timeline, _alice_handle) = alice.timeline(&chat).await;
     let first = alice
         .client
         .send_text(chat.clone(), "before leave".to_string(), None)
@@ -595,12 +608,23 @@ async fn group_leave() {
         (member_ids(&alice.client, &chat).await == only_alice).then_some(())
     })
     .await;
+    alice_timeline
+        .wait("bob left at alice", |items| left(items, "Bob"))
+        .await;
+    bob_timeline
+        .wait("own left at bob", |items| left(items, "Bob"))
+        .await;
+    assert!(matches!(
+        bob.client
+            .send_text(chat.clone(), "still here?".to_string(), None)
+            .await,
+        Err(GimError::InvalidInput { .. })
+    ));
     let alone = alice
         .client
         .send_text(chat.clone(), "after bob".to_string(), None)
         .await
         .unwrap();
-    let (alice_timeline, _alice_handle) = alice.timeline(&chat).await;
     alice_timeline
         .wait("after bob sent", |items| {
             message(items, &alone).is_some_and(|m| m.send_state != Some(SendState::Pending))

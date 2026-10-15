@@ -24,7 +24,8 @@ pub use credential::{
 };
 pub use device_list_cache::DeviceListCache;
 pub use engine::{
-    CommitOutput, GroupJoined, MlsEngine, ProcessedMessage, MAX_KEY_PACKAGES_PER_CALL,
+    CommitOutput, GroupJoined, MlsEngine, PendingProposal, ProcessedMessage,
+    MAX_KEY_PACKAGES_PER_CALL,
 };
 pub use envelope::{decrypt_to_envelope, encrypt_envelope, DecryptedMessage};
 pub use error::CryptoError;

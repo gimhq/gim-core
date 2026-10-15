@@ -42,6 +42,16 @@ pub struct SyncSettings {
     /// How long to long-poll before trying the WebSocket stream again once
     /// it was unavailable.
     pub stream_retry: Duration,
+    /// Range of the random delay after which a member that is not the one
+    /// chosen to commit a pending Proposal commits it itself, if it is still
+    /// pending (the chosen member is offline).
+    pub proposal_commit_delay_min: Duration,
+    pub proposal_commit_delay_max: Duration,
+    /// First retry delay of a pending invite (an invitee whose hub was
+    /// unavailable); doubles per retry up to [`crate::INVITE_RETRY_MAX`].
+    pub invite_retry: Duration,
+    /// How long a pending invite is retried before it is dropped.
+    pub invite_ttl: Duration,
 }
 
 impl Default for SyncSettings {
@@ -51,6 +61,10 @@ impl Default for SyncSettings {
             backoff_max: Duration::from_secs(60),
             long_poll_wait: Duration::from_secs(30),
             stream_retry: Duration::from_secs(300),
+            proposal_commit_delay_min: Duration::from_secs(5),
+            proposal_commit_delay_max: Duration::from_secs(15),
+            invite_retry: Duration::from_secs(30),
+            invite_ttl: Duration::from_secs(24 * 3600),
         }
     }
 }
@@ -95,7 +109,9 @@ impl<S: StateStore + 'static> Client<S> {
     /// [`SyncSettings`]); [`Client::network_reachable`] retries at once.
     /// Expired tokens are renewed by signing in again; the loop stops by
     /// itself only when the hub rejects the device's sign-in; see
-    /// [`Client::stop_sync`].
+    /// [`Client::stop_sync`]. Alongside, the user's hosting record is
+    /// renewed when due: at start, daily and on `hosting_record.expiring`,
+    /// and pending invites are retried (see [`Client::pending_invites`]).
     pub fn start_sync(&self) -> Result<()> {
         let session = self.require_session()?;
         let mut task = self
@@ -186,7 +202,17 @@ impl<S: StateStore + 'static> Client<S> {
         }
     }
 
+    /// The sync loop, with the hosting record renewal and the pending
+    /// invite retries alongside.
     async fn sync_loop(&self, session: Session) -> Result<()> {
+        tokio::select! {
+            result = self.follow_events(session) => result,
+            never = self.maintain_hosting_record() => match never {},
+            never = self.maintain_pending_invites() => match never {},
+        }
+    }
+
+    async fn follow_events(&self, session: Session) -> Result<()> {
         let settings = self.inner.sync_settings;
         let mut backoff = Backoff::new(settings.backoff_min, settings.backoff_max);
         let mut stream_retry_at = None;
@@ -315,7 +341,8 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Applies fetched events under the group lock, then commits the
-    /// removal of departed devices, wakes the outbox (delivered receipts
+    /// removal of departed devices and pending Proposals, advances pending
+    /// leaves, wakes the outbox (delivered receipts
     /// may have been queued), announces the own display name to the chats
     /// this device joined and resolves the profiles of new members and
     /// senders.
@@ -327,6 +354,8 @@ impl<S: StateStore + 'static> Client<S> {
         let guard = self.inner.group_lock.lock().await;
         let changes = self.apply_fetched_locked(session, fetched).await?;
         self.remove_departed(session).await?;
+        self.commit_pending_proposals(session).await?;
+        self.resume_leaves(session).await;
         drop(guard);
         self.wake_outbox();
         let own = &session.device.user_id;
@@ -373,14 +402,71 @@ impl<S: StateStore + 'static> Client<S> {
         fetched: Fetched,
     ) -> Result<Vec<StateChange>> {
         // An own commit must be merged before later commits are processed.
-        self.resolve_pending_commits(session).await?;
+        // One stuck at an unreachable owning hub holds back only its group.
+        let deferred = self.resolve_pending_commits_deferring(session).await?;
         match fetched {
             Fetched::Batch(batch) => {
-                self.apply_events_locked(session, batch.events, batch.next_cursor)
+                let events = self.defer_group_events(batch.events, &deferred).await?;
+                self.apply_events_locked(session, events, batch.next_cursor)
                     .await
             }
-            Fetched::Expired { head } => self.recover_expired_locked(session, head).await,
+            Fetched::Expired { head } => match deferred.into_values().next() {
+                Some(err) => Err(err),
+                None => self.recover_expired_locked(session, head).await,
+            },
         }
+    }
+
+    /// Parks the messages of the `deferred` groups, whose own pending commit
+    /// is not settled yet, and returns the other events. They are applied
+    /// once the commit is merged (gim-base drains parked messages) or
+    /// dropped (`Client::apply_parked`).
+    async fn defer_group_events(
+        &self,
+        events: Vec<HubEvent>,
+        deferred: &BTreeMap<GroupId, ClientError>,
+    ) -> Result<Vec<HubEvent>> {
+        if deferred.is_empty() {
+            return Ok(events);
+        }
+        let (held, events): (Vec<HubEvent>, Vec<HubEvent>) = events.into_iter().partition(|e| {
+            matches!(e, HubEvent::Group(IncomingEvent::Message(m)) if deferred.contains_key(&m.group_id))
+        });
+        if !held.is_empty() {
+            tracing::debug!(
+                count = held.len(),
+                "holding back messages of groups with a pending commit"
+            );
+            self.run(move |store, _| {
+                store.transaction(|txn| {
+                    for event in held {
+                        if let HubEvent::Group(IncomingEvent::Message(m)) = event {
+                            if !txn.group_cursor(&m.group_id)?.contains(m.seq) {
+                                txn.park_message(&m)?;
+                            }
+                        }
+                    }
+                    Ok(())
+                })
+            })
+            .await?;
+        }
+        Ok(events)
+    }
+
+    /// Applies the group's parked messages again, e.g. after its pending
+    /// commit was dropped; those still not applicable are parked again.
+    pub(crate) async fn apply_parked(&self, session: &Session, group_id: &GroupId) -> Result<()> {
+        let gid = group_id.clone();
+        let parked = self
+            .run(move |store, _| Ok(store.parked_messages(&gid)?))
+            .await?;
+        if parked.is_empty() {
+            return Ok(());
+        }
+        // Applied ones are unparked by gim-base's next drain.
+        let events = parked.into_iter().map(IncomingEvent::Message).collect();
+        self.apply_group_events(session, events).await.map(drop)
     }
 
     /// Resyncs after an expired cursor: joins the groups of the pending
@@ -410,7 +496,8 @@ impl<S: StateStore + 'static> Client<S> {
         let mut joined = BTreeSet::new();
         let mut events = Vec::new();
         for chat in chats {
-            if chat.membership != Membership::Joined {
+            // A leaving device is still a member.
+            if chat.membership == Membership::Left {
                 continue;
             }
             joined.insert(chat.group_id.clone());
@@ -619,6 +706,16 @@ impl<S: StateStore + 'static> Client<S> {
                     }
                     Err(err) => return Err(err),
                 },
+                HubEvent::HostingRecordExpiring {
+                    user_id,
+                    expires_at_ms,
+                    seq,
+                } => {
+                    if user_id == session.device.user_id {
+                        tracing::info!(seq, expires_at_ms, "hosting record expiring; renewing");
+                        self.inner.hosting_wake.notify_one();
+                    }
+                }
             }
         }
         self.record_revoked(session, revoked).await?;
@@ -643,7 +740,7 @@ impl<S: StateStore + 'static> Client<S> {
     /// fetching the DeviceLists of the devices they refer to that are not
     /// known yet. Broadcasts the changes, acknowledges the applied Welcomes
     /// and replenishes KeyPackages if asked to.
-    async fn apply_group_events(
+    pub(crate) async fn apply_group_events(
         &self,
         session: &Session,
         events: Vec<IncomingEvent>,
@@ -817,7 +914,7 @@ impl<S: StateStore + 'static> Client<S> {
                 .run(move |store, _| {
                     let joined = store
                         .chat(&gid)?
-                        .is_some_and(|c| c.membership == Membership::Joined);
+                        .is_some_and(|c| c.membership != Membership::Left);
                     let parked: BTreeSet<u64> = store
                         .parked_messages(&gid)?
                         .into_iter()

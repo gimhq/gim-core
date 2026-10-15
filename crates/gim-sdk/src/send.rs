@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use gim_base::model::{ChatKind, PendingMedia, StateChange};
+use gim_base::model::{ChatKind, Membership, PendingMedia, StateChange};
 use gim_base::{new_message_id, BaseClient, BaseError, StateStore};
 use gim_common::{now_ms, GroupId, MessageId};
 use gim_crypto::encrypt_envelope;
@@ -61,7 +61,7 @@ impl<S: StateStore + 'static> Client<S> {
             .run(move |store, _| base.enqueue_media(store, &gid, media, reply_to, now_ms()))
             .await?;
         self.emit(&changes);
-        self.flush_outbox().await?;
+        self.flush_and_wake().await?;
         Ok(message_id)
     }
 
@@ -222,7 +222,7 @@ impl<S: StateStore + 'static> Client<S> {
             .run(move |store, _| base.enqueue(store, &gid, content, reply_to, now_ms()))
             .await?;
         self.emit(&changes);
-        self.flush_outbox().await?;
+        self.flush_and_wake().await?;
         Ok(message_id)
     }
 
@@ -249,12 +249,17 @@ impl<S: StateStore + 'static> Client<S> {
     ) -> Result<()> {
         let _guard = self.inner.group_lock.lock().await;
         self.settle_commit(session, group_id).await?;
+        self.commit_proposals_before_send(session, group_id).await?;
         let envelope = Envelope::new(new_message_id()?, now_ms(), Content::Typing { active });
         let gid = group_id.clone();
         let payload = self
             .run(move |store, engine| {
-                if store.chat(&gid)?.is_none() {
-                    return Err(BaseError::NotFound(format!("chat {gid}")));
+                match store.chat(&gid)? {
+                    None => return Err(BaseError::NotFound(format!("chat {gid}"))),
+                    Some(chat) if chat.membership != Membership::Joined => {
+                        return Err(BaseError::InvalidState(format!("chat {gid} is not joined")))
+                    }
+                    Some(_) => {}
                 }
                 store.transaction(|txn| Ok(encrypt_envelope(engine, &*txn, &gid, &envelope)?))
             })

@@ -15,6 +15,10 @@ pub enum ChatKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Membership {
     Joined,
+    /// This device asked to leave (a [`PendingLeave`]) and stays an MLS
+    /// member until another member commits its removal; nothing can be
+    /// sent meanwhile.
+    Leaving,
     /// This device was removed; history is kept.
     Left,
 }
@@ -259,6 +263,23 @@ pub struct PendingCommit {
 pub struct PendingWelcome {
     pub payload: Vec<u8>,
     pub recipients: Vec<DeviceRef>,
+}
+
+/// This device's Remove proposal for its own leaf, kept while the chat is
+/// [`Membership::Leaving`]: re-posted (same bytes and `client_id`) while
+/// its outcome is unknown, and replaced by a fresh one when the epoch
+/// advances without removing this device. One per group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingLeave {
+    pub group_id: GroupId,
+    pub client_id: ClientId,
+    /// Epoch the proposal was created in.
+    pub epoch: u64,
+    pub payload: Vec<u8>,
+    /// Proposals created since leaving started (or the client started).
+    pub attempts: u32,
+    /// The hub accepted this proposal.
+    pub accepted: bool,
 }
 
 /// A device that left a group (a self-remove proposal, or a hub-side

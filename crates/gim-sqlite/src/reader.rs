@@ -5,13 +5,15 @@ use std::collections::BTreeSet;
 
 use gim_base::model::{
     Chat, DepartedMember, GroupCursor, GroupMessage, MediaCacheEntry, MembershipChangeKind,
-    MembershipEvent, Message, OutboxEntry, OutboxState, PendingCommit, UserInfo,
+    MembershipEvent, Message, OutboxEntry, OutboxState, PendingCommit, PendingLeave, UserInfo,
 };
 use gim_base::{StateReader, StoreError};
 use gim_common::{DeviceRef, GroupId, MessageId, UserId};
 use rusqlite::{params, Connection, Params, Row};
 
-use crate::rows::{decode, ChatData, MessageData, OutboxData, ParkedData, PendingCommitData};
+use crate::rows::{
+    decode, ChatData, MessageData, OutboxData, ParkedData, PendingCommitData, PendingLeaveData,
+};
 
 type StoreResult<T> = Result<T, StoreError>;
 
@@ -168,6 +170,17 @@ impl Reader<'_> {
     ) -> StoreResult<Vec<PendingCommit>> {
         self.query(sql, params, |row| {
             let data: PendingCommitData = decode(&get::<Vec<u8>>(row, 1)?)?;
+            Ok(data.into_model(group_id(get(row, 0)?)?))
+        })
+    }
+
+    fn pending_leaves_where(
+        &self,
+        sql: &str,
+        params: impl Params,
+    ) -> StoreResult<Vec<PendingLeave>> {
+        self.query(sql, params, |row| {
+            let data: PendingLeaveData = decode(&get::<Vec<u8>>(row, 1)?)?;
             Ok(data.into_model(group_id(get(row, 0)?)?))
         })
     }
@@ -366,6 +379,22 @@ impl StateReader for Reader<'_> {
     fn pending_commits(&self) -> StoreResult<Vec<PendingCommit>> {
         self.pending_commits_where(
             "SELECT group_id, data FROM pending_commits ORDER BY group_id",
+            [],
+        )
+    }
+
+    fn pending_leave(&self, group_id: &GroupId) -> StoreResult<Option<PendingLeave>> {
+        Ok(self
+            .pending_leaves_where(
+                "SELECT group_id, data FROM pending_leaves WHERE group_id = ?1",
+                [group_id.as_str()],
+            )?
+            .pop())
+    }
+
+    fn pending_leaves(&self) -> StoreResult<Vec<PendingLeave>> {
+        self.pending_leaves_where(
+            "SELECT group_id, data FROM pending_leaves ORDER BY group_id",
             [],
         )
     }

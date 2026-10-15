@@ -58,8 +58,9 @@ Error       { ErrorCode code; string message; optional uint64 current_epoch; str
 
 - `request_id` is echoed back for correlation and logging; it is not an idempotency key.
 - A response sets exactly one of `result` (same field number as the request op) or `error`.
-- Field numbers 18-39 of both oneofs are reserved for multi-homing (M2c) and push (P) operations;
-  40-49 hold federation (M2b) operations (`Hello` = 40, `NotifyDeviceList` = 41).
+- Field numbers 18-29 of both oneofs hold multi-homing (M2c) operations (`NotifyHostingRecord` =
+  18, `SeedReplica` = 19, `CopyPendingWelcomes` = 20; 21-29 reserved); 30-39 are reserved for push
+  (P) operations; 40-49 hold federation (M2b) operations (`Hello` = 40, `NotifyDeviceList` = 41).
 - `Error.current_epoch` is set with `STALE_EPOCH` / `CONFLICT`: the group's current epoch at the
   owning hub. `Error.client_code` is the client API error code a member hub should surface when the
   owning hub rejected on behalf of group policy or validation (e.g. `not_member`, `forbidden`,
@@ -110,6 +111,9 @@ Every operation except `Hello` first requires a binding and the policy's admissi
 | `GetDeviceList` | any hub -> user's hub | `user_id` -> `device_list_cbor` (gim-core `DeviceList`) | Federation policy only (public, signed object). |
 | `GetHostingRecord` | any hub -> user's hub | `user_id` -> `hosting_record_cbor` (gim-core `UserHostingRecord`) | Federation policy only (public, signed object); fallback is the DHT. |
 | `NotifyDeviceList` | user's hub -> hubs sharing groups with the user | `user_id, device_list_cbor` -> `{}` | Caller listed for `user_id`. The receiver verifies the DeviceList and applies the seq rules to its cached copy. |
+| `NotifyHostingRecord` | a user's hub (under the new or the superseded record) -> co-hosts, removed hubs, owners and member hubs sharing groups with the user | `user_id, hosting_record_cbor` -> `{}` | Caller listed in the sent record or in the stored record it supersedes. Fails with `UNAUTHORIZED`, or `INVALID` when the record does not verify. The answer is `{}` for an applied, stale or identical record. |
+| `SeedReplica` | owning hub -> a hub newly listed for a member | `gid, user_id, group` -> `{}` | Caller owns `gid`; responder hosts `user_id`; `user_id` is in `group.members`. Fails with `UNAUTHORIZED`, `NOT_FOUND`, `INVALID`. |
+| `CopyPendingWelcomes` | co-host -> newly listed hub | `user_id, welcomes: [PendingWelcome{device_id, gid, message_id, payload_json, created_at}]` -> `{}` | Caller listed for `user_id`; responder hosts `user_id`. Fails with `UNAUTHORIZED`, `NOT_FOUND`. |
 
 Notes:
 
@@ -131,6 +135,11 @@ Notes:
   API's `CommitResult.epoch`); `SubmitMessageResponse.epoch` is the message's epoch. Both responses
   carry `message`, the `SequencedMessage` as it appears in `Deliver` / `FetchLog`, so the member hub
   can apply it to its replica immediately.
+- `SubmitCommitRequest.welcome` and `DeliverWelcomeRequest.welcome` hold a TLS-encoded MLSMessage
+  (wire_format = mls_welcome) carrying a Welcome, as raw bytes. The receiver checks this framing
+  (not the encrypted contents) and refuses anything else with `INVALID`, storing nothing; a member
+  hub checks a client's `welcome` before forwarding it. `CopyPendingWelcomes` skips a
+  `PendingWelcome` whose `payload_json` has no `welcome` field holding the base64 of such a message.
 - `DeliverWelcomeRequest.group` is a `GroupSnapshot` (kind, creator, `created_at`, epoch after the
   Commit, `seq` of the Commit, roster after the Commit) from which the invitee's hub creates its
   replica; `sender_device_id` is the committing device.
@@ -148,6 +157,9 @@ Notes:
   last-resort KeyPackage, returned only when no one-time KeyPackage is left.
 - `FetchLog` returns messages with `seq >= from_seq`, at most `limit` (the owning hub may cap
   lower). Continue with `from_seq = next_seq` until `complete = true`.
+- The multi-homing operations (`NotifyHostingRecord`, `SeedReplica`, `CopyPendingWelcomes`) are
+  specified in [`multihoming.md`](multihoming.md) §4.2-§4.4. All three are served with
+  federation.
 
 ## Error codes
 
@@ -160,7 +172,7 @@ Notes:
 | `CONFLICT` | A Commit whose epoch already has a sequenced Commit; `current_epoch` is set. | Client fetches the latest state and retries on top of it. |
 | `GONE` | The requested log range was pruned. | Re-join or resync from a newer `seq`. |
 | `RATE_LIMITED` | Caller exceeded a rate limit. | Retry with exponential backoff. |
-| `INVALID` | Malformed request: bad gid, unparsable MLS framing, handshake not a `PublicMessage`, invalid member credential, missing required field. | Do not retry unchanged. |
+| `INVALID` | Malformed request: bad gid, unparsable MLS framing, handshake not a `PublicMessage`, `welcome` not an MLSMessage carrying a Welcome, invalid member credential, missing required field. | Do not retry unchanged. |
 | `INTERNAL` | Unexpected failure on the responder. | Retry with exponential backoff. |
 | `HELLO_REQUIRED` | The calling PeerID is not bound to a `hub_id` (no valid `Hello` on this PeerID, or its runtime certificate expired). | Send `Hello`, then retry once. |
 
@@ -186,6 +198,8 @@ hub of a multi-homed user.
   `seq` / `epoch` with `duplicate = true`.
 - `Deliver`, `DeliverWelcome`: receivers dedup by `message_id` (and by `(gid, seq)` for
   `Deliver`); a repeat is acknowledged without being stored twice.
+- `SeedReplica` and `CopyPendingWelcomes` are idempotent (receiver ignores a seed for a live
+  replica and dedups Welcomes by `message_id`); `NotifyHostingRecord` follows the record seq rules.
 - `ClaimKeyPackage` is not idempotent: each successful call consumes one-time KeyPackages.
 - `FetchLog`, `GetDeviceList`, `GetHostingRecord` are read-only.
 
@@ -203,8 +217,9 @@ hub of a multi-homed user.
 
 ## Extensibility
 
-- Request/response oneof fields 18-29 are reserved for multi-homing (M2c), e.g. hub add/remove
-  and migration hand-off; 30-39 for push (P); 40-49 are federation (M2b) operations.
+- Request/response oneof fields 18-29 are multi-homing (M2c) operations (`NotifyHostingRecord`,
+  `SeedReplica`, `CopyPendingWelcomes` = 18-20; 21-29 reserved); 30-39 for push (P); 40-49 are
+  federation (M2b) operations.
 - Per-message reserved ranges (`SubmitCommitRequest` 9-15, `SubmitMessageRequest` 6-15,
   `DeliverWelcomeRequest` 8-15, `SequencedMessage` 12-19) hold future delivery-strategy hints,
   push collapse ids and priorities.
