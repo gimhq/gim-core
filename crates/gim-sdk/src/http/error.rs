@@ -30,8 +30,11 @@ pub(super) fn from_status(status: StatusCode, body: &[u8]) -> TransportError {
 
 /// Maps a failed send or body read. Undecodable bodies are the server's
 /// fault; everything else (connect, TLS, timeout, reset) is a retryable
-/// [`TransportError::Network`].
-pub(super) fn from_reqwest(err: reqwest::Error) -> TransportError {
+/// [`TransportError::Network`]. The URL in the message loses its query.
+pub(super) fn from_reqwest(mut err: reqwest::Error) -> TransportError {
+    if let Some(url) = err.url_mut() {
+        url.set_query(None);
+    }
     let mut message = err.to_string();
     let mut source = err.source();
     while let Some(cause) = source {
