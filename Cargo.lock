@@ -952,9 +952,17 @@ dependencies = [
 name = "gim-sdk"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "gim-base",
+ "gim-common",
  "gim-crypto",
  "gim-proto",
+ "gim-sdk",
+ "gim-test",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
