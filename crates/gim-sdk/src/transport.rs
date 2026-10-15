@@ -56,6 +56,14 @@ pub struct GroupInfo {
     pub members: Vec<DeviceRef>,
 }
 
+/// The calling device's KeyPackages on the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyPackageCount {
+    /// Unclaimed one-time KeyPackages.
+    pub available: u64,
+    pub has_last_resort: bool,
+}
+
 /// A message to post to a group.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutgoingMessage {
@@ -154,6 +162,8 @@ pub trait Transport: Send + Sync {
         last_resort: Option<Vec<u8>>,
     ) -> TransportResult<()>;
 
+    async fn key_package_count(&self, token: &AccessToken) -> TransportResult<KeyPackageCount>;
+
     /// Claims one KeyPackage of `device`; `NotFound` if it has none.
     async fn claim_key_package(
         &self,
@@ -175,6 +185,9 @@ pub trait Transport: Send + Sync {
         token: &AccessToken,
         group_id: &GroupId,
     ) -> TransportResult<GroupInfo>;
+
+    /// The groups whose fan-out list has the calling device.
+    async fn list_groups(&self, token: &AccessToken) -> TransportResult<Vec<GroupInfo>>;
 
     async fn add_group_members(
         &self,
