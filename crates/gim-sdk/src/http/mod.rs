@@ -25,8 +25,8 @@ use tokio_util::io::ReaderStream;
 
 use crate::stream::ws;
 use crate::transport::{
-    AccessToken, EventBatch, EventStream, GroupInfo, OutgoingMessage, PostError, Registration,
-    Transport, TransportError, TransportResult,
+    AccessToken, EventBatch, EventStream, GroupInfo, KeyPackageCount, OutgoingMessage, PostError,
+    Registration, Transport, TransportError, TransportResult,
 };
 
 pub use reqwest::Url;
@@ -351,6 +351,15 @@ impl Transport for HttpTransport {
         Ok(())
     }
 
+    async fn key_package_count(&self, token: &AccessToken) -> TransportResult<KeyPackageCount> {
+        let count: dto::KeyPackageCount =
+            Self::json(self.api(Method::GET, paths::KEY_PACKAGES_COUNT, Some(token))).await?;
+        Ok(KeyPackageCount {
+            available: count.available,
+            has_last_resort: count.has_last_resort,
+        })
+    }
+
     async fn claim_key_package(
         &self,
         token: &AccessToken,
@@ -399,6 +408,14 @@ impl Transport for HttpTransport {
         group_id: &GroupId,
     ) -> TransportResult<GroupInfo> {
         self.fetch_group(token, group_id).await
+    }
+
+    async fn list_groups(&self, token: &AccessToken) -> TransportResult<Vec<GroupInfo>> {
+        let list: dto::GroupList =
+            Self::json(self.api(Method::GET, paths::GROUPS, Some(token))).await?;
+        let groups: Vec<GroupInfo> = list.groups.into_iter().map(convert::group).collect();
+        self.remember(groups.iter().flat_map(|g| &g.members));
+        Ok(groups)
     }
 
     async fn add_group_members(
