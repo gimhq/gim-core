@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use futures_util::StreamExt;
+
 use crate::{GimError, TaskHandle, TimelineItem};
 
 /// Incremental change to a timeline, mirroring eyeball-im `VectorDiff`.
@@ -28,31 +30,44 @@ pub trait TimelineListener: Send + Sync {
 /// The message timeline of one chat.
 #[derive(uniffi::Object)]
 pub struct Timeline {
-    chat_id: String,
+    inner: Arc<gim_ui::Timeline>,
 }
 
 impl Timeline {
-    pub(crate) fn new(chat_id: String) -> Self {
-        Self { chat_id }
+    pub(crate) fn new(inner: gim_ui::Timeline) -> Self {
+        Self {
+            inner: Arc::new(inner),
+        }
     }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
 impl Timeline {
     pub fn chat_id(&self) -> String {
-        self.chat_id.clone()
+        self.inner.group_id().to_string()
     }
 
     /// Subscribes to timeline changes. The first callback is a `Reset` with
     /// the currently loaded items.
     pub async fn add_listener(&self, listener: Arc<dyn TimelineListener>) -> Arc<TaskHandle> {
-        Arc::new(TaskHandle::idle(listener))
+        let inner = self.inner.clone();
+        let (values, stream) = inner.items();
+        Arc::new(TaskHandle::spawn(async move {
+            // Keeps the timeline following the client.
+            let _inner = inner;
+            listener.on_update(vec![TimelineDiff::Reset {
+                values: values.into_iter().map(Into::into).collect(),
+            }]);
+            let mut stream = std::pin::pin!(stream);
+            while let Some(diffs) = stream.next().await {
+                listener.on_update(diffs.into_iter().map(Into::into).collect());
+            }
+        }))
     }
 
     /// Loads up to `count` older items into the timeline (delivered through
     /// the listeners). Returns whether more history exists.
     pub async fn paginate_backwards(&self, count: u16) -> Result<bool, GimError> {
-        let _ = count;
-        Err(GimError::NotImplemented)
+        Ok(self.inner.paginate_backwards(count).await?)
     }
 }
