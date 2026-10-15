@@ -1,17 +1,20 @@
 //! The async client of one device.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use gim_base::model::{ChatKind, IncomingEvent, Membership, MessageKind, StateChange, UserInfo};
 use gim_base::{new_message_id, BaseClient, BaseError, StateReader, StateStore, StoreTxn};
 use gim_common::{now_ms, ClientId, DeviceRef, GroupId, MessageId, UserId};
-use gim_crypto::{CommitOutput, MlsEngine};
+use gim_crypto::MlsEngine;
 use gim_proto::envelope::Content;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, Mutex, Notify};
 
+use crate::send::TypingState;
 use crate::transport::{AccessToken, OutgoingMessage, PostError, Transport, TransportError};
 use crate::{ClientError, Result, SecretStorage};
 
@@ -19,11 +22,17 @@ use crate::{ClientError, Result, SecretStorage};
 pub const KEY_PACKAGE_BATCH: u32 = 100;
 /// Retries of a commit rejected because another commit won the epoch.
 pub const MAX_COMMIT_RETRIES: u32 = 3;
+/// Posts of the same commit (same `client_id`) while its outcome is
+/// unknown, before the call gives up and keeps it pending.
+pub const COMMIT_POST_ATTEMPTS: u32 = 3;
 /// [`SecretStorage`] key of the serialized [`Session`].
 pub const SESSION_SECRET_KEY: &str = "gim.session";
 
 /// Buffered [`StateChange`]s per subscriber before it lags.
 const CHANGES_CAPACITY: usize = 1024;
+/// Delay before re-posting a commit after an unknown outcome, times the
+/// attempt number.
+const COMMIT_REPOST_DELAY: Duration = Duration::from_millis(100);
 
 /// A registered device: who it is and its bearer token. Persisted in
 /// [`SecretStorage`]; the MLS signature key lives in the store.
@@ -38,6 +47,7 @@ pub struct ClientBuilder<S> {
     store: Arc<S>,
     transport: Arc<dyn Transport>,
     secrets: Arc<dyn SecretStorage>,
+    data_dir: Option<PathBuf>,
 }
 
 impl<S: StateStore + 'static> ClientBuilder<S> {
@@ -50,7 +60,15 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
             store,
             transport,
             secrets,
+            data_dir: None,
         }
+    }
+
+    /// Directory for temporary media files (encrypted uploads, partial
+    /// downloads). Defaults to `gim-sdk` under the system temp directory.
+    pub fn data_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.data_dir = Some(dir.into());
+        self
     }
 
     /// A client without a session; call [`Client::register`] or
@@ -65,6 +83,15 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
                 session: RwLock::new(None),
                 changes: broadcast::channel(CHANGES_CAPACITY).0,
                 group_lock: Mutex::new(()),
+                data_dir: self
+                    .data_dir
+                    .unwrap_or_else(|| std::env::temp_dir().join("gim-sdk")),
+                flush_lock: Mutex::new(()),
+                outbox_wake: Notify::new(),
+                force_flush: AtomicBool::new(false),
+                pending_commits: Default::default(),
+                departed: Default::default(),
+                typing: Default::default(),
             }),
         }
     }
@@ -72,7 +99,7 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
 
 /// The client of one device. Cheap to clone; clones share all state.
 pub struct Client<S> {
-    inner: Arc<Inner<S>>,
+    pub(crate) inner: Arc<Inner<S>>,
 }
 
 impl<S> Clone for Client<S> {
@@ -83,9 +110,9 @@ impl<S> Clone for Client<S> {
     }
 }
 
-struct Inner<S> {
+pub(crate) struct Inner<S> {
     store: Arc<S>,
-    transport: Arc<dyn Transport>,
+    pub(crate) transport: Arc<dyn Transport>,
     secrets: Arc<dyn SecretStorage>,
     engine: MlsEngine,
     session: RwLock<Option<Session>>,
@@ -93,13 +120,59 @@ struct Inner<S> {
     /// Serializes everything that touches MLS group state (sync, commits,
     /// sends): a pending commit must not meet an incoming commit or an
     /// outgoing application message.
-    group_lock: Mutex<()>,
+    pub(crate) group_lock: Mutex<()>,
+    pub(crate) data_dir: PathBuf,
+    /// Serializes outbox passes, so a media upload is never done twice.
+    pub(crate) flush_lock: Mutex<()>,
+    pub(crate) outbox_wake: Notify,
+    /// Set when the network came back: the next pass ignores backoff.
+    pub(crate) force_flush: AtomicBool,
+    /// Commits whose outcome is not known yet, by group.
+    pending_commits: std::sync::Mutex<HashMap<GroupId, PendingCommit>>,
+    /// Devices dropped from a group's fan-out list that may still be in
+    /// the MLS tree, by group.
+    departed: std::sync::Mutex<BTreeMap<GroupId, BTreeSet<DeviceRef>>>,
+    pub(crate) typing: std::sync::Mutex<HashMap<GroupId, TypingState>>,
 }
 
 #[derive(Clone)]
 enum CommitOp {
-    Add(Vec<Vec<u8>>),
-    Remove(Vec<DeviceRef>),
+    Add(Vec<(DeviceRef, Vec<u8>)>),
+    /// `fan_out`: also drop the removed devices from the fan-out list once
+    /// the commit is accepted.
+    Remove {
+        devices: Vec<DeviceRef>,
+        fan_out: bool,
+    },
+}
+
+/// A commit posted (or about to be) whose acceptance is not confirmed, and
+/// what has to follow it. Re-posted with the same `client_id` until the
+/// server answers definitively.
+struct PendingCommit {
+    message: OutgoingMessage,
+    merged: bool,
+    then: AfterCommit,
+}
+
+#[derive(Clone)]
+enum AfterCommit {
+    Nothing,
+    Welcome(OutgoingMessage),
+    RemoveFromFanOut(Vec<DeviceRef>),
+}
+
+enum Resolved {
+    /// No pending commit for the group.
+    None,
+    Accepted,
+    /// Another commit won the epoch; the pending commit was dropped.
+    Conflict,
+}
+
+/// Whether the server may have accepted a request that failed this way.
+pub(crate) fn outcome_unknown(err: &TransportError) -> bool {
+    matches!(err, TransportError::Network(_) | TransportError::Server(_))
 }
 
 impl<S: StateStore + 'static> Client<S> {
@@ -239,9 +312,13 @@ impl<S: StateStore + 'static> Client<S> {
             .transport
             .add_group_members(&session.token, group_id, &devices)
             .await?;
-        let added = self.add_devices(&session, group_id, key_packages).await;
-        if added.is_err() {
-            // Best effort: the original error is what matters.
+        let added = self
+            .commit(&session, group_id, CommitOp::Add(key_packages))
+            .await
+            .map(drop);
+        if added.is_err() && !self.has_pending_commit(group_id) {
+            // The commit definitely failed. Best effort: the original error
+            // is what matters.
             let _ = self
                 .inner
                 .transport
@@ -264,13 +341,13 @@ impl<S: StateStore + 'static> Client<S> {
         if devices.is_empty() {
             return Err(ClientError::InvalidInput("no member to remove".into()));
         }
-        self.commit(&session, group_id, CommitOp::Remove(devices.clone()))
-            .await?;
-        // After the commit, so the removed devices still receive it.
-        self.inner
-            .transport
-            .remove_group_members(&session.token, group_id, &devices)
-            .await?;
+        // The removed devices leave the fan-out list after the commit, so
+        // they still receive it.
+        let op = CommitOp::Remove {
+            devices,
+            fan_out: true,
+        };
+        self.commit(&session, group_id, op).await?;
         Ok(())
     }
 
@@ -310,53 +387,11 @@ impl<S: StateStore + 'static> Client<S> {
         Ok(())
     }
 
-    /// Queues `content` and makes one attempt to post it. A failed attempt
-    /// leaves the entry in the outbox (`Pending` for a retryable error,
-    /// `Failed` otherwise); the returned id is also the `client_id`.
+    /// Queues `content` and runs an outbox pass (see
+    /// [`Client::flush_outbox`]); a failed post leaves the entry to the
+    /// outbox sender. The returned id is also the `client_id`.
     pub async fn send(&self, group_id: &GroupId, content: Content) -> Result<MessageId> {
-        let session = self.require_session()?;
-        let _guard = self.inner.group_lock.lock().await;
-        let base = BaseClient::new(session.device.clone());
-        let (gid, b) = (group_id.clone(), base.clone());
-        let (message_id, changes) = self
-            .run(move |store, _| b.enqueue(store, &gid, content, None, now_ms()))
-            .await?;
-        self.emit(&changes);
-        let (id, b) = (message_id.clone(), base.clone());
-        let prepared = self
-            .run(move |store, engine| b.prepare(store, engine, &id))
-            .await?;
-        let message = OutgoingMessage {
-            client_id: ClientId::new(message_id.as_str()).expect("message ids are client ids"),
-            epoch: prepared.epoch,
-            kind: MessageKind::Application,
-            payload: prepared.payload,
-            recipients: vec![],
-        };
-        let posted = self
-            .inner
-            .transport
-            .post_message(&session.token, group_id, message)
-            .await;
-        let id = message_id.clone();
-        let changes = match posted {
-            Ok(seq) => {
-                self.mark_applied(group_id, seq).await?;
-                self.run(move |store, _| base.mark_sent(store, &id, seq))
-                    .await?
-            }
-            Err(err) => {
-                let retryable = matches!(
-                    err,
-                    PostError::Transport(TransportError::Network(_) | TransportError::Server(_))
-                );
-                let error = err.to_string();
-                self.run(move |store, _| base.mark_failed(store, &id, &error, retryable, now_ms()))
-                    .await?
-            }
-        };
-        self.emit(&changes);
-        Ok(message_id)
+        self.send_with_reply(group_id, content, None).await
     }
 
     /// Fetches the pending events once (no waiting), applies them, persists
@@ -365,7 +400,11 @@ impl<S: StateStore + 'static> Client<S> {
     pub async fn sync_once(&self) -> Result<Vec<StateChange>> {
         let session = self.require_session()?;
         let _guard = self.inner.group_lock.lock().await;
-        self.sync_locked(&session).await
+        let changes = self.sync_locked(&session).await?;
+        self.remove_departed(&session).await?;
+        // Delivered receipts may have been queued.
+        self.wake_outbox();
+        Ok(changes)
     }
 
     /// Generates and uploads [`KEY_PACKAGE_BATCH`] one-time KeyPackages.
@@ -396,109 +435,274 @@ impl<S: StateStore + 'static> Client<S> {
             .await?;
         self.emit(&changes);
         if !key_packages.is_empty() {
-            self.add_devices(&session, &group_id, key_packages).await?;
+            self.commit(&session, &group_id, CommitOp::Add(key_packages))
+                .await?;
         }
         Ok(group_id)
     }
 
-    /// Commits adding the devices, then sends them the Welcome. The devices
-    /// must already be on the fan-out list.
-    async fn add_devices(
-        &self,
-        session: &Session,
-        group_id: &GroupId,
-        key_packages: Vec<(DeviceRef, Vec<u8>)>,
-    ) -> Result<()> {
-        let (recipients, key_packages): (Vec<_>, Vec<_>) = key_packages.into_iter().unzip();
-        let output = self
-            .commit(session, group_id, CommitOp::Add(key_packages))
-            .await?;
-        let welcome = OutgoingMessage {
-            client_id: new_client_id()?,
-            epoch: output.epoch + 1,
-            kind: MessageKind::Welcome,
-            payload: output.welcome.expect("an add commit has a Welcome"),
-            recipients,
-        };
-        let seq = self
-            .inner
-            .transport
-            .post_message(&session.token, group_id, welcome)
-            .await?;
-        self.mark_applied(group_id, seq).await
-    }
-
-    /// Creates a commit, posts it and merges it once accepted. On an epoch
-    /// conflict the commit is dropped, the competing commit synced, and the
-    /// commit recreated, up to [`MAX_COMMIT_RETRIES`] times.
-    async fn commit(
-        &self,
-        session: &Session,
-        group_id: &GroupId,
-        op: CommitOp,
-    ) -> Result<CommitOutput> {
-        let base = BaseClient::new(session.device.clone());
+    /// Creates a commit, posts it and merges it once accepted, then does
+    /// what follows it (Welcome, fan-out removal). On an epoch conflict the
+    /// commit is dropped, the competing commit synced, and the commit
+    /// recreated, up to [`MAX_COMMIT_RETRIES`] times. Returns `false` if
+    /// there was nothing to commit (devices to remove already gone).
+    ///
+    /// If the outcome stays unknown (network errors), the commit is kept
+    /// pending and re-posted with the same `client_id` before the next
+    /// sync, commit or send of the group.
+    async fn commit(&self, session: &Session, group_id: &GroupId, op: CommitOp) -> Result<bool> {
         let mut attempt = 0;
         loop {
             attempt += 1;
+            self.resolve_pending_commit(session, group_id).await?;
             let (gid, op) = (group_id.clone(), op.clone());
-            let output = self
+            let created = self
                 .run(move |store, engine| {
-                    store.transaction(|txn| {
-                        Ok(match &op {
-                            CommitOp::Add(key_packages) => {
-                                engine.add_members(&*txn, &gid, key_packages)?
+                    store.transaction(|txn| match op {
+                        CommitOp::Add(key_packages) => {
+                            let (recipients, key_packages): (Vec<_>, Vec<_>) =
+                                key_packages.into_iter().unzip();
+                            let output = engine.add_members(&*txn, &gid, &key_packages)?;
+                            let then = AfterCommit::Welcome(OutgoingMessage {
+                                client_id: new_client_id()?,
+                                epoch: output.epoch + 1,
+                                kind: MessageKind::Welcome,
+                                payload: output.welcome.clone().expect("an add commit has a Welcome"),
+                                recipients,
+                            });
+                            Ok(Some((output, then)))
+                        }
+                        CommitOp::Remove { devices, fan_out } => {
+                            let members = engine.group_members(&*txn, &gid)?;
+                            let devices: Vec<DeviceRef> =
+                                devices.into_iter().filter(|d| members.contains(d)).collect();
+                            if devices.is_empty() {
+                                return Ok(None);
                             }
-                            CommitOp::Remove(devices) => {
-                                engine.remove_members(&*txn, &gid, devices)?
-                            }
-                        })
+                            let output = engine.remove_members(&*txn, &gid, &devices)?;
+                            let then = if fan_out {
+                                AfterCommit::RemoveFromFanOut(devices)
+                            } else {
+                                AfterCommit::Nothing
+                            };
+                            Ok(Some((output, then)))
+                        }
                     })
                 })
                 .await?;
+            let Some((output, then)) = created else {
+                return Ok(false);
+            };
             let message = OutgoingMessage {
                 client_id: new_client_id()?,
                 epoch: output.epoch,
                 kind: MessageKind::Commit,
-                payload: output.commit.clone(),
+                payload: output.commit,
                 recipients: vec![],
             };
-            let posted = self
-                .inner
-                .transport
-                .post_message(&session.token, group_id, message)
-                .await;
-            let (gid, b) = (group_id.clone(), base.clone());
-            let err = match posted {
-                Ok(seq) => {
-                    let changes = self
-                        .run(move |store, engine| b.merge_own_commit(store, engine, &gid, seq))
-                        .await?;
-                    self.emit(&changes);
-                    return Ok(output);
-                }
-                Err(err) => err,
-            };
-            // Not accepted (or unknown): the commit must not stay pending.
-            // A network error after the server accepted it is not
-            // recovered here.
-            self.run(move |store, engine| {
-                store.transaction(|txn| Ok(engine.clear_pending_commit(&*txn, &gid)?))
-            })
-            .await?;
-            match err {
-                PostError::EpochConflict { .. } if attempt <= MAX_COMMIT_RETRIES => {
+            self.pending_commits().insert(
+                group_id.clone(),
+                PendingCommit {
+                    message,
+                    merged: false,
+                    then,
+                },
+            );
+            match self.resolve_pending_commit(session, group_id).await? {
+                Resolved::Accepted | Resolved::None => return Ok(true),
+                Resolved::Conflict if attempt <= MAX_COMMIT_RETRIES => {
                     self.sync_locked(session).await?;
                 }
-                PostError::EpochConflict { .. } => {
-                    return Err(ClientError::CommitConflict(attempt))
-                }
-                PostError::Transport(err) => return Err(err.into()),
+                Resolved::Conflict => return Err(ClientError::CommitConflict(attempt)),
             }
         }
     }
 
+    /// Settles the group's pending commit, if any: posts it (again, same
+    /// `client_id`), merges it once accepted and does what follows it.
+    /// Unknown outcomes keep it pending and return the error; a conflict
+    /// or a definitive rejection drops it.
+    async fn resolve_pending_commit(
+        &self,
+        session: &Session,
+        group_id: &GroupId,
+    ) -> Result<Resolved> {
+        let Some((message, merged, then)) = self
+            .pending_commits()
+            .get(group_id)
+            .map(|p| (p.message.clone(), p.merged, p.then.clone()))
+        else {
+            return Ok(Resolved::None);
+        };
+        if !merged {
+            match self.post_until_known(session, group_id, message).await {
+                Ok(seq) => {
+                    let (gid, base) = (group_id.clone(), BaseClient::new(session.device.clone()));
+                    let changes = self
+                        .run(move |store, engine| base.merge_own_commit(store, engine, &gid, seq))
+                        .await?;
+                    self.emit(&changes);
+                    if let Some(pending) = self.pending_commits().get_mut(group_id) {
+                        pending.merged = true;
+                    }
+                }
+                Err(PostError::Transport(err)) if outcome_unknown(&err) => {
+                    return Err(err.into())
+                }
+                Err(err) => {
+                    let gid = group_id.clone();
+                    self.run(move |store, engine| {
+                        store.transaction(|txn| Ok(engine.clear_pending_commit(&*txn, &gid)?))
+                    })
+                    .await?;
+                    self.pending_commits().remove(group_id);
+                    return match err {
+                        PostError::EpochConflict { .. } => Ok(Resolved::Conflict),
+                        PostError::Transport(err) => Err(err.into()),
+                    };
+                }
+            }
+        }
+        let followed = match then {
+            AfterCommit::Nothing => Ok(()),
+            AfterCommit::Welcome(welcome) => {
+                match self.post_until_known(session, group_id, welcome).await {
+                    Ok(seq) => self.mark_applied(group_id, seq).await,
+                    Err(err) => Err(err.into()),
+                }
+            }
+            AfterCommit::RemoveFromFanOut(devices) => self
+                .inner
+                .transport
+                .remove_group_members(&session.token, group_id, &devices)
+                .await
+                .map_err(Into::into),
+        };
+        match followed {
+            Err(ClientError::Transport(err)) if outcome_unknown(&err) => Err(err.into()),
+            followed => {
+                self.pending_commits().remove(group_id);
+                followed.map(|()| Resolved::Accepted)
+            }
+        }
+    }
+
+    /// Settles every pending commit; stops at the first error.
+    async fn resolve_pending_commits(&self, session: &Session) -> Result<()> {
+        let groups: Vec<GroupId> = self.pending_commits().keys().cloned().collect();
+        for group_id in groups {
+            self.resolve_pending_commit(session, &group_id).await?;
+        }
+        Ok(())
+    }
+
+    /// Posts `message`, re-posting it while the outcome is unknown, up to
+    /// [`COMMIT_POST_ATTEMPTS`] times. Safe because the server is idempotent
+    /// on `client_id`.
+    async fn post_until_known(
+        &self,
+        session: &Session,
+        group_id: &GroupId,
+        message: OutgoingMessage,
+    ) -> Result<u64, PostError> {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match self
+                .inner
+                .transport
+                .post_message(&session.token, group_id, message.clone())
+                .await
+            {
+                Err(PostError::Transport(err))
+                    if outcome_unknown(&err) && attempt < COMMIT_POST_ATTEMPTS =>
+                {
+                    tokio::time::sleep(COMMIT_REPOST_DELAY * attempt).await;
+                }
+                posted => return posted,
+            }
+        }
+    }
+
+    pub(crate) async fn settle_commit(&self, session: &Session, group_id: &GroupId) -> Result<()> {
+        self.resolve_pending_commit(session, group_id).await.map(drop)
+    }
+
+    pub(crate) fn has_pending_commit(&self, group_id: &GroupId) -> bool {
+        self.pending_commits().contains_key(group_id)
+    }
+
+    fn pending_commits(&self) -> std::sync::MutexGuard<'_, HashMap<GroupId, PendingCommit>> {
+        self.inner
+            .pending_commits
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Commits the MLS removal of devices that left a group by themselves
+    /// (dropped from the fan-out list but still in the tree). Only the
+    /// remaining member with the lowest leaf index does it, so members do
+    /// not race each other.
+    async fn remove_departed(&self, session: &Session) -> Result<()> {
+        let departed = std::mem::take(
+            &mut *self
+                .inner
+                .departed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        );
+        for (group_id, devices) in departed {
+            let (gid, own) = (group_id.clone(), session.device.clone());
+            let to_remove = self
+                .run(move |store, engine| {
+                    let joined = store
+                        .chat(&gid)?
+                        .is_some_and(|c| c.membership == Membership::Joined);
+                    if !joined || !store.transaction(|txn| Ok(engine.has_group(&*txn, &gid)?))? {
+                        return Ok(vec![]);
+                    }
+                    // Leaf index order.
+                    let members =
+                        store.transaction(|txn| Ok(engine.group_members(&*txn, &gid)?))?;
+                    let present: Vec<DeviceRef> = members
+                        .iter()
+                        .filter(|m| devices.contains(m))
+                        .cloned()
+                        .collect();
+                    let first_remaining = members.iter().find(|m| !devices.contains(m));
+                    Ok(if first_remaining == Some(&own) {
+                        present
+                    } else {
+                        vec![]
+                    })
+                })
+                .await?;
+            if to_remove.is_empty() {
+                continue;
+            }
+            let op = CommitOp::Remove {
+                devices: to_remove.clone(),
+                fan_out: false,
+            };
+            if let Err(err) = self.commit(session, &group_id, op).await {
+                if matches!(&err, ClientError::Transport(e) if outcome_unknown(e)) {
+                    self.inner
+                        .departed
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .entry(group_id)
+                        .or_default()
+                        .extend(to_remove);
+                }
+                return Err(err);
+            }
+        }
+        Ok(())
+    }
+
     async fn sync_locked(&self, session: &Session) -> Result<Vec<StateChange>> {
+        // An own commit must be merged before later commits are processed.
+        self.resolve_pending_commits(session).await?;
         let cursor = self.run(|store, _| Ok(store.global_cursor()?)).await?;
         let batch = self
             .inner
@@ -517,6 +721,23 @@ impl<S: StateStore + 'static> Client<S> {
                 _ => None,
             })
             .collect();
+        {
+            let mut departed = self
+                .inner
+                .departed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for event in &batch.events {
+                if let IncomingEvent::MemberRemoved { group_id, device } = event {
+                    if *device != session.device {
+                        departed
+                            .entry(group_id.clone())
+                            .or_default()
+                            .insert(device.clone());
+                    }
+                }
+            }
+        }
         let base = BaseClient::new(session.device.clone());
         let events = batch.events;
         let mut changes = self
@@ -653,7 +874,7 @@ impl<S: StateStore + 'static> Client<S> {
 
     /// Records an own message's seq as applied: own messages never come
     /// back through the event stream.
-    async fn mark_applied(&self, group_id: &GroupId, seq: u64) -> Result<()> {
+    pub(crate) async fn mark_applied(&self, group_id: &GroupId, seq: u64) -> Result<()> {
         let gid = group_id.clone();
         self.run(move |store, _| {
             store.transaction(|txn| {
@@ -666,7 +887,7 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Runs blocking store and MLS work off the async runtime.
-    async fn run<R, F>(&self, f: F) -> Result<R>
+    pub(crate) async fn run<R, F>(&self, f: F) -> Result<R>
     where
         R: Send + 'static,
         F: FnOnce(&S, &MlsEngine) -> Result<R, BaseError> + Send + 'static,
@@ -678,14 +899,14 @@ impl<S: StateStore + 'static> Client<S> {
             .map_err(Into::into)
     }
 
-    fn emit(&self, changes: &[StateChange]) {
+    pub(crate) fn emit(&self, changes: &[StateChange]) {
         for change in changes {
             // No subscriber is fine.
             let _ = self.inner.changes.send(change.clone());
         }
     }
 
-    fn require_session(&self) -> Result<Session> {
+    pub(crate) fn require_session(&self) -> Result<Session> {
         self.session().ok_or(ClientError::NotLoggedIn)
     }
 
@@ -698,6 +919,6 @@ impl<S: StateStore + 'static> Client<S> {
     }
 }
 
-fn new_client_id() -> Result<ClientId> {
+pub(crate) fn new_client_id() -> Result<ClientId, BaseError> {
     Ok(ClientId::new(new_message_id()?.as_str()).expect("message ids are client ids"))
 }
