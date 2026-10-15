@@ -158,8 +158,13 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum UsersCommand {
-    /// Find a user by exact handle.
-    Search { query: String },
+    /// Find a user by exact handle (0 or 1 result).
+    ///
+    /// Exact handle lookup; substring search is not available yet.
+    Search {
+        /// Handle, with or without a leading '@'.
+        query: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -347,6 +352,20 @@ mod tests {
         assert_eq!(
             MEMBERS_ABOUT,
             "Lists devices known from chat membership only."
+        );
+    }
+
+    #[test]
+    fn users_search_help_says_exact_handle_lookup() {
+        let mut cli = Cli::command();
+        let search = cli
+            .find_subcommand_mut("users")
+            .and_then(|users| users.find_subcommand_mut("search"))
+            .unwrap();
+        let help = search.render_long_help().to_string();
+        assert!(
+            help.contains("Exact handle lookup; substring search is not available yet."),
+            "{help}"
         );
     }
 
