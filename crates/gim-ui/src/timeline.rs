@@ -1,22 +1,24 @@
 //! The timeline of one chat: a window of its latest messages, grown with
-//! [`Timeline::paginate_backwards`], with date separators.
+//! [`Timeline::paginate_backwards`] (from the store, then from the server
+//! history), with date separators and membership changes.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use eyeball_im::{ObservableVector, Vector, VectorDiff};
 use futures_core::Stream;
+use futures_util::future::BoxFuture;
 use futures_util::StreamExt;
-use gim_base::model::{Chat, Message, StateChange};
+use gim_base::model::{Chat, ChatKind, MembershipEvent, Message, StateChange};
 use gim_base::{BaseError, StateReader, StateStore};
 use gim_common::{GroupId, MessageId, UserId};
-use gim_sdk::Client;
+use gim_sdk::{Backfill, Client, BACKFILL_PAGE};
 use tokio::task::JoinHandle;
 
 use crate::diff;
 use crate::items::{
-    message_content, preview_text, profile, reaction_groups, send_state, MessageItem, ReplyPreview,
-    TimelineItem, UserProfile,
+    membership_change_kind, message_content, preview_text, profile, reaction_groups, send_state,
+    MessageItem, ReplyPreview, TimelineItem, UserProfile,
 };
 use crate::listener::{lock, own_user, recv_batch, with_state, Received};
 use crate::Result;
@@ -46,6 +48,10 @@ impl Default for TimelineOptions {
 
 type Reader = dyn StateReader + Send + Sync;
 
+/// [`Client::backfill_history`] of the timeline's chat.
+type Backfiller =
+    Box<dyn Fn(u64, u32) -> BoxFuture<'static, gim_sdk::Result<Backfill>> + Send + Sync>;
+
 /// Keeps the timeline of one chat in sync with the client's state changes.
 /// Edits, deletes, reactions and receipts update their message in place.
 /// Dropping the timeline ends its streams.
@@ -53,6 +59,7 @@ pub struct Timeline {
     group_id: GroupId,
     store: Arc<Reader>,
     state: Arc<Mutex<State>>,
+    backfill: Backfiller,
     task: JoinHandle<()>,
 }
 
@@ -82,8 +89,12 @@ impl Timeline {
             messages: Vec::new(),
             rendered: HashMap::new(),
             profiles: HashMap::new(),
+            membership: Vec::new(),
             has_more: false,
+            history_from: None,
+            history_more: true,
             items: ObservableVector::new(),
+            keys: Vec::new(),
         }));
         with_state(&store, &state, move |store, state| {
             state.load(store, options.initial_page_size)
@@ -109,10 +120,16 @@ impl Timeline {
                 .await;
             }
         });
+        let (sdk, gid) = (client.clone(), group_id.clone());
+        let backfill: Backfiller = Box::new(move |before_seq, limit| {
+            let (sdk, gid) = (sdk.clone(), gid.clone());
+            Box::pin(async move { sdk.backfill_history(&gid, before_seq, limit).await })
+        });
         Ok(Self {
             group_id,
             store,
             state,
+            backfill,
             task,
         })
     }
@@ -136,16 +153,49 @@ impl Timeline {
         (values, stream.map(diff::collapse_reset))
     }
 
-    /// Loads up to `count` older messages from the store (delivered through
-    /// the item streams). Returns whether older messages remain.
-    ///
-    /// Only the store is paged: gim-sdk exposes no history backfill yet, so
-    /// a hole in the stored history is skipped over.
+    /// Loads up to `count` older messages (delivered through the item
+    /// streams): from the store, and once it has nothing older, from the
+    /// server history ([`Client::backfill_history`]), skipping what this
+    /// device cannot decrypt. Returns whether older messages remain.
     pub async fn paginate_backwards(&self, count: u16) -> Result<bool> {
-        with_state(&self.store, &self.state, move |store, state| {
-            state.paginate(store, usize::from(count))
+        let count = usize::from(count);
+        let (mut loaded, store_more) = with_state(&self.store, &self.state, move |store, state| {
+            state.paginate(store, count)
         })
-        .await
+        .await?;
+        if store_more {
+            return Ok(true);
+        }
+        loop {
+            let before = with_state(&self.store, &self.state, |store, state| {
+                state.history_before(store)
+            })
+            .await?;
+            let Some(before) = before else {
+                return Ok(false);
+            };
+            if loaded >= count {
+                // Only whether there is more; no request.
+                return Ok((self.backfill)(before, 0).await?.has_more);
+            }
+            let backfill = (self.backfill)(before, BACKFILL_PAGE).await?;
+            let wanted = count - loaded;
+            let (added, store_more) = with_state(&self.store, &self.state, move |store, state| {
+                state.history_from = Some(backfill.from_seq);
+                state.history_more = backfill.has_more;
+                // The backfilled messages are older than the window.
+                state.has_more = true;
+                state.paginate(store, wanted)
+            })
+            .await?;
+            loaded += added;
+            if store_more {
+                return Ok(true);
+            }
+            if !backfill.has_more {
+                return Ok(false);
+            }
+        }
     }
 }
 
@@ -155,11 +205,11 @@ impl Drop for Timeline {
     }
 }
 
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum ItemKey {
     Day(u64),
     Message(MessageId),
-    Membership(u64, String),
+    Membership(u64, UserId),
 }
 
 struct State {
@@ -172,9 +222,17 @@ struct State {
     messages: Vec<Message>,
     rendered: HashMap<MessageId, MessageItem>,
     profiles: HashMap<UserId, UserProfile>,
+    /// All membership events of the chat, ascending.
+    membership: Vec<MembershipEvent>,
     /// Whether the store has messages older than the loaded ones.
     has_more: bool,
+    /// Lowest seq the server history was backfilled from.
+    history_from: Option<u64>,
+    /// Whether the server history may hold older readable messages.
+    history_more: bool,
     items: ObservableVector<TimelineItem>,
+    /// Keys of `items`.
+    keys: Vec<ItemKey>,
 }
 
 impl State {
@@ -184,10 +242,12 @@ impl State {
         let (messages, has_more) = self.fetch(store, None, limit)?;
         self.messages = messages;
         self.has_more = has_more;
+        self.membership = store.membership_events(&self.group_id)?;
         self.rendered.clear();
         self.profiles.clear();
         self.render_where(store, |_| true)?;
-        let items = self.build();
+        let (keys, items): (Vec<_>, Vec<_>) = self.build().into_iter().unzip();
+        self.keys = keys;
         diff::reset(&mut self.items, items.into_iter().collect());
         Ok(())
     }
@@ -197,16 +257,20 @@ impl State {
         self.load(store, self.messages.len().max(self.page_size))
     }
 
-    fn paginate(&mut self, store: &Reader, count: usize) -> Result<bool, BaseError> {
+    /// Loads up to `count` older messages from the store. Returns how many
+    /// were added and whether the store has more.
+    fn paginate(&mut self, store: &Reader, count: usize) -> Result<(usize, bool), BaseError> {
         if !self.has_more || count == 0 {
-            return Ok(self.has_more);
+            return Ok((0, self.has_more));
         }
         // Everything loaded may be unsent: then page from the newest sent.
         let before = self.oldest_seq().unwrap_or(u64::MAX);
         let (older, has_more) = self.fetch(store, Some(before), count)?;
+        let mut added = 0;
         for message in older {
             if self.position(&message.message_id).is_none() {
                 self.messages.push(message);
+                added += 1;
             }
         }
         self.has_more = has_more;
@@ -214,7 +278,22 @@ impl State {
             .sort_by(|a, b| order_key(a).cmp(&order_key(b)));
         self.render_where(store, |_| false)?;
         self.publish();
-        Ok(has_more)
+        Ok((added, has_more))
+    }
+
+    /// The `before_seq` of the next server history backfill, if the server
+    /// may have older messages: below the oldest loaded message, or below
+    /// every applied seq when there is none.
+    fn history_before(&self, store: &Reader) -> Result<Option<u64>, BaseError> {
+        if !self.history_more {
+            return Ok(None);
+        }
+        let below = match self.oldest_seq() {
+            Some(oldest) => oldest,
+            None => store.group_cursor(&self.group_id)?.contiguous_seq + 1,
+        };
+        let before = self.history_from.map_or(below, |from| from.min(below));
+        Ok((before > 1).then_some(before))
     }
 
     fn apply(&mut self, store: &Reader, changes: &[StateChange]) -> Result<(), BaseError> {
@@ -229,12 +308,26 @@ impl State {
                         self.profiles.clear();
                         rerender_all = true;
                     }
+                    // The kind decides whether membership changes show.
+                    if self.chat.as_ref().map(|c| c.kind) != Some(chat.kind) {
+                        changed = true;
+                    }
                     self.chat = Some(chat.clone());
                 }
                 StateChange::ChatRemoved(group_id) if *group_id == self.group_id => {
                     self.messages.clear();
                     self.rendered.clear();
+                    self.membership.clear();
                     self.has_more = false;
+                    self.history_more = false;
+                    changed = true;
+                }
+                StateChange::MembershipChanged(event) if event.group_id == self.group_id => {
+                    let key = |e: &MembershipEvent| (e.seq, e.user_id.clone());
+                    match self.membership.binary_search_by_key(&key(event), key) {
+                        Ok(i) => self.membership[i] = event.clone(),
+                        Err(i) => self.membership.insert(i, event.clone()),
+                    }
                     changed = true;
                 }
                 StateChange::MessageUpserted(message) if message.group_id == self.group_id => {
@@ -308,12 +401,17 @@ impl State {
         }
     }
 
-    /// Renders the messages matching `stale`, and those never rendered.
+    /// Renders the messages matching `stale`, and those never rendered,
+    /// and resolves the names of the users in membership events.
     fn render_where(
         &mut self,
         store: &Reader,
         stale: impl Fn(&Message) -> bool,
     ) -> Result<(), BaseError> {
+        let users: Vec<UserId> = self.membership.iter().map(|e| e.user_id.clone()).collect();
+        for user_id in &users {
+            self.profile(store, user_id)?;
+        }
         for i in 0..self.messages.len() {
             let message = &self.messages[i];
             if self.rendered.contains_key(&message.message_id) && !stale(message) {
@@ -367,36 +465,83 @@ impl State {
         Ok(profile)
     }
 
-    /// The items for the loaded messages: a date separator before the first
-    /// message of each local day. A message whose clock is behind the one
-    /// before it stays under that day, so separators only move forward.
-    fn build(&self) -> Vec<TimelineItem> {
-        let mut items = Vec::with_capacity(self.messages.len() + 1);
-        let mut last_day = None;
+    /// The items for the loaded messages and the membership events among
+    /// them, in seq order (unsent messages last), with their keys: a date
+    /// separator before the first item of each local day. An item whose
+    /// clock is behind the one before it stays under that day, so
+    /// separators only move forward. While older messages are not loaded,
+    /// membership events older than the window are left out too; direct
+    /// chats show none.
+    fn build(&self) -> Vec<(ItemKey, TimelineItem)> {
+        let lowest = match (self.has_more, self.oldest_seq()) {
+            (true, Some(oldest)) => oldest,
+            _ => 0,
+        };
+        // Direct chats only ever have their two users.
+        let group = self
+            .chat
+            .as_ref()
+            .is_some_and(|c| c.kind == ChatKind::Group);
+        let mut events = self
+            .membership
+            .iter()
+            .filter(|e| group && e.seq >= lowest)
+            .peekable();
+        // (time, key, item) in seq order.
+        let mut entries = Vec::with_capacity(self.messages.len() + self.membership.len());
+        let event_entry = |event: &MembershipEvent| {
+            let user_name = self
+                .profiles
+                .get(&event.user_id)
+                .map_or_else(|| event.user_id.to_string(), |p| p.display_name.clone());
+            let item = TimelineItem::MembershipChange {
+                user_name,
+                change: membership_change_kind(event.kind),
+                at_ms: event.at_ms,
+            };
+            (
+                event.at_ms,
+                ItemKey::Membership(event.seq, event.user_id.clone()),
+                item,
+            )
+        };
         for message in &self.messages {
-            let local = message.sent_at_ms as i64 + self.utc_offset_ms;
+            let seq = message.seq.unwrap_or(u64::MAX);
+            while let Some(event) = events.next_if(|e| e.seq < seq) {
+                entries.push(event_entry(event));
+            }
+            if let Some(item) = self.rendered.get(&message.message_id) {
+                entries.push((
+                    message.sent_at_ms,
+                    ItemKey::Message(message.message_id.clone()),
+                    TimelineItem::Message(item.clone()),
+                ));
+            }
+        }
+        entries.extend(events.map(event_entry));
+
+        let mut items = Vec::with_capacity(entries.len() + 1);
+        let mut last_day = None;
+        for (at_ms, key, item) in entries {
+            let local = at_ms as i64 + self.utc_offset_ms;
             let day = local.div_euclid(DAY_MS);
             if last_day.is_none_or(|last| day > last) {
                 last_day = Some(day);
                 let day_start_ms = (day * DAY_MS - self.utc_offset_ms).max(0) as u64;
-                items.push(TimelineItem::DateSeparator { day_start_ms });
+                items.push((
+                    ItemKey::Day(day_start_ms),
+                    TimelineItem::DateSeparator { day_start_ms },
+                ));
             }
-            if let Some(item) = self.rendered.get(&message.message_id) {
-                items.push(TimelineItem::Message(item.clone()));
-            }
+            items.push((key, item));
         }
         items
     }
 
     fn publish(&mut self) {
-        let items = self.build();
-        diff::update(&mut self.items, &items, |item| match item {
-            TimelineItem::Message(m) => ItemKey::Message(m.message_id.clone()),
-            TimelineItem::DateSeparator { day_start_ms } => ItemKey::Day(*day_start_ms),
-            TimelineItem::MembershipChange {
-                user_name, at_ms, ..
-            } => ItemKey::Membership(*at_ms, user_name.clone()),
-        });
+        let (keys, items): (Vec<_>, Vec<_>) = self.build().into_iter().unzip();
+        let old_keys = std::mem::replace(&mut self.keys, keys);
+        diff::update_keyed(&mut self.items, old_keys, &items, &self.keys);
     }
 }
 

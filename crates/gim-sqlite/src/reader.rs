@@ -4,8 +4,8 @@
 use std::collections::BTreeSet;
 
 use gim_base::model::{
-    Chat, DepartedMember, GroupCursor, GroupMessage, MediaCacheEntry, Message, OutboxEntry,
-    OutboxState, PendingCommit, UserInfo,
+    Chat, DepartedMember, GroupCursor, GroupMessage, MediaCacheEntry, MembershipChangeKind,
+    MembershipEvent, Message, OutboxEntry, OutboxState, PendingCommit, UserInfo,
 };
 use gim_base::{StateReader, StoreError};
 use gim_common::{DeviceRef, GroupId, MessageId, UserId};
@@ -31,6 +31,29 @@ fn sql_limit(value: usize) -> i64 {
 
 pub(crate) fn sql_err(err: rusqlite::Error) -> StoreError {
     StoreError::new(err)
+}
+
+pub(crate) fn membership_kind_str(kind: MembershipChangeKind) -> &'static str {
+    match kind {
+        MembershipChangeKind::Added => "added",
+        MembershipChangeKind::Removed => "removed",
+        MembershipChangeKind::Left => "left",
+    }
+}
+
+fn membership_kind(value: &str) -> StoreResult<MembershipChangeKind> {
+    match value {
+        "added" => Ok(MembershipChangeKind::Added),
+        "removed" => Ok(MembershipChangeKind::Removed),
+        "left" => Ok(MembershipChangeKind::Left),
+        other => Err(StoreError::new(format!(
+            "unknown membership kind '{other}'"
+        ))),
+    }
+}
+
+fn user_id(value: String) -> StoreResult<UserId> {
+    UserId::new(value).map_err(StoreError::new)
 }
 
 pub(crate) fn outbox_state_str(state: OutboxState) -> &'static str {
@@ -356,6 +379,24 @@ impl StateReader for Reader<'_> {
                     group_id: group_id(get(row, 0)?)?,
                     device: DeviceRef::parse(&get::<String>(row, 1)?, &get::<String>(row, 2)?)
                         .map_err(StoreError::new)?,
+                })
+            },
+        )
+    }
+
+    fn membership_events(&self, group_id: &GroupId) -> StoreResult<Vec<MembershipEvent>> {
+        self.query(
+            "SELECT group_id, seq, user_id, actor, kind, at_ms FROM membership_events \
+             WHERE group_id = ?1 ORDER BY seq, user_id",
+            [group_id.as_str()],
+            |row| {
+                Ok(MembershipEvent {
+                    group_id: self::group_id(get(row, 0)?)?,
+                    seq: get(row, 1)?,
+                    user_id: user_id(get(row, 2)?)?,
+                    actor: user_id(get(row, 3)?)?,
+                    kind: membership_kind(&get::<String>(row, 4)?)?,
+                    at_ms: get(row, 5)?,
                 })
             },
         )

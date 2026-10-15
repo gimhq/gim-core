@@ -26,6 +26,9 @@ const EVENTS_PER_FETCH: usize = 100;
 #[derive(Debug, Clone, Default)]
 pub struct FakeTransport {
     service: Arc<FakeDeliveryService>,
+    /// Users registered through this transport (or a clone), for
+    /// [`Transport::user`]: the fake service looks users up by handle only.
+    users: Arc<Mutex<HashMap<UserId, UserInfo>>>,
 }
 
 impl FakeTransport {
@@ -100,6 +103,16 @@ impl Transport for FakeTransport {
         display_name: &str,
     ) -> TransportResult<Registration> {
         let registration = self.service.register_device(handle, display_name);
+        if let Some(user) = self.service.find_user(handle) {
+            self.users.lock().unwrap_or_else(|e| e.into_inner()).insert(
+                user.user_id.clone(),
+                UserInfo {
+                    user_id: user.user_id,
+                    handle: user.handle,
+                    display_name: user.display_name,
+                },
+            );
+        }
         Ok(Registration {
             device: registration.device,
             token: AccessToken::new(registration.token),
@@ -118,6 +131,20 @@ impl Transport for FakeTransport {
             handle: user.handle,
             display_name: user.display_name,
         }))
+    }
+
+    async fn user(
+        &self,
+        token: &AccessToken,
+        user_id: &UserId,
+    ) -> TransportResult<Option<UserInfo>> {
+        self.device(token)?;
+        Ok(self
+            .users
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(user_id)
+            .cloned())
     }
 
     async fn list_devices(

@@ -295,8 +295,9 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Applies fetched events under the group lock, then commits the
-    /// removal of departed devices and wakes the outbox (delivered receipts
-    /// may have been queued).
+    /// removal of departed devices, wakes the outbox (delivered receipts
+    /// may have been queued) and resolves the profiles of new members and
+    /// senders.
     pub(crate) async fn apply_fetched(
         &self,
         session: &Session,
@@ -307,6 +308,19 @@ impl<S: StateStore + 'static> Client<S> {
         self.remove_departed(session).await?;
         drop(guard);
         self.wake_outbox();
+        let users = changes
+            .iter()
+            .flat_map(|change| match change {
+                StateChange::ChatUpserted(chat) => chat
+                    .members
+                    .iter()
+                    .map(|m| m.device.user_id.clone())
+                    .collect(),
+                StateChange::MessageUpserted(message) => vec![message.sender.user_id.clone()],
+                _ => vec![],
+            })
+            .collect();
+        self.resolve_users(session, users).await;
         Ok(changes)
     }
 
@@ -507,7 +521,7 @@ impl<S: StateStore + 'static> Client<S> {
     /// history cannot be read (e.g. this device was removed): network and
     /// auth errors are returned, anything else skips the group, whose holes
     /// are then looked up again on its next message.
-    async fn group_history(
+    pub(crate) async fn group_history(
         &self,
         session: &Session,
         group_id: &GroupId,

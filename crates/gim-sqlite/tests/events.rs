@@ -46,7 +46,11 @@ fn welcome_commit_and_application_end_to_end() {
 
     alice.add(&ds, &g, &[&carol]);
     let changes = bob.sync(&ds);
-    assert!(matches!(&changes[..], [StateChange::ChatUpserted(c)] if c.members.len() == 3));
+    assert!(matches!(
+        &changes[..],
+        [StateChange::ChatUpserted(c), StateChange::MembershipChanged(e)]
+            if c.members.len() == 3 && e.user_id == carol.me.user_id
+    ));
     carol.sync(&ds);
     assert_eq!(carol.store.chat(&g).unwrap().unwrap().members.len(), 3);
     assert_eq!(carol.store.messages(&g, None, 10).unwrap(), vec![]);

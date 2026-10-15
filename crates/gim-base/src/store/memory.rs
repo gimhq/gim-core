@@ -16,8 +16,8 @@ use openmls_memory_storage::MemoryStorage;
 
 use super::{StateReader, StateStore, StoreResult, StoreTxn};
 use crate::model::{
-    Chat, DepartedMember, GroupCursor, GroupMessage, MediaCacheEntry, Message, OutboxEntry,
-    OutboxState, PendingCommit, UserInfo,
+    Chat, DepartedMember, GroupCursor, GroupMessage, MediaCacheEntry, MembershipEvent, Message,
+    OutboxEntry, OutboxState, PendingCommit, UserInfo,
 };
 use crate::{BaseError, StoreError};
 
@@ -42,6 +42,7 @@ struct Rows {
     users: BTreeMap<UserId, UserInfo>,
     pending_commits: BTreeMap<GroupId, PendingCommit>,
     departed: BTreeSet<DepartedMember>,
+    membership: BTreeMap<(GroupId, u64, UserId), MembershipEvent>,
 }
 
 #[derive(Debug, Default)]
@@ -229,6 +230,10 @@ impl StateReader for MemoryStore {
     fn departed_members(&self) -> StoreResult<Vec<DepartedMember>> {
         Ok(read(&self.rows)?.departed.iter().cloned().collect())
     }
+
+    fn membership_events(&self, group_id: &GroupId) -> StoreResult<Vec<MembershipEvent>> {
+        read(&self.rows)?.membership_events(group_id)
+    }
 }
 
 impl StateReader for MemoryTxn {
@@ -304,6 +309,10 @@ impl StateReader for MemoryTxn {
     fn departed_members(&self) -> StoreResult<Vec<DepartedMember>> {
         Ok(self.rows.departed.iter().cloned().collect())
     }
+
+    fn membership_events(&self, group_id: &GroupId) -> StoreResult<Vec<MembershipEvent>> {
+        self.rows.membership_events(group_id)
+    }
 }
 
 impl StoreTxn for MemoryTxn {
@@ -323,6 +332,7 @@ impl StoreTxn for MemoryTxn {
         rows.parked.retain(|(g, _), _| g != group_id);
         rows.pending_commits.remove(group_id);
         rows.departed.retain(|d| &d.group_id != group_id);
+        rows.membership.retain(|(g, _, _), _| g != group_id);
         Ok(())
     }
 
@@ -414,6 +424,12 @@ impl StoreTxn for MemoryTxn {
 
     fn remove_departed_member(&mut self, member: &DepartedMember) -> StoreResult<()> {
         self.rows.departed.remove(member);
+        Ok(())
+    }
+
+    fn add_membership_event(&mut self, event: &MembershipEvent) -> StoreResult<()> {
+        let key = (event.group_id.clone(), event.seq, event.user_id.clone());
+        self.rows.membership.insert(key, event.clone());
         Ok(())
     }
 }
@@ -583,6 +599,15 @@ impl Rows {
 
     fn user(&self, user_id: &UserId) -> StoreResult<Option<UserInfo>> {
         Ok(self.users.get(user_id).cloned())
+    }
+
+    fn membership_events(&self, group_id: &GroupId) -> StoreResult<Vec<MembershipEvent>> {
+        Ok(self
+            .membership
+            .iter()
+            .filter(|((g, _, _), _)| g == group_id)
+            .map(|(_, e)| e.clone())
+            .collect())
     }
 }
 
