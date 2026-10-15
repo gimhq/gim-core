@@ -309,7 +309,10 @@ mod tests {
             items.extend((0..extra).map(|_| Value::Null));
             GimCredential::decode(&encode_cbor(&Value::Array(items)))
         };
-        assert!(matches!(items(2, 1), Err(CredentialError::UnsupportedVersion)));
+        assert!(matches!(
+            items(2, 1),
+            Err(CredentialError::UnsupportedVersion)
+        ));
         assert!(matches!(
             items(1, 1),
             Err(CredentialError::MalformedContent(_))
