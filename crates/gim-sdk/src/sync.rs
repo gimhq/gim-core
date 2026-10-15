@@ -7,16 +7,18 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::time::Duration;
 
 use futures_util::FutureExt;
-use gim_base::model::{GroupMessage, IncomingEvent, Membership, MessageKind, StateChange};
+use gim_base::model::{
+    Chat, ChatMember, GroupMessage, IncomingEvent, Membership, MessageKind, StateChange,
+};
 use gim_base::{BaseClient, StateReader, StateStore, StoreTxn};
-use gim_common::{DeviceRef, GroupId};
+use gim_common::{now_ms, DeviceRef, GroupId};
 use tokio::sync::broadcast;
 use tokio::time::Instant;
 
 use crate::client::Session;
 use crate::stream::{Backoff, ConnectionState};
-use crate::transport::{EventBatch, TransportError};
-use crate::{Client, ClientError, Result};
+use crate::transport::{EventBatch, GroupInfo, TransportError};
+use crate::{Client, ClientError, Result, KEY_PACKAGE_BATCH};
 
 /// Shortest interval between two long-polls that returned no events.
 const MIN_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -368,7 +370,10 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Resyncs after an expired cursor: backfills every joined chat by seq
-    /// from its last contiguous seq, then continues from the head cursor.
+    /// from its last contiguous seq, joins the server's groups that are not
+    /// joined here from their history (their Welcome may have been pruned),
+    /// tops up KeyPackages (a `KeyPackagesLow` may have been pruned), then
+    /// continues from the head cursor.
     async fn recover_expired_locked(
         &self,
         session: &Session,
@@ -376,11 +381,13 @@ impl<S: StateStore + 'static> Client<S> {
     ) -> Result<Vec<StateChange>> {
         tracing::info!(head, "event cursor expired; backfilling joined chats");
         let chats = self.run(|store, _| Ok(store.chats()?)).await?;
+        let mut joined = BTreeSet::new();
         let mut events = Vec::new();
         for chat in chats {
             if chat.membership != Membership::Joined {
                 continue;
             }
+            joined.insert(chat.group_id.clone());
             let gid = chat.group_id.clone();
             let after = self
                 .run(move |store, _| Ok(store.group_cursor(&gid)?.contiguous_seq))
@@ -392,7 +399,131 @@ impl<S: StateStore + 'static> Client<S> {
                 events.extend(history.into_iter().map(IncomingEvent::Message));
             }
         }
-        self.apply_events_locked(session, events, head, true).await
+        let unjoined = self.unjoined_server_groups(session, &joined).await?;
+        for info in &unjoined {
+            events.extend(self.welcome_history(session, &info.group_id).await?);
+        }
+        self.top_up_key_packages(session).await?;
+        let mut changes = self
+            .apply_events_locked(session, events, head, true)
+            .await?;
+        changes.extend(self.record_unjoinable(unjoined).await?);
+        Ok(changes)
+    }
+
+    /// The server's groups of this device that are not joined here. Empty
+    /// if the server cannot list them; network and auth errors are
+    /// returned.
+    async fn unjoined_server_groups(
+        &self,
+        session: &Session,
+        joined: &BTreeSet<GroupId>,
+    ) -> Result<Vec<GroupInfo>> {
+        match self.inner.transport.list_groups(&session.token).await {
+            Ok(groups) => Ok(groups
+                .into_iter()
+                .filter(|g| !joined.contains(&g.group_id))
+                .collect()),
+            Err(err @ (TransportError::Network(_) | TransportError::Unauthorized)) => {
+                Err(err.into())
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "cannot list groups; pruned Welcomes not looked up");
+                Ok(vec![])
+            }
+        }
+    }
+
+    /// The group's history from the first Welcome by another device: the
+    /// server shows a device only its own Welcomes, and nothing before
+    /// them is for this device. Empty if there is none.
+    async fn welcome_history(
+        &self,
+        session: &Session,
+        group_id: &GroupId,
+    ) -> Result<Vec<IncomingEvent>> {
+        let history = self
+            .group_history(session, group_id, 0, None)
+            .await?
+            .unwrap_or_default();
+        Ok(history
+            .into_iter()
+            .skip_while(|m| m.kind != MessageKind::Welcome || m.sender == session.device)
+            .map(IncomingEvent::Message)
+            .collect())
+    }
+
+    /// Stores the groups that are still not joined and not stored as `Left`
+    /// chats, so that they show as chats this device cannot read.
+    async fn record_unjoinable(&self, groups: Vec<GroupInfo>) -> Result<Vec<StateChange>> {
+        let changes = self
+            .run(move |store, _| {
+                store.transaction(|txn| {
+                    let mut changes = Vec::new();
+                    for info in groups {
+                        if txn.chat(&info.group_id)?.is_some() {
+                            continue;
+                        }
+                        tracing::warn!(group_id = %info.group_id, "no usable Welcome for a group of this device; stored as left");
+                        let mut chat = Chat::new(info.group_id, info.kind, now_ms());
+                        chat.membership = Membership::Left;
+                        chat.members = info
+                            .members
+                            .into_iter()
+                            .map(|device| ChatMember {
+                                device,
+                                display_name: None,
+                            })
+                            .collect();
+                        txn.upsert_chat(&chat)?;
+                        changes.push(StateChange::ChatUpserted(chat));
+                    }
+                    Ok(changes)
+                })
+            })
+            .await?;
+        self.emit(&changes);
+        Ok(changes)
+    }
+
+    /// Tops the server's one-time KeyPackages up to [`KEY_PACKAGE_BATCH`],
+    /// plus a last-resort one if it has none. Uploads a batch if the server
+    /// cannot count them.
+    async fn top_up_key_packages(&self, session: &Session) -> Result<()> {
+        let count = match self.inner.transport.key_package_count(&session.token).await {
+            Ok(count) => count,
+            Err(err @ (TransportError::Network(_) | TransportError::Unauthorized)) => {
+                return Err(err.into())
+            }
+            Err(err) => {
+                tracing::debug!(error = %err, "cannot count KeyPackages; uploading a batch");
+                return self.upload_key_packages(session).await;
+            }
+        };
+        let missing = u64::from(KEY_PACKAGE_BATCH).saturating_sub(count.available);
+        let missing = u32::try_from(missing).unwrap_or(KEY_PACKAGE_BATCH);
+        let last_resort = !count.has_last_resort;
+        if missing == 0 && !last_resort {
+            return Ok(());
+        }
+        tracing::info!(missing, last_resort, "topping up KeyPackages");
+        let (key_packages, last_resort) = self
+            .run(move |store, engine| {
+                store.transaction(|txn| {
+                    let last_resort = if last_resort {
+                        Some(engine.generate_last_resort_key_package(&*txn)?)
+                    } else {
+                        None
+                    };
+                    Ok((engine.generate_key_packages(&*txn, missing)?, last_resort))
+                })
+            })
+            .await?;
+        self.inner
+            .transport
+            .upload_key_packages(&session.token, key_packages, last_resort)
+            .await?;
+        Ok(())
     }
 
     /// Applies `events` in order, backfilling seq gaps first, then persists
