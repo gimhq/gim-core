@@ -3,7 +3,7 @@
 //! specified in `docs/identity.md` ("MLS credential").
 
 use ciborium::Value;
-use gim_common::{DeviceRef, UserId};
+use gim_common::{DeviceId, DeviceRef, UserId};
 use gim_identity::{DeviceCert, DeviceList, RootPublicKey, SignedDeviceCert};
 use openmls::prelude::{Credential, CredentialType};
 
@@ -29,6 +29,53 @@ pub struct NoDeviceLists;
 impl DeviceListLookup for NoDeviceLists {
     fn device_list(&self, _user_id: &UserId) -> Option<DeviceList> {
         None
+    }
+}
+
+/// Why a credential failed validation. [`CredentialError::code`] gives the
+/// stable name used by the test vectors and `docs/identity.md`.
+#[derive(Debug, thiserror::Error)]
+pub enum CredentialError {
+    #[error("credential type {0:#06x} is not a gim credential")]
+    WrongCredentialType(u16),
+    #[error("credential content is not deterministic CBOR")]
+    NonCanonicalCbor,
+    #[error("malformed credential content: {0}")]
+    MalformedContent(String),
+    #[error("unsupported credential version")]
+    UnsupportedVersion,
+    #[error("device certificate: {0}")]
+    Cert(gim_identity::IdentityError),
+    #[error("leaf signature key does not match the certified device key")]
+    LeafKeyMismatch,
+    #[error("device {device} of {user} is revoked")]
+    RevokedDevice { user: UserId, device: DeviceId },
+}
+
+impl CredentialError {
+    /// Stable snake_case name of the failure.
+    pub fn code(&self) -> &'static str {
+        use gim_identity::IdentityError;
+        match self {
+            Self::WrongCredentialType(_) => "wrong_credential_type",
+            Self::NonCanonicalCbor => "non_canonical_cbor",
+            Self::MalformedContent(_) => "malformed_content",
+            Self::UnsupportedVersion => "unsupported_version",
+            Self::Cert(IdentityError::BadSignature) => "bad_cert_signature",
+            Self::Cert(IdentityError::UserIdMismatch) => "user_id_mismatch",
+            Self::Cert(IdentityError::DeviceIdMismatch) => "device_id_mismatch",
+            Self::Cert(_) => "invalid_cert",
+            Self::LeafKeyMismatch => "leaf_key_mismatch",
+            Self::RevokedDevice { .. } => "revoked_device",
+        }
+    }
+}
+
+impl From<CredentialError> for CryptoError {
+    fn from(err: CredentialError) -> Self {
+        Self::InvalidCredential {
+            reason: format!("{}: {err}", err.code()),
+        }
     }
 }
 
@@ -66,43 +113,44 @@ impl GimCredential {
 
     /// Parses the content; rejects any encoding other than the canonical
     /// one. Does not verify the certificate (see [`GimCredential::verify`]).
-    pub fn decode(bytes: &[u8]) -> Result<Self, CryptoError> {
+    pub fn decode(bytes: &[u8]) -> Result<Self, CredentialError> {
+        let malformed = |reason: &str| CredentialError::MalformedContent(reason.into());
         let value: Value =
-            ciborium::from_reader(bytes).map_err(|e| invalid(format!("malformed CBOR: {e}")))?;
+            ciborium::from_reader(bytes).map_err(|e| malformed(&e.to_string()))?;
         if encode_cbor(&value) != bytes {
-            return Err(invalid("not deterministic CBOR"));
+            return Err(CredentialError::NonCanonicalCbor);
         }
         let Value::Array(items) = value else {
-            return Err(invalid("content is not an array"));
+            return Err(malformed("content is not an array"));
         };
         let [version, root, cert]: [Value; 3] = items
             .try_into()
-            .map_err(|_| invalid("content is not an array of 3 items"))?;
-        let version = match version {
-            Value::Integer(int) => u64::try_from(int).ok(),
-            _ => None,
+            .map_err(|_| malformed("content is not an array of 3 items"))?;
+        let Value::Integer(version) = version else {
+            return Err(malformed("version is not an integer"));
         };
-        if version != Some(CREDENTIAL_VERSION) {
-            return Err(invalid("unsupported credential version"));
+        if u64::try_from(version).ok() != Some(CREDENTIAL_VERSION) {
+            return Err(CredentialError::UnsupportedVersion);
         }
         let (Value::Bytes(root), Value::Bytes(cert)) = (root, cert) else {
-            return Err(invalid("expected byte strings"));
+            return Err(malformed("expected byte strings"));
         };
         let root: [u8; 32] = root
             .try_into()
-            .map_err(|_| invalid("root public key is not 32 bytes"))?;
+            .map_err(|_| malformed("root public key is not 32 bytes"))?;
         Ok(Self {
-            root_public_key: RootPublicKey::from_bytes(&root).map_err(invalid)?,
-            signed_cert: SignedDeviceCert::from_bytes(&cert).map_err(invalid)?,
+            root_public_key: RootPublicKey::from_bytes(&root)
+                .map_err(|e| malformed(&e.to_string()))?,
+            signed_cert: SignedDeviceCert::from_bytes(&cert).map_err(CredentialError::Cert)?,
         })
     }
 
     /// Checks the chain: the cert verifies under the root key and its
     /// `user_id` is derived from it.
-    pub fn verify(&self) -> Result<DeviceCert, CryptoError> {
+    pub fn verify(&self) -> Result<DeviceCert, CredentialError> {
         self.signed_cert
             .verify(&self.root_public_key)
-            .map_err(invalid)
+            .map_err(CredentialError::Cert)
     }
 
     /// The MLS credential carrying this content.
@@ -112,12 +160,10 @@ impl GimCredential {
 
     /// Parses an MLS credential; any type other than
     /// [`GIM_CREDENTIAL_TYPE`] is rejected.
-    pub fn from_mls(credential: &Credential) -> Result<Self, CryptoError> {
-        if credential.credential_type() != CredentialType::Other(GIM_CREDENTIAL_TYPE) {
-            return Err(invalid(format!(
-                "credential type {:?} is not a gim credential",
-                credential.credential_type()
-            )));
+    pub fn from_mls(credential: &Credential) -> Result<Self, CredentialError> {
+        let credential_type = credential.credential_type();
+        if credential_type != CredentialType::Other(GIM_CREDENTIAL_TYPE) {
+            return Err(CredentialError::WrongCredentialType(credential_type.into()));
         }
         Self::decode(credential.serialized_content())
     }
@@ -132,20 +178,27 @@ pub fn validate(
     leaf_signature_key: &[u8],
     lookup: &dyn DeviceListLookup,
 ) -> Result<DeviceRef, CryptoError> {
+    Ok(check(credential, leaf_signature_key, lookup)?)
+}
+
+/// [`validate`] with the typed failure reason.
+pub fn check(
+    credential: &Credential,
+    leaf_signature_key: &[u8],
+    lookup: &dyn DeviceListLookup,
+) -> Result<DeviceRef, CredentialError> {
     let cert = GimCredential::from_mls(credential)?.verify()?;
     if cert.device_public_key.as_bytes().as_slice() != leaf_signature_key {
-        return Err(invalid(
-            "leaf signature key does not match the certified device key",
-        ));
+        return Err(CredentialError::LeafKeyMismatch);
     }
     if lookup
         .device_list(&cert.user_id)
         .is_some_and(|list| list.is_revoked(&cert.device_id))
     {
-        return Err(invalid(format!(
-            "device {} of {} is revoked",
-            cert.device_id, cert.user_id
-        )));
+        return Err(CredentialError::RevokedDevice {
+            user: cert.user_id,
+            device: cert.device_id,
+        });
     }
     Ok(DeviceRef::new(cert.user_id, cert.device_id))
 }
@@ -154,12 +207,6 @@ fn encode_cbor(value: &Value) -> Vec<u8> {
     let mut bytes = Vec::new();
     ciborium::into_writer(value, &mut bytes).expect("writing CBOR to a Vec cannot fail");
     bytes
-}
-
-fn invalid(reason: impl ToString) -> CryptoError {
-    CryptoError::InvalidCredential {
-        reason: reason.to_string(),
-    }
 }
 
 #[cfg(test)]
