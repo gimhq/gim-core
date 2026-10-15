@@ -91,3 +91,14 @@ lto = true
 codegen-units = 1
 strip = "debuginfo"
 panic = "unwind"
+
+# Static libraries of GIMCore.xcframework (bindings/apple/build-xcframework.sh).
+# opt-level "s" measured slightly smaller than "z" and ~20% smaller than 3 once
+# stripped; panic stays "unwind" for UniFFI. `strip` has no effect on
+# staticlibs (no link step), so the script strips the .a files.
+[profile.release-apple]
+inherits = "release"
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+debug = false
