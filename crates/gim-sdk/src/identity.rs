@@ -387,17 +387,30 @@ impl<S: StateStore + 'static> Client<S> {
         }
     }
 
-    /// Fetches the DeviceLists of `users` the cache does not know, so that
-    /// credentials referring to them are checked against their revocations.
-    pub(crate) async fn fetch_unknown_device_lists(
+    /// Fetches the DeviceList of every user with a device in `devices` that
+    /// the cached list neither certifies nor revokes (an unknown user, or a
+    /// device added since): credential checks are fail-closed against the
+    /// cached lists. Returns the devices the fetched lists newly revoke.
+    pub(crate) async fn fetch_device_lists(
         &self,
-        users: BTreeSet<UserId>,
+        devices: impl IntoIterator<Item = DeviceRef>,
     ) -> Result<Vec<DeviceRef>> {
+        let stale: BTreeSet<UserId> = devices
+            .into_iter()
+            .filter(|device| {
+                !self
+                    .inner
+                    .device_lists
+                    .get(&device.user_id)
+                    .is_some_and(|list| {
+                        list.contains(&device.device_id) || list.is_revoked(&device.device_id)
+                    })
+            })
+            .map(|device| device.user_id)
+            .collect();
         let mut revoked = Vec::new();
-        for user_id in users {
-            if self.inner.device_lists.get(&user_id).is_none() {
-                revoked.extend(self.refresh_device_list(&user_id).await?);
-            }
+        for user_id in stale {
+            revoked.extend(self.refresh_device_list(&user_id).await?);
         }
         Ok(revoked)
     }

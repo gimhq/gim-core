@@ -688,11 +688,8 @@ impl<S: StateStore + 'static> Client<S> {
     async fn commit(&self, session: &Session, group_id: &GroupId, op: CommitOp) -> Result<bool> {
         if let CommitOp::Add(key_packages) = &op {
             // Credentials are checked against the users' current lists.
-            let users = key_packages
-                .iter()
-                .map(|k| k.device.user_id.clone())
-                .collect();
-            let revoked = self.fetch_unknown_device_lists(users).await?;
+            let devices = key_packages.iter().map(|k| k.device.clone());
+            let revoked = self.fetch_device_lists(devices).await?;
             self.record_revoked(session, revoked).await?;
         }
         let mut attempt = 0;

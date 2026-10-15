@@ -19,7 +19,8 @@ impl Device {
     fn new(user: &str) -> Self {
         let id = gim_test::TestIdentity::new(user);
         let me = id.device.clone();
-        let engine = MlsEngine::new();
+        let engine =
+            MlsEngine::with_device_list_lookup(std::sync::Arc::new(gim_test::test_device_list));
         let store = MemoryCryptoStore::new();
         engine
             .create_identity_v2(&store, &id.device_key, id.root.public(), id.cert.clone())
@@ -37,7 +38,9 @@ impl Device {
         let bytes = self.store.export().unwrap();
         Self {
             me: self.me,
-            engine: MlsEngine::new(),
+            engine: MlsEngine::with_device_list_lookup(std::sync::Arc::new(
+                gim_test::test_device_list,
+            )),
             store: MemoryCryptoStore::import(&bytes).unwrap(),
             posts: self.posts,
         }

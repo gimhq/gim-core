@@ -84,7 +84,8 @@ impl Device {
     pub fn with_store(user: &str, store: SqliteStore) -> Self {
         let id = gim_test::TestIdentity::new(user);
         let me = id.device.clone();
-        let engine = MlsEngine::new();
+        let engine =
+            MlsEngine::with_device_list_lookup(std::sync::Arc::new(gim_test::test_device_list));
         store
             .transaction(|txn| {
                 if txn.load_identity()?.is_none() {

@@ -10,7 +10,7 @@ struct Dev {
 
 fn dev(user: &str) -> Dev {
     let dev = Dev {
-        engine: MlsEngine::new(),
+        engine: MlsEngine::with_device_list_lookup(std::sync::Arc::new(gim_test::test_device_list)),
         store: MemoryCryptoStore::new(),
     };
     create_identity(&dev, &TestIdentity::new(user)).unwrap();
@@ -215,7 +215,7 @@ fn store_export_import_keeps_groups_usable() {
     assert_eq!(bob.decrypt("g", &alice.encrypt("g", b"before")), b"before");
 
     let bob = Dev {
-        engine: MlsEngine::new(),
+        engine: MlsEngine::with_device_list_lookup(std::sync::Arc::new(gim_test::test_device_list)),
         store: MemoryCryptoStore::import(&bob.store.export().unwrap()).unwrap(),
     };
     assert_eq!(bob.me(), TestIdentity::new("bob").device);
@@ -237,7 +237,7 @@ fn imported_store_keeps_key_packages() {
     let (alice, bob) = (dev("alice"), dev("bob"));
     let kp = bob.kps(1);
     let bob = Dev {
-        engine: MlsEngine::new(),
+        engine: MlsEngine::with_device_list_lookup(std::sync::Arc::new(gim_test::test_device_list)),
         store: MemoryCryptoStore::import(&bob.store.export().unwrap()).unwrap(),
     };
     alice.create("g");

@@ -606,20 +606,19 @@ impl<S: StateStore + 'static> Client<S> {
         .await
     }
 
-    /// Applies group events in order, after fetching the DeviceLists of the
-    /// users they refer to that are not known yet and backfilling seq gaps.
-    /// Broadcasts the changes, acknowledges the applied Welcomes and
-    /// replenishes KeyPackages if asked to.
+    /// Applies group events in order, after backfilling seq gaps and
+    /// fetching the DeviceLists of the devices they refer to that are not
+    /// known yet. Broadcasts the changes, acknowledges the applied Welcomes
+    /// and replenishes KeyPackages if asked to.
     async fn apply_group_events(
         &self,
         session: &Session,
         events: Vec<IncomingEvent>,
     ) -> Result<Vec<StateChange>> {
-        let revoked = self
-            .fetch_unknown_device_lists(referenced_users(&events))
-            .await?;
-        self.record_revoked(session, revoked).await?;
         let events = self.backfill_gaps(session, events).await?;
+        let devices = self.referenced_devices(session, &events).await?;
+        let revoked = self.fetch_device_lists(devices).await?;
+        self.record_revoked(session, revoked).await?;
         let joined: BTreeSet<GroupId> = events
             .iter()
             .filter_map(|event| match event {
@@ -657,6 +656,42 @@ impl<S: StateStore + 'static> Client<S> {
             self.upload_key_packages(session).await?;
         }
         Ok(changes)
+    }
+
+    /// Devices whose credentials applying `events` checks: senders, added
+    /// devices, and the hub roster of each group a Welcome joins (its
+    /// ratchet tree is only readable once joined).
+    async fn referenced_devices(
+        &self,
+        session: &Session,
+        events: &[IncomingEvent],
+    ) -> Result<BTreeSet<DeviceRef>> {
+        let mut devices = referenced_in(events);
+        let joining: BTreeSet<&GroupId> = events
+            .iter()
+            .filter_map(|event| match event {
+                IncomingEvent::Message(m)
+                    if m.kind == MessageKind::Welcome && m.sender != session.device =>
+                {
+                    Some(&m.group_id)
+                }
+                _ => None,
+            })
+            .collect();
+        for group_id in joining {
+            let info = self
+                .authed(|t| async move { self.inner.transport.group_info(&t, group_id).await })
+                .await;
+            match info {
+                Ok(info) => devices.extend(info.members),
+                Err(err @ (TransportError::Network(_) | TransportError::Unauthorized)) => {
+                    return Err(err.into())
+                }
+                // The join fails on the unknown members instead.
+                Err(err) => tracing::debug!(%group_id, error = %err, "no roster of a joined group"),
+            }
+        }
+        Ok(devices)
     }
 
     /// Inserts the missing messages of joined chats before the first event
@@ -798,23 +833,23 @@ impl<S: StateStore + 'static> Client<S> {
 
 /// Users whose DeviceList validating `events` needs: message senders and
 /// the users of the devices a Commit adds.
-fn referenced_users(events: &[IncomingEvent]) -> BTreeSet<UserId> {
-    let mut users = BTreeSet::new();
+fn referenced_in(events: &[IncomingEvent]) -> BTreeSet<DeviceRef> {
+    let mut devices = BTreeSet::new();
     for event in events {
         match event {
             IncomingEvent::Message(m) => {
-                users.insert(m.sender.user_id.clone());
+                devices.insert(m.sender.clone());
                 if m.kind == MessageKind::Commit {
                     if let Ok(info) = inspect_handshake(&m.payload) {
-                        users.extend(info.added.into_iter().map(|d| d.user_id));
+                        devices.extend(info.added);
                     }
                 }
             }
             IncomingEvent::MemberAdded { device, .. } => {
-                users.insert(device.user_id.clone());
+                devices.insert(device.clone());
             }
             IncomingEvent::MemberRemoved { .. } | IncomingEvent::KeyPackagesLow => {}
         }
     }
-    users
+    devices
 }

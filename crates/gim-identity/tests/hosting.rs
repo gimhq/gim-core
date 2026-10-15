@@ -319,6 +319,11 @@ fn hub_count_and_duplicates_rejected() {
         signed_raw(body_with_hubs(vec![])).verify(NOW),
         Err(IdentityError::HubCount(0))
     ));
+    // The count is checked before any entry is decoded.
+    assert!(matches!(
+        signed_raw(body_with_hubs(vec![Cbor::Null; 17])).verify(NOW),
+        Err(IdentityError::HubCount(17))
+    ));
     let value = entry_value(&entry, &user_root());
     assert!(matches!(
         signed_raw(body_with_hubs(vec![value.clone(), value])).verify(NOW),

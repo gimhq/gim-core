@@ -16,7 +16,8 @@ struct Device {
 fn device(user: &str) -> Device {
     let id = gim_test::TestIdentity::new(user);
     let me = id.device.clone();
-    let engine = MlsEngine::new();
+    let engine =
+        MlsEngine::with_device_list_lookup(std::sync::Arc::new(gim_test::test_device_list));
     let store = MemoryCryptoStore::new();
     engine
         .create_identity_v2(&store, &id.device_key, id.root.public(), id.cert.clone())
