@@ -24,7 +24,7 @@ use tokio_util::io::ReaderStream;
 use crate::stream::ws;
 use crate::transport::{
     AccessToken, Challenge, ClaimedKeyPackage, CommitAccepted, EventBatch, EventStream, GroupInfo,
-    HostingEntryGrant, HubEvent, KeyPackageCount, OutgoingCommit, PostError, SessionError,
+    HostingEntryGrant, HubEvent, KeyPackageClaim, KeyPackageCount, OutgoingCommit, PostError, SessionError,
     SessionToken, StoredHostingRecord, Transport, TransportError, TransportResult, UserRecord,
 };
 
@@ -69,6 +69,15 @@ pub struct HttpTransport {
 /// Unix milliseconds from the hub (never negative in practice).
 fn millis(value: i64) -> u64 {
     u64::try_from(value).unwrap_or(0)
+}
+
+/// `Retry-After` in integer seconds, if present.
+fn retry_after(response: &Response) -> Option<u64> {
+    response
+        .headers()
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
 }
 
 fn hosting_record(record: v2::HostingRecord) -> StoredHostingRecord {
@@ -132,8 +141,9 @@ impl HttpTransport {
 
     async fn status_error(response: Response) -> TransportError {
         let status = response.status();
+        let retry_after = retry_after(&response);
         let body = response.bytes().await.unwrap_or_default();
-        error::from_status(status, &body)
+        error::from_status(status, retry_after, &body)
     }
 
     async fn json<T: DeserializeOwned>(builder: RequestBuilder) -> TransportResult<T> {
@@ -175,12 +185,9 @@ impl HttpTransport {
                 return Ok(None);
             }
             let delay = match status {
-                StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE => response
-                    .headers()
-                    .get(RETRY_AFTER)
-                    .and_then(|value| value.to_str().ok())
-                    .and_then(|value| value.trim().parse::<u64>().ok())
-                    .map(Duration::from_secs),
+                StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE => {
+                    retry_after(&response).map(Duration::from_secs)
+                }
                 _ => None,
             };
             let Some(delay) = delay else {
@@ -207,7 +214,7 @@ impl HttpTransport {
                 Ok(e) if e.error.code == v2::STALE_EPOCH => Err(PostError::StaleEpoch {
                     current_epoch: e.current_epoch,
                 }),
-                _ => Err(error::from_status(StatusCode::CONFLICT, &body).into()),
+                _ => Err(error::from_status(StatusCode::CONFLICT, None, &body).into()),
             };
         }
         if !response.status().is_success() {
@@ -420,7 +427,7 @@ impl Transport for HttpTransport {
         &self,
         token: &AccessToken,
         users: &[UserId],
-    ) -> TransportResult<Vec<ClaimedKeyPackage>> {
+    ) -> TransportResult<KeyPackageClaim> {
         let request = v2::ClaimKeyPackagesRequest {
             targets: users
                 .iter()
@@ -435,7 +442,7 @@ impl Transport for HttpTransport {
                 .json(&request),
         )
         .await?;
-        response
+        let key_packages = response
             .key_packages
             .into_iter()
             .map(|claimed| {
@@ -444,7 +451,16 @@ impl Transport for HttpTransport {
                     key_package: claimed.key_package,
                 })
             })
-            .collect()
+            .collect::<TransportResult<_>>()?;
+        let unavailable = response
+            .unavailable
+            .iter()
+            .map(|target| convert::user_id(&target.user_id))
+            .collect::<TransportResult<_>>()?;
+        Ok(KeyPackageClaim {
+            key_packages,
+            unavailable,
+        })
     }
 
     async fn create_group(&self, token: &AccessToken, kind: ChatKind) -> TransportResult<GroupId> {

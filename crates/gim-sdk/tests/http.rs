@@ -7,8 +7,8 @@ use gim_base::model::{ChatKind, IncomingEvent, MessageKind};
 use gim_common::{ClientId, DeviceRef, GroupId, UserId};
 use gim_identity::{DeviceSigningKey, RootKey};
 use gim_sdk::transport::{
-    AccessToken, ClaimedKeyPackage, CommitAccepted, HostingEntryGrant, HubEvent, OutgoingCommit,
-    PostError, SessionError, StoredHostingRecord, Transport, TransportError,
+    AccessToken, ClaimedKeyPackage, CommitAccepted, HostingEntryGrant, HubEvent, KeyPackageClaim,
+    OutgoingCommit, PostError, SessionError, StoredHostingRecord, Transport, TransportError,
 };
 use gim_sdk::{HttpConfig, HttpTransport};
 use serde_json::{json, Value};
@@ -287,27 +287,30 @@ async fn claim_key_packages_by_user() {
         .and(path("/v2/keypackages/claim"))
         .and(header("authorization", BEARER))
         .and(body_json(json!({
-            "targets": [{ "user_id": uid(2) }, { "user_id": uid(3) }],
+            "targets": [{ "user_id": uid(2) }, { "user_id": uid(3) }, { "user_id": uid(4) }],
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "key_packages": [{
                 "user_id": uid(2), "device_id": did(2), "key_package": "BAU=", "last_resort": false,
             }],
             "missing": [{ "user_id": uid(3) }],
-            "unavailable": [],
+            "unavailable": [{ "user_id": uid(4) }],
         })))
         .mount(&server)
         .await;
     let claimed = transport(&server)
-        .claim_key_packages(&token(), &[user(2), user(3)])
+        .claim_key_packages(&token(), &[user(2), user(3), user(4)])
         .await
         .unwrap();
     assert_eq!(
         claimed,
-        vec![ClaimedKeyPackage {
-            device: device(2),
-            key_package: vec![4, 5],
-        }]
+        KeyPackageClaim {
+            key_packages: vec![ClaimedKeyPackage {
+                device: device(2),
+                key_package: vec![4, 5],
+            }],
+            unavailable: vec![user(4)],
+        }
     );
 }
 
@@ -437,6 +440,73 @@ async fn post_message() {
         .await
         .unwrap();
     assert_eq!(seq, 8);
+}
+
+#[tokio::test]
+async fn peer_failures_of_posts() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v2/groups/h2%2F1/messages"))
+        .and(body_json(json!({ "client_id": "c1", "mls_message": "AQID" })))
+        .respond_with(throttled(503, "peer_unavailable", "7"))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v2/groups/h2%2F1/messages"))
+        .and(body_json(json!({ "client_id": "c2", "mls_message": "AQID" })))
+        .respond_with(ResponseTemplate::new(503).set_body_json(error_body("peer_unavailable")))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v2/groups/h2%2F1/commits"))
+        .respond_with(ResponseTemplate::new(502).set_body_json(error_body("peer_refused")))
+        .mount(&server)
+        .await;
+    let http = transport(&server);
+    let (t, g) = (token(), gid("h2/1"));
+    let post = |client_id: &str| {
+        http.post_message(&t, &g, ClientId::new(client_id).unwrap(), vec![1, 2, 3])
+    };
+    let unavailable = post("c1").await.unwrap_err();
+    assert_eq!(
+        unavailable,
+        PostError::Transport(TransportError::PeerUnavailable {
+            retry_after_secs: Some(7),
+            reason: "peer_unavailable: nope".into(),
+        })
+    );
+    // Not retried within the call: the caller resends with the same id.
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(
+        post("c2").await,
+        Err(PostError::Transport(TransportError::PeerUnavailable {
+            retry_after_secs: None,
+            reason: "peer_unavailable: nope".into(),
+        }))
+    );
+    let commit = OutgoingCommit {
+        client_id: ClientId::new("c3").unwrap(),
+        mls_message: vec![1, 2, 3],
+        welcome: None,
+        welcome_recipients: vec![],
+    };
+    let refused = http
+        .submit_commit(&token(), &gid("h2/1"), commit)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused,
+        PostError::Transport(TransportError::PeerRefused("peer_refused: nope".into()))
+    );
+    let PostError::Transport(refused) = refused else {
+        unreachable!()
+    };
+    assert!(refused.is_peer_failure());
+    assert_eq!(refused.retry_after(), None);
+    let PostError::Transport(unavailable) = unavailable else {
+        unreachable!()
+    };
+    assert_eq!(unavailable.retry_after(), Some(Duration::from_secs(7)));
 }
 
 #[tokio::test]

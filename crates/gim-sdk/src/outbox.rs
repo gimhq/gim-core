@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use gim_base::model::{OutboxEntry, OutboxKind, OutboxState};
-use gim_base::{BaseClient, BaseError, StateStore};
+use gim_base::{BaseClient, BaseError, StateReader, StateStore, StoreTxn, MAX_RETRY_DELAY_MS};
 use gim_common::{now_ms, ClientId, MessageId};
 use tokio::task::JoinHandle;
 
@@ -179,7 +179,9 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Records a failed attempt; retryable errors get a backoff, others make
-    /// the entry `Failed`. Returns whether the chat may go on.
+    /// the entry `Failed`. A peer hub failure's `Retry-After` replaces the
+    /// backoff, capped at [`MAX_RETRY_DELAY_MS`]. Returns whether the chat
+    /// may go on.
     async fn record_failure(
         &self,
         base: &BaseClient,
@@ -191,9 +193,29 @@ impl<S: StateStore + 'static> Client<S> {
             ClientError::Base(BaseError::Store(_)) | ClientError::Task(_) => return Err(err),
             _ => false,
         };
+        let retry_after = match &err {
+            ClientError::Transport(err) if err.is_peer_failure() => err.retry_after(),
+            _ => None,
+        };
         let (id, base, error) = (message_id.clone(), base.clone(), err.to_string());
         let changes = match self
-            .run(move |store, _| base.mark_failed(store, &id, &error, retryable, now_ms()))
+            .run(move |store, _| {
+                let now = now_ms();
+                let changes = base.mark_failed(store, &id, &error, retryable, now)?;
+                if let Some(delay) = retry_after {
+                    let delay = (delay.as_millis() as u64).min(MAX_RETRY_DELAY_MS);
+                    store.transaction(|txn| {
+                        if let Some(mut entry) = txn.outbox_entry(&id)? {
+                            if entry.state == OutboxState::Pending {
+                                entry.next_attempt_at_ms = now + delay;
+                                txn.upsert_outbox(&entry)?;
+                            }
+                        }
+                        Ok(())
+                    })?;
+                }
+                Ok(changes)
+            })
             .await
         {
             Ok(changes) => changes,

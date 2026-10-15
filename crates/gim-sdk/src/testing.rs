@@ -23,7 +23,7 @@ use gim_test::{
 
 use crate::transport::{
     AccessToken, Challenge, ClaimedKeyPackage, CommitAccepted, EventBatch, GroupInfo,
-    HostingEntryGrant, HubEvent, KeyPackageCount, OutgoingCommit, PostError, SessionError,
+    HostingEntryGrant, HubEvent, KeyPackageClaim, KeyPackageCount, OutgoingCommit, PostError, SessionError,
     SessionToken, StoredHostingRecord, Transport, TransportError, TransportResult, UserRecord,
 };
 use crate::{SecretStorage, SecretStorageError};
@@ -492,18 +492,21 @@ impl Transport for FakeTransport {
         &self,
         token: &AccessToken,
         users: &[UserId],
-    ) -> TransportResult<Vec<ClaimedKeyPackage>> {
+    ) -> TransportResult<KeyPackageClaim> {
         self.device(token)?;
-        Ok(self
-            .service
-            .claim_key_packages(users)
-            .0
-            .into_iter()
-            .map(|claimed| ClaimedKeyPackage {
-                device: claimed.device,
-                key_package: claimed.key_package,
-            })
-            .collect())
+        Ok(KeyPackageClaim {
+            key_packages: self
+                .service
+                .claim_key_packages(users)
+                .0
+                .into_iter()
+                .map(|claimed| ClaimedKeyPackage {
+                    device: claimed.device,
+                    key_package: claimed.key_package,
+                })
+                .collect(),
+            unavailable: vec![],
+        })
     }
 
     async fn create_group(&self, token: &AccessToken, kind: ChatKind) -> TransportResult<GroupId> {

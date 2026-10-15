@@ -638,7 +638,11 @@ async fn claim_key_packages(
             .iter()
             .map(|t| user_id(&t.user_id))
             .collect::<Result<Vec<_>, _>>()?;
-        let claimed = state.transport.claim_key_packages(&token, &users).await?;
+        let claimed = state
+            .transport
+            .claim_key_packages(&token, &users)
+            .await?
+            .key_packages;
         let missing = users
             .iter()
             .filter(|u| !claimed.iter().any(|c| &c.device.user_id == *u))
@@ -1008,6 +1012,7 @@ pub fn fast_settings() -> SyncSettings {
         backoff_max: Duration::from_millis(200),
         long_poll_wait: Duration::from_secs(1),
         stream_retry: Duration::from_secs(60),
+        ..SyncSettings::default()
     }
 }
 
