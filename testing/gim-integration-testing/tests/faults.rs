@@ -227,11 +227,13 @@ async fn group_leave_three_members() {
     } else {
         (&bob, &alice)
     };
+    let commits = |d: &SdkDevice| d.hub.faults.commit_results.lock().unwrap().len();
+    let (chosen_commits, other_commits) = (commits(chosen), commits(other));
     other.sync().await;
     assert_eq!(alice.hub_group(&g).await.epoch, epoch, "the other waits");
     chosen.sync().await;
     assert_eq!(alice.hub_group(&g).await.epoch, epoch + 1);
-    assert_eq!(chosen.hub.faults.commit_results.lock().unwrap().len(), 1);
+    assert_eq!(commits(chosen), chosen_commits + 1);
 
     // Past the other's delay: still one commit.
     tokio::time::sleep(Duration::from_secs(16)).await;
@@ -241,7 +243,7 @@ async fn group_leave_three_members() {
         group.members.into_iter().collect::<BTreeSet<_>>(),
         devices(&[&alice, &bob])
     );
-    assert!(other.hub.faults.commit_results.lock().unwrap().is_empty());
+    assert_eq!(commits(other), other_commits);
 
     carol.sync().await;
     assert_eq!(
