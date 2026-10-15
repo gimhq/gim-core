@@ -1,5 +1,5 @@
 //! CLI-to-CLI interop: three `gim` profiles (alice, bob, carol) talk to each
-//! other through the real binary against the server named by
+//! other through the real binary against the hub named by
 //! `GIM_SERVER_URL` (see `testing/gim-cli-interop.sh`). Without it the test
 //! prints a notice and passes, so the default `cargo test` stays offline.
 //!
@@ -88,6 +88,10 @@ impl Gim {
         let handle = gim.handle.clone();
         let out = gim.ok(&["--server", server, "register", &handle, name]);
         assert_eq!(out["handle"], handle.as_str(), "{out}");
+        assert!(
+            out["recovery_code"].as_str().is_some_and(|c| !c.is_empty()),
+            "{out}"
+        );
         gim
     }
 

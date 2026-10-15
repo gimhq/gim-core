@@ -43,6 +43,7 @@ struct Rows {
     pending_commits: BTreeMap<GroupId, PendingCommit>,
     departed: BTreeSet<DepartedMember>,
     membership: BTreeMap<(GroupId, u64, UserId), MembershipEvent>,
+    device_lists: BTreeMap<UserId, Vec<u8>>,
 }
 
 #[derive(Debug, Default)]
@@ -234,6 +235,10 @@ impl StateReader for MemoryStore {
     fn membership_events(&self, group_id: &GroupId) -> StoreResult<Vec<MembershipEvent>> {
         read(&self.rows)?.membership_events(group_id)
     }
+
+    fn device_lists(&self) -> StoreResult<Vec<(UserId, Vec<u8>)>> {
+        Ok(read(&self.rows)?.device_lists.clone().into_iter().collect())
+    }
 }
 
 impl StateReader for MemoryTxn {
@@ -312,6 +317,10 @@ impl StateReader for MemoryTxn {
 
     fn membership_events(&self, group_id: &GroupId) -> StoreResult<Vec<MembershipEvent>> {
         self.rows.membership_events(group_id)
+    }
+
+    fn device_lists(&self) -> StoreResult<Vec<(UserId, Vec<u8>)>> {
+        Ok(self.rows.device_lists.clone().into_iter().collect())
     }
 }
 
@@ -430,6 +439,13 @@ impl StoreTxn for MemoryTxn {
     fn add_membership_event(&mut self, event: &MembershipEvent) -> StoreResult<()> {
         let key = (event.group_id.clone(), event.seq, event.user_id.clone());
         self.rows.membership.insert(key, event.clone());
+        Ok(())
+    }
+
+    fn upsert_device_list(&mut self, user_id: &UserId, device_list: &[u8]) -> StoreResult<()> {
+        self.rows
+            .device_lists
+            .insert(user_id.clone(), device_list.to_vec());
         Ok(())
     }
 }

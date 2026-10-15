@@ -6,7 +6,7 @@
 //!
 //! - error: `{"error": {"code": "other"|"usage"|"timeout"|"not_found"|"server",
 //!   "message": str}}`
-//! - `register`: `{"user_id", "device_id", "handle", "server"}`
+//! - `register`: `{"user_id", "device_id", "handle", "server", "recovery_code"}`
 //! - `whoami`: `{"user_id", "device_id", "handle", "display_name", "server"}`
 //!   (`handle` / `display_name` may be `null`)
 //! - `users search`: `{"users": [User]}`, User = `{"user_id", "handle",
@@ -115,6 +115,8 @@ pub struct RegisterOut {
     pub device_id: String,
     pub handle: String,
     pub server: String,
+    /// Shown once; not stored in the profile.
+    pub recovery_code: String,
 }
 
 #[derive(Debug, Serialize)]

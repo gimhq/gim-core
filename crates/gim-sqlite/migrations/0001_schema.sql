@@ -78,17 +78,17 @@ CREATE TABLE crypto_identity (
     device_id TEXT NOT NULL,
     signature_private_key BLOB NOT NULL,
     signature_public_key BLOB NOT NULL,
-    -- Encoded gim MLS credential; NULL for a legacy basic credential.
-    credential BLOB
+    -- Encoded gim MLS credential.
+    credential BLOB NOT NULL
 );
 
 CREATE TABLE crypto_groups (
     group_id TEXT PRIMARY KEY NOT NULL
 );
 
--- Own commits whose outcome or follow-up is not settled yet (one per
--- group), and devices that left a group's fan-out list but may still be in
--- its MLS tree.
+-- Own commits whose outcome is not settled yet (one per group), and
+-- devices that left a group (or were revoked) but may still be in its MLS
+-- tree.
 
 CREATE TABLE pending_commits (
     group_id TEXT PRIMARY KEY NOT NULL,
@@ -100,6 +100,13 @@ CREATE TABLE departed_members (
     user_id TEXT NOT NULL,
     device_id TEXT NOT NULL,
     PRIMARY KEY (group_id, user_id, device_id)
+);
+
+-- Latest known signed DeviceList (gim-identity CBOR) of each user.
+
+CREATE TABLE device_lists (
+    user_id TEXT PRIMARY KEY NOT NULL,
+    data BLOB NOT NULL
 );
 
 -- Users joining or leaving a chat, one row per (group, seq, user), recorded

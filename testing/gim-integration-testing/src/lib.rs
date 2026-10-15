@@ -214,12 +214,13 @@ impl TestUser {
         let hooks = MemoryHooks::new();
         let client = open(server_url, &hooks).await;
         assert_eq!(client.session().await.unwrap(), None);
+        // The FFI does not claim handles yet: `handle` is not on the hub.
         let handle = unique_handle(prefix);
-        let session = client
-            .register(handle.clone(), display_name.to_string())
+        client
+            .create_identity(display_name.to_string())
             .await
             .unwrap();
-        assert_eq!(session.handle, handle);
+        let session = client.session().await.unwrap().unwrap();
         client.start_sync().await.unwrap();
         Self {
             client,

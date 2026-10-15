@@ -13,7 +13,6 @@ gim-common.workspace = true
 gim-identity.workspace = true
 gim-proto.workspace = true
 openmls.workspace = true
-openmls_basic_credential.workspace = true
 openmls_memory_storage.workspace = true
 openmls_rust_crypto.workspace = true
 openmls_traits.workspace = true

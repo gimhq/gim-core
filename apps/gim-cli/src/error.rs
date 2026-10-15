@@ -104,7 +104,9 @@ pub type Result<T, E = CliError> = std::result::Result<T, E>;
 /// Error kind of an SDK error.
 pub fn classify(err: &ClientError) -> ErrorKind {
     match err {
-        ClientError::NotLoggedIn | ClientError::NotRegistered => ErrorKind::NotFound,
+        ClientError::NotLoggedIn | ClientError::NotRegistered | ClientError::DeviceNotActive(_) => {
+            ErrorKind::NotFound
+        }
         ClientError::AlreadyLoggedIn | ClientError::InvalidInput(_) => ErrorKind::Usage,
         ClientError::Transport(TransportError::NotFound(_)) => ErrorKind::NotFound,
         ClientError::Transport(_) | ClientError::CommitConflict(_) => ErrorKind::Server,

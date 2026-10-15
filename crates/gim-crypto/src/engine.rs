@@ -5,8 +5,8 @@ use gim_common::{DeviceRef, GroupId};
 use gim_identity::{DeviceSigningKey, RootPublicKey, SignedDeviceCert};
 use openmls::prelude::tls_codec::{Deserialize as _, Serialize as _};
 use openmls::prelude::{GroupId as MlsGroupId, *};
-use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::RustCrypto;
+use openmls_traits::signatures::{Signer, SignerError};
 use openmls_traits::storage::{StorageProvider, CURRENT_VERSION};
 use openmls_traits::OpenMlsProvider;
 
@@ -56,6 +56,9 @@ pub enum ProcessedMessage {
     },
     Proposal {
         sender: DeviceRef,
+        /// The device a Remove proposal removes; the sender itself when it
+        /// leaves the group.
+        removed: Option<DeviceRef>,
     },
 }
 
@@ -63,11 +66,10 @@ pub enum ProcessedMessage {
 /// duration; the engine itself holds only the crypto backend and the
 /// [`DeviceListLookup`] used to validate gim credentials.
 ///
-/// The credential mode follows the stored identity: an identity created with
-/// [`MlsEngine::create_identity_v2`] uses a [`GimCredential`] and every
-/// incoming or added leaf must pass [`credential::validate`] against the
-/// engine's lookup; a legacy identity ([`MlsEngine::create_identity`]) uses a
-/// basic credential and performs no credential validation.
+/// Every leaf carries a [`GimCredential`]: every incoming or added leaf must
+/// pass [`credential::validate`] against the engine's lookup, and
+/// application messages from a device revoked in the latest known
+/// DeviceList are rejected.
 pub struct MlsEngine {
     crypto: RustCrypto,
     device_lists: Arc<dyn DeviceListLookup + Send + Sync>,
@@ -110,29 +112,51 @@ impl<S: StorageProvider<CURRENT_VERSION>> OpenMlsProvider for Provider<'_, S> {
 }
 
 /// The device identity loaded from the store for one operation.
-struct Account {
+struct Account<'a> {
     device: DeviceRef,
-    signer: SignatureKeyPair,
-    /// Encoded [`GimCredential`]; `None` for a legacy identity.
-    credential: Option<Vec<u8>>,
+    signer: DeviceSigner<'a>,
+    /// Encoded [`GimCredential`].
+    credential: Vec<u8>,
 }
 
-impl Account {
+impl Account<'_> {
     fn credential_with_key(&self) -> CredentialWithKey {
-        let credential = match &self.credential {
-            Some(content) => {
-                Credential::new(CredentialType::Other(GIM_CREDENTIAL_TYPE), content.clone())
-            }
-            None => BasicCredential::new(self.device.credential_identity()).into(),
-        };
         CredentialWithKey {
-            credential,
-            signature_key: self.signer.to_public_vec().into(),
+            credential: Credential::new(
+                CredentialType::Other(GIM_CREDENTIAL_TYPE),
+                self.credential.clone(),
+            ),
+            signature_key: self.signer.public.clone().into(),
         }
     }
 
     fn capabilities(&self) -> Capabilities {
-        leaf_capabilities(self.credential.is_some())
+        leaf_capabilities()
+    }
+}
+
+/// Ed25519 signer over the stored device key seed.
+struct DeviceSigner<'a> {
+    crypto: &'a RustCrypto,
+    seed: Vec<u8>,
+    public: Vec<u8>,
+}
+
+impl Drop for DeviceSigner<'_> {
+    fn drop(&mut self) {
+        self.seed.fill(0);
+    }
+}
+
+impl Signer for DeviceSigner<'_> {
+    fn sign(&self, payload: &[u8]) -> std::result::Result<Vec<u8>, SignerError> {
+        self.crypto
+            .sign(self.signature_scheme(), payload, &self.seed)
+            .map_err(|_| SignerError::SigningError)
+    }
+
+    fn signature_scheme(&self) -> SignatureScheme {
+        CIPHERSUITE.signature_algorithm()
     }
 }
 
@@ -148,25 +172,6 @@ impl MlsEngine {
             crypto: RustCrypto::default(),
             device_lists,
         }
-    }
-
-    /// Creates the device identity (fresh Ed25519 signature key) in `store`.
-    pub fn create_identity(&self, store: &impl CryptoStore, device: DeviceRef) -> Result<()> {
-        if store.load_identity().map_err(CryptoError::store)?.is_some() {
-            return Err(CryptoError::invalid("identity already exists"));
-        }
-        let (signature_private_key, signature_public_key) = self
-            .crypto
-            .signature_key_gen(CIPHERSUITE.signature_algorithm())
-            .map_err(CryptoError::mls)?;
-        store
-            .save_identity(&StoredIdentity {
-                device,
-                signature_private_key,
-                signature_public_key,
-                credential: None,
-            })
-            .map_err(CryptoError::store)
     }
 
     /// Creates a device identity with a self-certifying [`GimCredential`]:
@@ -194,17 +199,33 @@ impl MlsEngine {
                 device: DeviceRef::new(cert.user_id, cert.device_id),
                 signature_private_key: device_key.to_seed().to_vec(),
                 signature_public_key: device_key.public().as_bytes().to_vec(),
-                credential: Some(credential.encode()),
+                credential: credential.encode(),
             })
             .map_err(CryptoError::store)
     }
 
     pub fn identity(&self, store: &impl CryptoStore) -> Result<DeviceRef> {
-        Ok(account(store)?.device)
+        Ok(self.account(store)?.device)
     }
 
     pub fn signature_public_key(&self, store: &impl CryptoStore) -> Result<Vec<u8>> {
-        Ok(account(store)?.signer.to_public_vec())
+        Ok(self.account(store)?.signer.public.clone())
+    }
+
+    /// Whether `device` is revoked in the latest DeviceList the engine's
+    /// lookup knows for its user.
+    pub fn is_revoked(&self, device: &DeviceRef) -> bool {
+        self.device_lists
+            .device_list(&device.user_id)
+            .is_some_and(|list| list.is_revoked(&device.device_id))
+    }
+
+    /// Validates a KeyPackage as a hub does on upload (signature,
+    /// ciphersuite, gim credential against the engine's lookup) and returns
+    /// the device its credential certifies.
+    pub fn key_package_device(&self, key_package: &[u8]) -> Result<DeviceRef> {
+        let key_package = self.validate_key_package(key_package)?;
+        self.validate_leaf(key_package.leaf_node())
     }
 
     /// Generates one-time KeyPackages, each a TLS-serialized `MlsMessage`.
@@ -218,7 +239,7 @@ impl MlsEngine {
                 "count must be at most {MAX_KEY_PACKAGES_PER_CALL}"
             )));
         }
-        let account = account(store)?;
+        let account = self.account(store)?;
         (0..count)
             .map(|_| self.key_package(store, &account, false))
             .collect()
@@ -226,12 +247,12 @@ impl MlsEngine {
 
     /// Generates a reusable KeyPackage carrying the LastResort extension.
     pub fn generate_last_resort_key_package(&self, store: &impl CryptoStore) -> Result<Vec<u8>> {
-        self.key_package(store, &account(store)?, true)
+        self.key_package(store, &self.account(store)?, true)
     }
 
     /// Creates a group whose MLS GroupId is the UTF-8 bytes of `group_id`.
     pub fn create_group(&self, store: &impl CryptoStore, group_id: &GroupId) -> Result<()> {
-        let account = account(store)?;
+        let account = self.account(store)?;
         if group_ids(store)?.contains(group_id) {
             return Err(CryptoError::invalid(format!(
                 "group {group_id} already exists"
@@ -259,14 +280,12 @@ impl MlsEngine {
         if key_packages.is_empty() {
             return Err(CryptoError::invalid("no key packages"));
         }
-        let account = account(store)?;
+        let account = self.account(store)?;
         let key_packages = key_packages
             .iter()
             .map(|bytes| {
                 let key_package = self.validate_key_package(bytes)?;
-                if account.credential.is_some() {
-                    self.validate_leaf(key_package.leaf_node())?;
-                }
+                self.validate_leaf(key_package.leaf_node())?;
                 Ok(key_package)
             })
             .collect::<Result<Vec<_>>>()?;
@@ -275,6 +294,10 @@ impl MlsEngine {
             .map(|kp| device_of(kp.leaf_node().credential()))
             .collect::<Result<Vec<_>>>()?;
         let mut group = load_group(store, group_id)?;
+        // Own commits carry their proposals inline only.
+        group
+            .clear_pending_proposals(store.mls_storage())
+            .map_err(CryptoError::store)?;
         let epoch = group.epoch().as_u64();
         let (commit, welcome, _group_info) = group
             .add_members(&self.provider(store), &account.signer, &key_packages)
@@ -300,7 +323,7 @@ impl MlsEngine {
         if members.is_empty() {
             return Err(CryptoError::invalid("no members to remove"));
         }
-        let account = account(store)?;
+        let account = self.account(store)?;
         let mut group = load_group(store, group_id)?;
         let mut removed = Vec::new();
         let mut indices = Vec::new();
@@ -319,6 +342,9 @@ impl MlsEngine {
             indices.extend(leaves);
             removed.push(device.clone());
         }
+        group
+            .clear_pending_proposals(store.mls_storage())
+            .map_err(CryptoError::store)?;
         let epoch = group.epoch().as_u64();
         let (commit, welcome, _group_info) = group
             .remove_members(&self.provider(store), &account.signer, &indices)
@@ -332,7 +358,19 @@ impl MlsEngine {
         })
     }
 
-    /// Merges the pending commit after the server accepted it; returns the
+    /// Creates a Remove proposal for this device's own leaf, to be committed
+    /// by another member. The local group is left untouched; callers delete
+    /// it once the proposal was delivered.
+    pub fn leave_group(&self, store: &impl CryptoStore, group_id: &GroupId) -> Result<Vec<u8>> {
+        let account = self.account(store)?;
+        let mut group = load_group(store, group_id)?;
+        let proposal = group
+            .leave_group(&self.provider(store), &account.signer)
+            .map_err(CryptoError::mls)?;
+        serialize(&proposal)
+    }
+
+    /// Merges the pending commit after the hub accepted it; returns the
     /// new epoch.
     pub fn merge_pending_commit(
         &self,
@@ -383,14 +421,12 @@ impl MlsEngine {
                 "group {group_id} already exists"
             )));
         }
-        if uses_gim_credential(store)? {
-            for member in staged.members() {
-                credential::validate(
-                    &member.credential,
-                    &member.signature_key,
-                    &*self.device_lists,
-                )?;
-            }
+        for member in staged.members() {
+            credential::validate(
+                &member.credential,
+                &member.signature_key,
+                &*self.device_lists,
+            )?;
         }
         let group = staged.into_group(&provider).map_err(CryptoError::mls)?;
         store.add_group_id(&group_id).map_err(CryptoError::store)?;
@@ -440,9 +476,15 @@ impl MlsEngine {
             Sender::Member(index) => Some(*index),
             _ => None,
         };
-        let validating = uses_gim_credential(store)?;
         match processed.into_content() {
             ProcessedMessageContent::ApplicationMessage(message) => {
+                if self.is_revoked(&sender) {
+                    return Err(credential::CredentialError::RevokedDevice {
+                        user: sender.user_id,
+                        device: sender.device_id,
+                    }
+                    .into());
+                }
                 Ok(ProcessedMessage::Application {
                     sender,
                     plaintext: message.into_bytes(),
@@ -451,26 +493,31 @@ impl MlsEngine {
             }
             ProcessedMessageContent::ProposalMessage(proposal)
             | ProcessedMessageContent::ExternalJoinProposalMessage(proposal) => {
-                if validating {
-                    match proposal.proposal() {
-                        Proposal::Add(add) => {
-                            self.validate_leaf(add.key_package().leaf_node())?;
-                        }
-                        Proposal::Update(update) => {
-                            self.validate_leaf(update.leaf_node())?;
-                        }
-                        _ => {}
+                let removed = match proposal.proposal() {
+                    Proposal::Add(add) => {
+                        self.validate_leaf(add.key_package().leaf_node())?;
+                        None
                     }
-                }
+                    Proposal::Update(update) => {
+                        self.validate_leaf(update.leaf_node())?;
+                        None
+                    }
+                    Proposal::Remove(remove) => Some(
+                        group
+                            .member(remove.removed())
+                            .ok_or_else(|| CryptoError::mls("removed leaf is not a member"))
+                            .and_then(device_of)?,
+                    ),
+                    Proposal::SelfRemove => Some(sender.clone()),
+                    _ => None,
+                };
                 group
                     .store_pending_proposal(store.mls_storage(), *proposal)
                     .map_err(CryptoError::mls)?;
-                Ok(ProcessedMessage::Proposal { sender })
+                Ok(ProcessedMessage::Proposal { sender, removed })
             }
             ProcessedMessageContent::StagedCommitMessage(commit) => {
-                if validating {
-                    self.validate_commit(&group, sender_leaf, &commit)?;
-                }
+                self.validate_commit(&group, sender_leaf, &commit)?;
                 let added = commit
                     .add_proposals()
                     .map(|p| device_of(p.add_proposal().key_package().leaf_node().credential()))
@@ -514,7 +561,7 @@ impl MlsEngine {
         group_id: &GroupId,
         plaintext: &[u8],
     ) -> Result<Vec<u8>> {
-        let account = account(store)?;
+        let account = self.account(store)?;
         let mut group = load_group(store, group_id)?;
         let message = group
             .create_message(&self.provider(store), &account.signer, plaintext)
@@ -548,6 +595,22 @@ impl MlsEngine {
         delete(store, &mut group, group_id)
     }
 
+    fn account(&self, store: &impl CryptoStore) -> Result<Account<'_>> {
+        let identity = store
+            .load_identity()
+            .map_err(CryptoError::store)?
+            .ok_or_else(|| CryptoError::store("no identity; call create_identity_v2 first"))?;
+        Ok(Account {
+            device: identity.device.clone(),
+            signer: DeviceSigner {
+                crypto: &self.crypto,
+                seed: identity.signature_private_key.clone(),
+                public: identity.signature_public_key.clone(),
+            },
+            credential: identity.credential.clone(),
+        })
+    }
+
     fn provider<'a, S: CryptoStore>(&'a self, store: &'a S) -> Provider<'a, S::MlsStorage> {
         Provider {
             crypto: &self.crypto,
@@ -558,7 +621,7 @@ impl MlsEngine {
     fn key_package(
         &self,
         store: &impl CryptoStore,
-        account: &Account,
+        account: &Account<'_>,
         last_resort: bool,
     ) -> Result<Vec<u8>> {
         let mut builder = KeyPackage::builder().leaf_node_capabilities(account.capabilities());
@@ -633,31 +696,6 @@ impl MlsEngine {
     }
 }
 
-fn account(store: &impl CryptoStore) -> Result<Account> {
-    let identity = store
-        .load_identity()
-        .map_err(CryptoError::store)?
-        .ok_or_else(|| CryptoError::store("no identity; call create_identity first"))?;
-    Ok(Account {
-        device: identity.device,
-        signer: SignatureKeyPair::from_raw(
-            CIPHERSUITE.signature_algorithm(),
-            identity.signature_private_key,
-            identity.signature_public_key,
-        ),
-        credential: identity.credential,
-    })
-}
-
-/// Whether the local identity uses a gim credential (and so validates
-/// leaves). No identity counts as legacy.
-fn uses_gim_credential(store: &impl CryptoStore) -> Result<bool> {
-    Ok(store
-        .load_identity()
-        .map_err(CryptoError::store)?
-        .is_some_and(|identity| identity.credential.is_some()))
-}
-
 fn group_ids(store: &impl CryptoStore) -> Result<BTreeSet<GroupId>> {
     store.group_ids().map_err(CryptoError::store)
 }
@@ -685,16 +723,10 @@ fn delete(store: &impl CryptoStore, group: &mut MlsGroup, group_id: &GroupId) ->
     store.remove_group_id(group_id).map_err(CryptoError::store)
 }
 
-/// Maps a leaf credential to its device: the certified device for a gim
-/// credential, the encoded identity for a basic one.
-fn device_of(credential: &Credential) -> Result<DeviceRef> {
-    if credential.credential_type() == CredentialType::Other(GIM_CREDENTIAL_TYPE) {
-        let cert = GimCredential::from_mls(credential)?.verify()?;
-        return Ok(DeviceRef::new(cert.user_id, cert.device_id));
-    }
-    Ok(DeviceRef::from_credential_identity(
-        credential.serialized_content(),
-    )?)
+/// Maps a leaf credential to its certified device.
+pub(crate) fn device_of(credential: &Credential) -> Result<DeviceRef> {
+    let cert = GimCredential::from_mls(credential)?.verify()?;
+    Ok(DeviceRef::new(cert.user_id, cert.device_id))
 }
 
 fn members_of(group: &MlsGroup) -> Result<Vec<DeviceRef>> {
@@ -705,7 +737,7 @@ fn serialize(message: &MlsMessageOut) -> Result<Vec<u8>> {
     message.tls_serialize_detached().map_err(CryptoError::mls)
 }
 
-fn deserialize(bytes: &[u8]) -> Result<MlsMessageIn> {
+pub(crate) fn deserialize(bytes: &[u8]) -> Result<MlsMessageIn> {
     MlsMessageIn::tls_deserialize_exact(bytes)
         .map_err(|e| CryptoError::invalid(format!("malformed MLS message: {e}")))
 }

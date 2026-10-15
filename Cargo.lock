@@ -1219,7 +1219,6 @@ dependencies = [
  "gim-proto",
  "gim-test",
  "openmls",
- "openmls_basic_credential",
  "openmls_memory_storage",
  "openmls_rust_crypto",
  "openmls_traits",
@@ -1300,6 +1299,7 @@ dependencies = [
  "gim-base",
  "gim-common",
  "gim-crypto",
+ "gim-identity",
  "gim-proto",
  "gim-sdk",
  "gim-sqlite",
@@ -1316,6 +1316,7 @@ dependencies = [
  "tracing",
  "webpki-roots 1.0.9",
  "wiremock",
+ "zeroize",
 ]
 
 [[package]]
@@ -1344,6 +1345,7 @@ name = "gim-test"
 version = "0.1.0"
 dependencies = [
  "gim-common",
+ "gim-identity",
  "thiserror",
 ]
 
@@ -2368,23 +2370,6 @@ dependencies = [
  "serde",
  "serde_bytes",
  "thiserror",
- "tls_codec",
- "zeroize",
-]
-
-[[package]]
-name = "openmls_basic_credential"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbd3f0c3422e7c7a8496f042b547b0c28d0793f8ba97feb401966e58196a1e40"
-dependencies = [
- "ed25519-dalek",
- "ml-dsa",
- "openmls_traits",
- "p256",
- "p384",
- "rand_core 0.6.4",
- "serde",
  "tls_codec",
  "zeroize",
 ]

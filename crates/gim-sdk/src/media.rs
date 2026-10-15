@@ -13,7 +13,6 @@ use gim_crypto::{
 };
 use gim_proto::envelope::MediaInfo;
 
-use crate::client::Session;
 use crate::transport::TransportError;
 use crate::{Client, ClientError, Result};
 
@@ -34,7 +33,6 @@ impl<S: StateStore + 'static> Client<S> {
     /// uploads it.
     pub(crate) async fn upload_media(
         &self,
-        session: &Session,
         message_id: &MessageId,
         pending: PendingMedia,
     ) -> Result<MediaInfo> {
@@ -59,9 +57,10 @@ impl<S: StateStore + 'static> Client<S> {
         })
         .await?;
         let uploaded = self
-            .inner
-            .transport
-            .upload_blob(&session.token, &encrypted)
+            .authed(|t| {
+                let encrypted = &encrypted;
+                async move { self.inner.transport.upload_blob(&t, encrypted).await }
+            })
             .await;
         let _ = fs::remove_file(&encrypted);
         let blob_id = uploaded?;
@@ -91,7 +90,7 @@ impl<S: StateStore + 'static> Client<S> {
         message_id: &MessageId,
         dest: impl AsRef<Path>,
     ) -> Result<()> {
-        let session = self.require_session()?;
+        self.require_session()?;
         let media = self.media_of(group_id, message_id).await?;
         let dest = dest.as_ref().to_path_buf();
         let dest_str = dest
@@ -109,7 +108,7 @@ impl<S: StateStore + 'static> Client<S> {
                 blocking(move || Ok(fs::copy(from, to).map(drop)?)).await?;
             }
         } else {
-            self.download(&session, &media, &dest).await?;
+            self.download(&media, &dest).await?;
         }
         let entry = MediaCacheEntry {
             blob_id: media.blob_id.clone(),
@@ -136,7 +135,7 @@ impl<S: StateStore + 'static> Client<S> {
         blocking(move || Ok(fs::write(dest, thumbnail)?)).await
     }
 
-    async fn download(&self, session: &Session, media: &MediaInfo, dest: &Path) -> Result<()> {
+    async fn download(&self, media: &MediaInfo, dest: &Path) -> Result<()> {
         let hex: String = media.sha256.iter().map(|b| format!("{b:02x}")).collect();
         let partial = self.tmp_dir().join(format!("download-{hex}.part"));
         let (part, size) = (partial.clone(), media.size);
@@ -168,9 +167,15 @@ impl<S: StateStore + 'static> Client<S> {
                 None => MEDIA_HEADER_LEN as u64,
             };
             let bytes = self
-                .inner
-                .transport
-                .download_blob(&session.token, &media.blob_id, Some(have..end))
+                .authed(|t| {
+                    let blob_id = &media.blob_id;
+                    async move {
+                        self.inner
+                            .transport
+                            .download_blob(&t, blob_id, Some(have..end))
+                            .await
+                    }
+                })
                 .await?;
             if bytes.len() as u64 != end - have {
                 return Err(TransportError::Server(format!(

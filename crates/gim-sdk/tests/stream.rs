@@ -1,5 +1,5 @@
-//! The sync loop over the `/v1/stream` WebSocket and the long-poll
-//! fallback, against an in-process mock gim-server: reconnects, connection
+//! The sync loop over the `/v2/stream` WebSocket and the long-poll
+//! fallback, against an in-process mock hub: reconnects, connection
 //! states, token rejection and reachability.
 
 mod mock_server;
@@ -7,22 +7,17 @@ mod mock_server;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use gim_base::model::IncomingEvent;
-use gim_common::DeviceRef;
 use gim_sdk::testing::FakeTransport;
-use gim_sdk::transport::{AccessToken, Transport};
-use gim_sdk::{ClientError, ConnectionState, HttpTransport, SyncSettings};
+use gim_sdk::{ClientError, ConnectionState, SyncSettings};
 use mock_server::{
     fast_settings, next_state, reach_state, recv_texts, upserted_texts, wait_until, MockServer,
     Peer,
 };
-use serde_json::json;
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, ResponseTemplate};
 
 use ConnectionState::{Connected, Connecting, Offline, Syncing};
 
 struct Setup {
+    transport: FakeTransport,
     server: MockServer,
     alice: Peer,
     bob: Peer,
@@ -42,6 +37,7 @@ async fn setup(settings: SyncSettings) -> Setup {
         .await
         .unwrap();
     Setup {
+        transport,
         server,
         alice,
         bob,
@@ -56,6 +52,7 @@ async fn reconnect_after_drop_resumes_from_cursor_without_duplicates() {
         alice,
         bob,
         group_id,
+        ..
     } = setup(fast_settings()).await;
     let mut changes = bob.client.subscribe_changes();
     let mut states = bob.client.subscribe_connection_state();
@@ -116,6 +113,7 @@ async fn falls_back_to_long_poll_without_stream() {
         alice,
         bob,
         group_id,
+        ..
     } = setup(fast_settings()).await;
     server
         .controls
@@ -150,16 +148,50 @@ async fn connection_states_and_token_rejection() {
         assert_eq!(next_state(&mut states).await, expected);
     }
 
-    // Close code 4401 stops the loop.
+    // Close code 4401, and the hub refuses the sign-in (device_not_active):
+    // the loop stops and the client is signed out.
     server.streams_served(2).await;
     server.controls.reject.store(true, Ordering::SeqCst);
     assert_eq!(next_state(&mut states).await, Offline);
     wait_until("sync loop ended", || !bob.client.is_sync_running()).await;
     assert!(matches!(
         bob.client.stop_sync(),
-        Err(ClientError::NotRegistered)
+        Err(ClientError::DeviceNotActive(_))
     ));
     assert_eq!(bob.client.connection_state(), Offline);
+    assert_eq!(bob.client.session(), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn expired_stream_session_signs_in_again_and_reconnects() {
+    let Setup {
+        transport,
+        server,
+        alice,
+        bob,
+        group_id,
+    } = setup(fast_settings()).await;
+    let mut states = bob.client.subscribe_connection_state();
+    bob.client.start_sync().unwrap();
+    reach_state(&mut states, Connected).await;
+    server.streams_served(1).await;
+    let before = bob.client.session().unwrap();
+
+    // The hub drops the session: the stream closes with 4401, the client
+    // signs in again and reconnects.
+    transport.service().expire_sessions(&before.device);
+    reach_state(&mut states, Connected).await;
+    server.streams_served(2).await;
+    let after = bob.client.session().unwrap();
+    assert_ne!(after.token, before.token);
+    assert!(bob.client.is_sync_running());
+
+    alice.send_text(&group_id, "after re-sign-in").await;
+    wait_until("live message", || {
+        bob.texts(&group_id) == ["after re-sign-in"]
+    })
+    .await;
+    bob.client.stop_sync().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -181,52 +213,4 @@ async fn reachability_cuts_the_reconnect_backoff_short() {
         .await
         .expect("reconnected without waiting for the backoff");
     bob.client.stop_sync().unwrap();
-}
-
-#[tokio::test]
-async fn seeded_directory_resolves_membership_events() {
-    let server = wiremock::MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/v1/events"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "events": [{
-                "cursor": 5,
-                "created_at": 1,
-                "type": "group.member_removed",
-                "data": { "group_id": "g_1", "device_ids": ["d_c"], "by_device_id": "d_c" },
-            }],
-            "next_cursor": 5,
-        })))
-        .mount(&server)
-        .await;
-    // The removed device is no longer listed, and this device is not `d_c`.
-    Mock::given(method("GET"))
-        .and(path("/v1/groups/g_1"))
-        .respond_with(
-            ResponseTemplate::new(404)
-                .set_body_json(json!({ "error": { "code": "not_found", "message": "gone" } })),
-        )
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/v1/me"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "user_id": "u_b", "device_id": "d_b", "handle": "b", "display_name": "B",
-        })))
-        .mount(&server)
-        .await;
-    let transport = HttpTransport::new(server.uri().parse().unwrap()).unwrap();
-    let token = AccessToken::new("tok");
-    let fetch = || transport.fetch_events(&token, Some(4), Duration::ZERO);
-    assert_eq!(fetch().await.unwrap().events, vec![]);
-
-    let carol = DeviceRef::parse("u_c", "d_c").unwrap();
-    transport.seed_device_directory(std::slice::from_ref(&carol));
-    assert_eq!(
-        fetch().await.unwrap().events,
-        vec![IncomingEvent::MemberRemoved {
-            group_id: gim_common::GroupId::new("g_1").unwrap(),
-            device: carol,
-        }]
-    );
 }

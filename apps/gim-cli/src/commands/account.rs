@@ -23,18 +23,21 @@ pub async fn register(
         return Err(CliError::usage("profile is already registered"));
     }
     let handle = handle.strip_prefix('@').unwrap_or(handle);
-    let session = client.register(handle, display_name).await?;
+    let recovery_code = client.create_identity(display_name).await?;
     profile.config.server = Some(server.clone());
     profile.config.save(&profile.dir)?;
+    client.claim_handle(handle).await?;
+    let session = client.session().ok_or_else(CliError::not_registered)?;
     let out = RegisterOut {
         user_id: session.device.user_id.to_string(),
         device_id: session.device.device_id.to_string(),
         handle: handle.to_string(),
         server,
+        recovery_code: recovery_code.to_string(),
     };
     let human = format!(
-        "registered @{} as {} (device {})",
-        out.handle, out.user_id, out.device_id
+        "registered @{} as {} (device {})\nrecovery code (shown once, keep it safe): {}",
+        out.handle, out.user_id, out.device_id, out.recovery_code
     );
     Ok(Output::new(&out, human))
 }

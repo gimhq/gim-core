@@ -68,7 +68,8 @@ const TYPING_ABOUT: &str = "Typing indicators expire on their own; --stop only t
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Register a new device (requires --server).
+    /// Create a new identity with this device and claim a handle
+    /// (requires --server); prints the recovery code once.
     Register {
         handle: String,
         display_name: String,

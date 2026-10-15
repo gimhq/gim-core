@@ -9,7 +9,8 @@ use gim_base::{BaseError, StateReader};
 use gim_common::{GroupId, MessageId, UserId};
 use gim_sdk::transport::Transport;
 use gim_sdk::{
-    Client, ClientBuilder, HttpTransport, OutboxSender, OUTGOING_DIR, SESSION_SECRET_KEY,
+    Client, ClientBuilder, HttpTransport, OutboxSender, DEVICE_KEY_SECRET_KEY, OUTGOING_DIR,
+    ROOT_KEY_SECRET_KEY, SESSION_SECRET_KEY,
 };
 use gim_sqlite::{DbKey, SqliteStore, DATABASE_FILE_NAME};
 use tokio::sync::{broadcast, watch};
@@ -27,7 +28,7 @@ type Sdk = Client<SqliteStore>;
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct ClientConfig {
-    /// Base URL of gim-server, `http://` or `https://`.
+    /// Base URL of the hub, `http://` or `https://`.
     pub server_url: String,
 }
 
@@ -352,20 +353,13 @@ impl GimClient {
         }))
     }
 
-    /// Creates the account and this device on the server and persists the
-    /// session.
-    pub async fn register(
-        &self,
-        handle: String,
-        display_name: String,
-    ) -> Result<Session, GimError> {
-        let session = self.sdk()?.register(&handle, &display_name).await?;
-        Ok(Session {
-            user_id: session.device.user_id.to_string(),
-            device_id: session.device.device_id.to_string(),
-            handle,
-            display_name,
-        })
+    /// Creates a new identity with this device as its first one: uploads
+    /// its signed DeviceList, recovery backup and KeyPackages to the hub,
+    /// signs in and persists the session. Returns the recovery code, which
+    /// is not stored and must be shown to the user once.
+    pub async fn create_identity(&self, display_name: String) -> Result<String, GimError> {
+        let code = self.sdk()?.create_identity(&display_name).await?;
+        Ok(code.to_string())
     }
 
     /// Stops sync and deletes the session, local data and keystore secrets.
@@ -373,8 +367,13 @@ impl GimClient {
         self.sdk()?;
         self.stop_sync_tasks();
         self.signed_out.store(true, Ordering::SeqCst);
-        self.hooks
-            .secure_store_delete(SESSION_SECRET_KEY.to_string());
+        for key in [
+            SESSION_SECRET_KEY,
+            DEVICE_KEY_SECRET_KEY,
+            ROOT_KEY_SECRET_KEY,
+        ] {
+            self.hooks.secure_store_delete(key.to_string());
+        }
         self.hooks
             .secure_store_delete(ClientBuilder::<SqliteStore>::DB_KEY_SECRET_KEY.to_string());
         let data_dir = self.data_dir.clone();

@@ -105,9 +105,7 @@ mod tests {
         client.set_network_reachable(false);
 
         assert!(matches!(
-            client
-                .register("alice".to_string(), "Alice".to_string())
-                .await,
+            client.create_identity("Alice".to_string()).await,
             Err(GimError::Network { .. })
         ));
         // Everything else needs a session.
@@ -129,7 +127,7 @@ mod tests {
             })
         );
         assert!(matches!(
-            client.send_text("bad/id".to_string(), id(), None).await,
+            client.send_text(String::new(), id(), None).await,
             Err(GimError::InvalidInput { .. })
         ));
     }

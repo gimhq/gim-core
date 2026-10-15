@@ -55,7 +55,6 @@ futures-util = "=0.3.34"
 getrandom = "=0.2.17"
 hkdf = "=0.12.4"
 openmls = "=0.9.1"
-openmls_basic_credential = "=0.6.0"
 openmls_memory_storage = "=0.6.0"
 openmls_rust_crypto = "=0.6.0"
 openmls_sqlite_storage = "=0.3.0"
@@ -97,6 +96,14 @@ webpki-roots = "=1.0.9"
 wiremock = "=0.6.5"
 x25519-dalek = { version = "=2.0.1", features = ["static_secrets"] }
 zeroize = { version = "=1.9.1", features = ["derive"] }
+
+# Recovery backups run Argon2id with 64 MiB; unoptimized it dominates
+# debug test runs.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
 
 [profile.release]
 lto = true
