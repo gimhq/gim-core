@@ -287,7 +287,7 @@ fn message_dto(m: Delivered) -> v2::Message {
         sender_user_id: m.sender.user_id.to_string(),
         sender_device_id: m.sender.device_id.to_string(),
         client_id: m.client_id.to_string(),
-        message_id: Some(format!("{}#{}", m.group_id, m.seq)),
+        message_id: format!("{}#{}", m.group_id, m.seq),
         kind: match m.kind {
             gim_test::MessageKind::Commit
                 if inspect_handshake(&m.payload)

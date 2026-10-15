@@ -5,7 +5,7 @@
 # Starts the hub with scripts/gim-hub-dev.sh (stopped on exit) and runs the
 # test in a rust:1 container on the same network.
 #
-# Env: GIM_HUB_SRC, GIM_HUB_REV (default f4da007), GIM_HUB_BUILD (see
+# Env: GIM_HUB_SRC, GIM_HUB_REV (default 9608f34), GIM_HUB_BUILD (see
 # scripts/gim-hub-dev.sh).
 set -euo pipefail
 

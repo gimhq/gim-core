@@ -35,15 +35,17 @@ message S2sRequest {
     FetchLogRequest fetch_log = 15;
     GetDeviceListRequest get_device_list = 16;
     GetHostingRecordRequest get_hosting_record = 17;
-    // 18-29: reserved for multi-homing (M2c) operations, e.g. hub
-    //        add/remove and migration hand-off.
+    // 18-29: multi-homing (M2c).
+    NotifyHostingRecordRequest notify_hosting_record = 18;
+    SeedReplicaRequest seed_replica = 19;
+    CopyPendingWelcomesRequest copy_pending_welcomes = 20;
     // 30-39: reserved for push (P) operations, e.g. collapse-id coordination.
     // 40-49: federation (M2b).
     HelloRequest hello = 40;
     NotifyDeviceListRequest notify_device_list = 41;
   }
 
-  reserved 18 to 39;
+  reserved 21 to 39;
 }
 
 message S2sResponse {
@@ -61,12 +63,15 @@ message S2sResponse {
     FetchLogResponse fetch_log = 15;
     GetDeviceListResponse get_device_list = 16;
     GetHostingRecordResponse get_hosting_record = 17;
-    // 18-39: reserved, mirroring S2sRequest.op.
+    NotifyHostingRecordResponse notify_hosting_record = 18;
+    SeedReplicaResponse seed_replica = 19;
+    CopyPendingWelcomesResponse copy_pending_welcomes = 20;
+    // 21-39: reserved, mirroring S2sRequest.op.
     HelloResponse hello = 40;
     NotifyDeviceListResponse notify_device_list = 41;
   }
 
-  reserved 18 to 39;
+  reserved 21 to 39;
 
   Error error = 2;
 }
@@ -147,7 +152,8 @@ message SubmitCommitRequest {
   string client_id = 4;
   // MLSMessage (Commit or Proposal), TLS-serialized.
   bytes mls_message = 5;
-  // MLS Welcome produced with the Commit, if it adds members.
+  // TLS-encoded MLSMessage (wire_format = mls_welcome) carrying the Welcome
+  // produced with the Commit, if it adds members.
   optional bytes welcome = 6;
   // Devices the Welcome is addressed to.
   repeated string welcome_recipient_device_ids = 7;
@@ -262,7 +268,7 @@ message DeliverWelcomeRequest {
   string sender_user_id = 2;
   string recipient_user_id = 3;
   repeated string recipient_device_ids = 4;
-  // MLS Welcome, TLS-serialized.
+  // TLS-encoded MLSMessage (wire_format = mls_welcome) carrying a Welcome.
   bytes welcome = 5;
   optional bytes ratchet_tree = 6;
   // Globally unique id assigned by the owning hub; receivers dedup on it.
@@ -353,3 +359,37 @@ message NotifyDeviceListRequest {
 }
 
 message NotifyDeviceListResponse {}
+
+// ---------------------------------------------------------------------------
+// Multi-homing (M2c)
+// ---------------------------------------------------------------------------
+
+// A user's hub (under the new or the superseded record) -> co-hosts, removed
+// hubs, owners and member hubs sharing groups with the user.
+message NotifyHostingRecordRequest {
+  string user_id = 1;
+  bytes hosting_record_cbor = 2;   // gim-core SignedHostingRecord
+}
+message NotifyHostingRecordResponse {}
+
+// Owning hub -> a hub newly listed for a member: creates the replica.
+message SeedReplicaRequest {
+  string gid = 1;
+  string user_id = 2;              // the member whose record added the hub
+  GroupSnapshot group = 3;         // current state: epoch, seq = last_seq, roster
+}
+message SeedReplicaResponse {}
+
+// Co-host -> newly listed hub: the user's unacknowledged pending Welcomes.
+message CopyPendingWelcomesRequest {
+  string user_id = 1;
+  repeated PendingWelcome welcomes = 2;
+}
+message PendingWelcome {
+  string device_id = 1;
+  string gid = 2;
+  string message_id = 3;
+  string payload_json = 4;         // the stored `welcome` event payload
+  uint64 created_at = 5;           // unix ms on the sending hub
+}
+message CopyPendingWelcomesResponse {}

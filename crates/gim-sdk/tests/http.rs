@@ -82,6 +82,7 @@ fn message_json(seq: u64, kind: &str) -> Value {
         "sender_user_id": uid(2),
         "sender_device_id": did(2),
         "client_id": "c1",
+        "message_id": format!("m-{seq}"),
         "kind": kind,
         "epoch": 2,
         "mls_message": "AQID",
@@ -777,9 +778,8 @@ async fn group_messages_skip_unknown_kinds_and_keep_proposals() {
         .unwrap();
     assert!(messages.is_empty());
 
-    // Message events of unknown kinds are dropped; message_id is accepted.
-    let mut proposal = message_json(4, "proposal");
-    proposal["message_id"] = json!("m-4");
+    // Message events of unknown kinds are dropped.
+    let proposal = message_json(4, "proposal");
     Mock::given(method("GET"))
         .and(path("/v2/events"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({

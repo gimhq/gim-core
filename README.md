@@ -41,7 +41,7 @@ docker run --rm --label ai-agent=true -v "$PWD:$PWD" -w "$PWD" \
 ## Integration tests
 
 `scripts/integration-test.sh` builds gim-hub from `GIM_HUB_SRC` (default
-`/srv/gimhq/im-client/hub`) at `GIM_HUB_REV` (default `f4da007`, exported with
+`/srv/gimhq/im-client/hub`) at `GIM_HUB_REV` (default `9608f34`, exported with
 `git archive`, so local changes in the checkout are ignored) as
 `ai-agent/gim-hub`, runs it on the `traefik` network, waits for `/healthz`,
 prints the hub commit and runs `testing/gim-integration-testing` in a `rust:1`

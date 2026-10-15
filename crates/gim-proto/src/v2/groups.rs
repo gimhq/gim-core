@@ -88,8 +88,7 @@ pub enum MessageKind {
     Commit,
     Application,
     /// A standalone handshake Proposal (e.g. a member's self-Remove),
-    /// pending until a Commit references it (gim-hub f4da007; not yet in
-    /// the vendored contract).
+    /// pending until a Commit references it.
     Proposal,
     /// Any kind this client does not know yet.
     #[serde(other)]
@@ -105,10 +104,8 @@ pub struct Message {
     pub sender_device_id: String,
     pub client_id: String,
     /// Opaque id assigned by the owning hub, identical on every hub storing
-    /// the message (cross-hub dedup key). Always sent by gim-hub f4da007;
-    /// absent from older hubs and from the vendored contract.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message_id: Option<String>,
+    /// the message (cross-hub dedup key).
+    pub message_id: String,
     pub kind: MessageKind,
     pub epoch: u64,
     /// MLSMessage: PublicMessage for Commits and Proposals, PrivateMessage
