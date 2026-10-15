@@ -1268,7 +1268,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_gim_core_checksum_method_gimclient_session() and 0xFFFF) != 61969) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_gim_core_checksum_method_gimclient_set_group_info() and 0xFFFF) != 45190) {
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_set_group_info() and 0xFFFF) != 58408) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_set_network_reachable() and 0xFFFF) != 23325) {
@@ -1280,7 +1280,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_gim_core_checksum_method_gimclient_sign_out() and 0xFFFF) != 6926) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_gim_core_checksum_method_gimclient_start_sync() and 0xFFFF) != 54283) {
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_start_sync() and 0xFFFF) != 1762) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_stop_sync() and 0xFFFF) != 2971) {
@@ -2564,7 +2564,9 @@ public interface GimClientInterface {
     suspend fun `session`(): Session?
     
     /**
-     * Updates the group name and/or avatar; `None` leaves a field unchanged.
+     * Updates the group name and/or avatar and shares them with the
+     * members; `None` leaves a field unchanged. The avatar file is
+     * encrypted and uploaded before this returns.
      */
     suspend fun `setGroupInfo`(`chatId`: kotlin.String, `name`: kotlin.String?, `avatarFilePath`: kotlin.String?)
     
@@ -2581,7 +2583,8 @@ public interface GimClientInterface {
     suspend fun `signOut`()
     
     /**
-     * Starts the background sync loop and outbox sender.
+     * Starts the background sync loop (WebSocket stream with a long-poll
+     * fallback, reconnecting with backoff) and the outbox sender.
      */
     suspend fun `startSync`()
     
@@ -3254,7 +3257,9 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
 
     
     /**
-     * Updates the group name and/or avatar; `None` leaves a field unchanged.
+     * Updates the group name and/or avatar and shares them with the
+     * members; `None` leaves a field unchanged. The avatar file is
+     * encrypted and uploaded before this returns.
      */
     @Throws(GimException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -3347,7 +3352,8 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
 
     
     /**
-     * Starts the background sync loop and outbox sender.
+     * Starts the background sync loop (WebSocket stream with a long-poll
+     * fallback, reconnecting with backoff) and the outbox sender.
      */
     @Throws(GimException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
