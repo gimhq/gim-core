@@ -81,6 +81,11 @@ impl AuthResponse {
         }
     }
 
+    /// The challenge bytes as answered (unverified until [`Self::verify`]).
+    pub fn challenge(&self) -> &[u8] {
+        &self.challenge
+    }
+
     pub fn user_id(&self) -> &UserId {
         &self.user_id
     }

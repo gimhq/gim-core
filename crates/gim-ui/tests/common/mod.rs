@@ -40,6 +40,32 @@ impl Device {
         }
     }
 
+    /// A new device of `old`'s user, linked by QR and confirmed on both.
+    pub async fn link(transport: &FakeTransport, old: &Device) -> Self {
+        let store = Arc::new(MemoryStore::new());
+        let data_dir = tempfile::tempdir().unwrap();
+        let client = ClientBuilder::new(
+            store.clone(),
+            Arc::new(transport.clone()),
+            Arc::new(MemorySecretStorage::new()) as Arc<dyn SecretStorage>,
+        )
+        .data_dir(data_dir.path())
+        .build()
+        .unwrap();
+        let session = client.start_link(vec![]).unwrap();
+        let approval = old.client.approve_link(&session.qr_string).await.unwrap();
+        let linked = client.wait_link(&session).await.unwrap();
+        assert_eq!(linked.sas, approval.sas);
+        client.confirm_link(true).await.unwrap();
+        old.client.confirm_approval(&approval, true).await.unwrap();
+        client.sync_once().await.unwrap();
+        Self {
+            client,
+            store,
+            data_dir,
+        }
+    }
+
     pub fn device(&self) -> DeviceRef {
         self.client.session().unwrap().device
     }

@@ -36,7 +36,8 @@ async fn joiners_see_the_group_name() {
         .create_group_chat(Some("Aegean crew".into()), &[bob.user_id()])
         .await
         .unwrap();
-    assert_eq!(server_messages(&transport, &g, &alice.device()).len(), 1);
+    // The group info and alice's profile.
+    assert_eq!(server_messages(&transport, &g, &alice.device()).len(), 2);
     bob.sync().await;
     assert_eq!(chat_name(&bob, &g).as_deref(), Some("Aegean crew"));
 
@@ -49,19 +50,25 @@ async fn joiners_see_the_group_name() {
     dave.sync().await;
     assert_eq!(chat_name(&dave, &g).as_deref(), Some("Aegean crew"));
 
-    // Nothing to share for direct chats and unnamed groups.
+    // Nothing but the profile to share for direct chats and unnamed groups.
     let direct = alice
         .client
         .create_direct_chat(&carol.user_id())
         .await
         .unwrap();
-    assert!(server_messages(&transport, &direct, &alice.device()).is_empty());
+    assert_eq!(
+        server_messages(&transport, &direct, &alice.device()).len(),
+        1
+    );
     let unnamed = alice
         .client
         .create_group_chat(None, &[carol.user_id()])
         .await
         .unwrap();
-    assert!(server_messages(&transport, &unnamed, &alice.device()).is_empty());
+    assert_eq!(
+        server_messages(&transport, &unnamed, &alice.device()).len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -211,13 +218,20 @@ async fn backfill_skips_what_cannot_be_decrypted() {
     assert!(!backfill.has_more);
     assert!(bob.messages(&g).is_empty());
 
-    // Carol cannot read anything from before her Welcome, which directly
-    // precedes her first message: nothing is requested.
+    // Between carol's Welcome and her first message there are only the
+    // profile announcements; nothing before the Welcome is requested.
     let oldest = carol.messages(&g)[0].seq.unwrap();
+    let backfill = carol
+        .client
+        .backfill_history(&g, oldest, 100)
+        .await
+        .unwrap();
+    assert_eq!(backfill.inserted, 0);
+    assert!(!backfill.has_more);
     for limit in [0, 100] {
         let backfill = carol
             .client
-            .backfill_history(&g, oldest, limit)
+            .backfill_history(&g, backfill.from_seq, limit)
             .await
             .unwrap();
         assert_eq!(backfill.inserted, 0);

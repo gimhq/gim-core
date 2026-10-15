@@ -219,6 +219,29 @@ pub trait Transport: Send + Sync {
         backup: Vec<u8>,
     ) -> TransportResult<()>;
 
+    /// The user's sealed recovery backup (no token: the restore path of a
+    /// user without devices); `None` if there is none.
+    async fn recovery_backup(&self, user_id: &UserId) -> TransportResult<Option<Vec<u8>>>;
+
+    /// Relays a sealed link bundle to the new device that showed
+    /// `link_id`; the hub keeps it for `expires_in` (at most 600 s).
+    async fn post_link_bundle(
+        &self,
+        token: &AccessToken,
+        link_id: &str,
+        sealed_bundle: Vec<u8>,
+        expires_in: Duration,
+    ) -> TransportResult<()>;
+
+    /// Fetches the link bundle of `link_id` (no token), waiting up to
+    /// `wait` (at most 30 s) for it; the hub deletes it once fetched.
+    /// `None` if none arrived.
+    async fn fetch_link_bundle(
+        &self,
+        link_id: &str,
+        wait: Duration,
+    ) -> TransportResult<Option<Vec<u8>>>;
+
     /// The user's signed DeviceList; `None` if the user is unknown.
     async fn device_list(
         &self,
@@ -354,12 +377,4 @@ pub trait Transport: Send + Sync {
         blob_id: &str,
         range: Option<Range<u64>>,
     ) -> TransportResult<Vec<u8>>;
-
-    /// Test transports only: the stand-in for device linking that lets
-    /// [`crate::Client::register`] add a device to an existing user.
-    #[cfg(any(test, feature = "testing"))]
-    #[doc(hidden)]
-    fn test_linking(&self) -> Option<&crate::testing::TestLinking> {
-        None
-    }
 }

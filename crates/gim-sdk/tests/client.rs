@@ -45,6 +45,21 @@ impl Device {
         }
     }
 
+    /// A new device of `old`'s user, linked by QR and confirmed on both.
+    async fn link(transport: &FakeTransport, old: &Device) -> Self {
+        let store = Arc::new(MemoryStore::new());
+        let secrets = Arc::new(MemorySecretStorage::new());
+        let data_dir = tempfile::tempdir().unwrap();
+        let client = build(transport, &store, &secrets, data_dir.path());
+        link(&old.client, &client).await;
+        Self {
+            client,
+            store,
+            secrets,
+            data_dir,
+        }
+    }
+
     fn user_id(&self) -> UserId {
         self.client.session().unwrap().device.user_id
     }
@@ -104,6 +119,17 @@ fn build(
     .data_dir(data_dir)
     .build()
     .unwrap()
+}
+
+/// Links `new` as a device of `old`'s user and joins the self group.
+async fn link(old: &Client<MemoryStore>, new: &Client<MemoryStore>) {
+    let session = new.start_link(vec!["hub.example".into()]).unwrap();
+    let approval = old.approve_link(&session.qr_string).await.unwrap();
+    let linked = new.wait_link(&session).await.unwrap();
+    assert_eq!(linked.sas, approval.sas);
+    new.confirm_link(true).await.unwrap();
+    old.confirm_approval(&approval, true).await.unwrap();
+    new.sync_once().await.unwrap();
 }
 
 fn text(message: &Message) -> String {
@@ -197,8 +223,8 @@ async fn lost_store_identity_signs_out() {
     assert_eq!(alice.secrets.get(SESSION_SECRET_KEY).unwrap(), None);
     assert!(!reset.restore_session().await.unwrap());
 
-    // Onboarding registers a new device of the same user.
-    reset.register("alice", "Alice").await.unwrap();
+    // Onboarding links a new device of the same user.
+    link(&alice.client, &reset).await;
     let session = reset.session().unwrap();
     assert_ne!(Some(session.clone()), alice.client.session());
     assert_eq!(session.device.user_id, alice.user_id());
@@ -255,7 +281,7 @@ async fn group_chat_and_second_device() {
     let transport = FakeTransport::new();
     let alice = Device::register(&transport, "alice").await;
     let bob = Device::register(&transport, "bob").await;
-    let bob_tablet = Device::register(&transport, "bob").await;
+    let bob_tablet = Device::link(&transport, &bob).await;
     let carol = Device::register(&transport, "carol").await;
     assert_eq!(bob.user_id(), bob_tablet.user_id());
     let all = [&alice, &bob, &bob_tablet, &carol];
@@ -583,7 +609,7 @@ async fn revoked_device_is_rejected_and_removed() {
     let transport = FakeTransport::new();
     let alice = Device::register(&transport, "alice").await;
     let bob = Device::register(&transport, "bob").await;
-    let bob_tablet = Device::register(&transport, "bob").await;
+    let bob_tablet = Device::link(&transport, &bob).await;
     let tablet = bob_tablet.client.session().unwrap().device;
     let g = alice
         .client

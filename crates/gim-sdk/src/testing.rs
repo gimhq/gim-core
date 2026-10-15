@@ -17,7 +17,6 @@ use gim_test::{
     Delivered, DeliveryError, Event, FakeDeliveryService, GroupKind, MembershipChange,
     SubmitCommit, Welcome,
 };
-use zeroize::Zeroizing;
 
 use crate::transport::{
     AccessToken, Challenge, ClaimedKeyPackage, CommitAccepted, EventBatch, GroupInfo, HubEvent,
@@ -35,40 +34,6 @@ const SESSION_LIFETIME_MS: u64 = 30 * 24 * 3_600_000;
 /// Largest application message, as on the hub (default).
 const MESSAGE_LIMIT_BYTES: usize = 262_144;
 
-/// Stand-in for device linking, which gim-sdk does not implement yet: the
-/// root key seed of each identity registered with a handle through a test
-/// transport, so that registering the same handle again adds a device to
-/// that user. Never part of a real transport.
-#[derive(Debug)]
-pub struct TestLinking {
-    service: Arc<FakeDeliveryService>,
-    roots: Mutex<HashMap<String, Zeroizing<[u8; 32]>>>,
-}
-
-impl TestLinking {
-    /// Records the root key seed of the user owning `handle`.
-    pub fn remember(&self, handle: &str, root_seed: &[u8; 32]) {
-        self.roots
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(handle.to_string(), Zeroizing::new(*root_seed));
-    }
-
-    /// The root key seed of the user owning `handle`, if registered here.
-    pub fn root_seed(&self, handle: &str) -> Option<Zeroizing<[u8; 32]>> {
-        self.roots
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(handle)
-            .cloned()
-    }
-
-    /// The user's stored signed DeviceList.
-    pub fn device_list(&self, user_id: &UserId) -> Option<Vec<u8>> {
-        self.service.device_list(user_id)
-    }
-}
-
 /// A [`Transport`] over a shared [`FakeDeliveryService`]. Cloning shares the
 /// service, so several clients can talk to the same fake hub. It verifies
 /// DeviceLists and AuthResponses with gim-identity and reads epochs and
@@ -76,7 +41,6 @@ impl TestLinking {
 #[derive(Debug, Clone)]
 pub struct FakeTransport {
     service: Arc<FakeDeliveryService>,
-    linking: Arc<TestLinking>,
     challenges: Arc<AtomicU64>,
     /// Validates uploaded KeyPackages against the stored DeviceLists.
     validator: Arc<MlsEngine>,
@@ -99,10 +63,6 @@ impl FakeTransport {
                 .ok()
         };
         Self {
-            linking: Arc::new(TestLinking {
-                service: service.clone(),
-                roots: Mutex::default(),
-            }),
             service,
             challenges: Arc::default(),
             validator: Arc::new(MlsEngine::with_device_list_lookup(Arc::new(stored_list))),
@@ -137,6 +97,7 @@ impl From<DeliveryError> for TransportError {
             DeliveryError::StaleEpoch { .. }
             | DeliveryError::StaleDeviceList
             | DeliveryError::HandleTaken(_)
+            | DeliveryError::LinkIdTaken(_)
             | DeliveryError::GroupExists(_) => Self::Conflict(err.to_string()),
             DeliveryError::ValidationFailed(_)
             | DeliveryError::NotAMember(_)
@@ -274,14 +235,12 @@ impl Transport for FakeTransport {
     /// Verifies the response like the hub: each challenge once, for the
     /// device it was issued to, with the hub's error codes.
     async fn create_session(&self, response: Vec<u8>) -> Result<SessionToken, SessionError> {
-        let bytes = response;
-        let response = AuthResponse::from_bytes(&bytes).map_err(invalid)?;
+        let response = AuthResponse::from_bytes(&response).map_err(invalid)?;
         let claimed = DeviceRef::new(response.user_id().clone(), response.device_id().clone());
-        let redeemed = self
+        if !self
             .service
-            .issued_challenge_in(&bytes)
-            .is_some_and(|challenge| self.service.redeem_challenge(&challenge, &claimed));
-        if !redeemed {
+            .redeem_challenge(response.challenge(), &claimed)
+        {
             return Err(SessionError::InvalidChallenge);
         }
         let not_active = || SessionError::Rejected("device_not_active".into());
@@ -318,6 +277,30 @@ impl Transport for FakeTransport {
             return Err(TransportError::Server("403 forbidden".into()));
         }
         Ok(self.service.put_recovery_backup(user_id, backup)?)
+    }
+
+    async fn recovery_backup(&self, user_id: &UserId) -> TransportResult<Option<Vec<u8>>> {
+        Ok(self.service.recovery_backup(user_id))
+    }
+
+    async fn post_link_bundle(
+        &self,
+        token: &AccessToken,
+        link_id: &str,
+        sealed_bundle: Vec<u8>,
+        _expires_in: Duration,
+    ) -> TransportResult<()> {
+        self.device(token)?;
+        Ok(self.service.post_link_bundle(link_id, sealed_bundle)?)
+    }
+
+    /// Never waits: the fake hub is synchronous.
+    async fn fetch_link_bundle(
+        &self,
+        link_id: &str,
+        _wait: Duration,
+    ) -> TransportResult<Option<Vec<u8>>> {
+        Ok(self.service.take_link_bundle(link_id))
     }
 
     async fn device_list(
@@ -565,10 +548,6 @@ impl Transport for FakeTransport {
     ) -> TransportResult<Vec<u8>> {
         self.device(token)?;
         Ok(self.service.download_blob(blob_id, range)?)
-    }
-
-    fn test_linking(&self) -> Option<&TestLinking> {
-        Some(&self.linking)
     }
 }
 
