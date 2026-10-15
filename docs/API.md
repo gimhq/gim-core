@@ -66,8 +66,16 @@ user's signed DeviceList. Handles are optional directory entries pointing at a u
      On a mismatch, `confirmApproval(approval, false)` revokes the new device and
      `confirmLink(false)` wipes it like `signOut()` (create a new client afterwards).
 
-  After both confirmed, the new device joins the user's chats as soon as it syncs.
-  A `LinkSession` accepts one bundle; start a new one after a failed `waitLink`.
+  Call order, strictly: new `startLink` → old `approveLink` → new `waitLink` → (SAS compared) →
+  old `confirmApproval` and new `confirmLink`. The link bundle carries the root key, the new
+  device's certificate and the DeviceList but no self-group Welcome, so the new device is in no
+  chat until the old device calls `confirmApproval(approval, true)`, which adds it to the self
+  group and every joined chat; the new device then joins them on its next sync. The new device
+  must have finished `waitLink` before `confirmApproval(…, true)` (it needs its KeyPackages).
+  Rejecting must happen on both devices. `waitLink` fails after 10 minutes without a bundle, or
+  on a bundle that does not verify; a `LinkSession` accepts one bundle, so start a new one. If
+  the old device approved but the link was abandoned, revoke the new device with
+  `revokeDevice(approval.deviceId())`. See `docs/identity.md`, "Device link flow".
 - **Restore** after losing every device: `restoreFromRecovery(userId, recoveryCode,
   revokeOthers)` on a fresh client. Pass `revokeOthers = true`: keeping the old devices needs the
   user's DeviceList cached locally, which a fresh install never has, so `false` fails with
