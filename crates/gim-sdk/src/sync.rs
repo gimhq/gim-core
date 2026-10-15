@@ -42,6 +42,11 @@ pub struct SyncSettings {
     /// How long to long-poll before trying the WebSocket stream again once
     /// it was unavailable.
     pub stream_retry: Duration,
+    /// Range of the random delay after which a member that is not the one
+    /// chosen to commit a pending Proposal commits it itself, if it is still
+    /// pending (the chosen member is offline).
+    pub proposal_commit_delay_min: Duration,
+    pub proposal_commit_delay_max: Duration,
     /// First retry delay of a pending invite (an invitee whose hub was
     /// unavailable); doubles per retry up to [`crate::INVITE_RETRY_MAX`].
     pub invite_retry: Duration,
@@ -56,6 +61,8 @@ impl Default for SyncSettings {
             backoff_max: Duration::from_secs(60),
             long_poll_wait: Duration::from_secs(30),
             stream_retry: Duration::from_secs(300),
+            proposal_commit_delay_min: Duration::from_secs(5),
+            proposal_commit_delay_max: Duration::from_secs(15),
             invite_retry: Duration::from_secs(30),
             invite_ttl: Duration::from_secs(24 * 3600),
         }
@@ -334,7 +341,8 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Applies fetched events under the group lock, then commits the
-    /// removal of departed devices, wakes the outbox (delivered receipts
+    /// removal of departed devices and pending Proposals, advances pending
+    /// leaves, wakes the outbox (delivered receipts
     /// may have been queued), announces the own display name to the chats
     /// this device joined and resolves the profiles of new members and
     /// senders.
@@ -346,6 +354,8 @@ impl<S: StateStore + 'static> Client<S> {
         let guard = self.inner.group_lock.lock().await;
         let changes = self.apply_fetched_locked(session, fetched).await?;
         self.remove_departed(session).await?;
+        self.commit_pending_proposals(session).await?;
+        self.resume_leaves(session).await;
         drop(guard);
         self.wake_outbox();
         let own = &session.device.user_id;
@@ -486,7 +496,8 @@ impl<S: StateStore + 'static> Client<S> {
         let mut joined = BTreeSet::new();
         let mut events = Vec::new();
         for chat in chats {
-            if chat.membership != Membership::Joined {
+            // A leaving device is still a member.
+            if chat.membership == Membership::Left {
                 continue;
             }
             joined.insert(chat.group_id.clone());
@@ -903,7 +914,7 @@ impl<S: StateStore + 'static> Client<S> {
                 .run(move |store, _| {
                     let joined = store
                         .chat(&gid)?
-                        .is_some_and(|c| c.membership == Membership::Joined);
+                        .is_some_and(|c| c.membership != Membership::Left);
                     let parked: BTreeSet<u64> = store
                         .parked_messages(&gid)?
                         .into_iter()

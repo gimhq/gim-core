@@ -10,6 +10,7 @@ use openmls::prelude::{
     ProtocolVersion, Sender,
 };
 use openmls_rust_crypto::RustCrypto;
+use sha2::{Digest, Sha256};
 
 use crate::engine::{deserialize, device_of};
 use crate::CryptoError;
@@ -20,6 +21,8 @@ const MLS10: u16 = 1;
 const PUBLIC_MESSAGE: u16 = 1;
 /// `WireFormat` of a PrivateMessage.
 const PRIVATE_MESSAGE: u16 = 2;
+/// RFC 9420 §5.2 label of a `ProposalRef`.
+const PROPOSAL_REF_LABEL: &[u8] = b"MLS 1.0 Proposal Reference";
 
 /// Whether a handshake message is a Commit or a standalone Proposal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,8 +46,12 @@ pub struct HandshakeInfo {
     /// Leaves removed by inline Remove proposals (and the sender's own leaf
     /// for a SelfRemove), in proposal order.
     pub removed_leaves: Vec<u32>,
-    /// Proposals included by reference; their content is not visible here.
-    pub referenced: usize,
+    /// `ProposalRef`s of the proposals a Commit includes by reference, in
+    /// order; their content is not visible here.
+    pub references: Vec<Vec<u8>>,
+    /// The `ProposalRef` of a standalone Proposal (RFC 9420 §5.2, SHA-256
+    /// as in gim's ciphersuite), by which a Commit can include it.
+    pub proposal_ref: Option<Vec<u8>>,
 }
 
 /// The epoch in the framing of a PublicMessage or PrivateMessage.
@@ -97,7 +104,8 @@ pub fn inspect_handshake(message: &[u8]) -> Result<HandshakeInfo, CryptoError> {
         kind: HandshakeKind::Commit,
         added: Vec::new(),
         removed_leaves: Vec::new(),
-        referenced: 0,
+        references: Vec::new(),
+        proposal_ref: None,
     };
     match content_type {
         ContentType::Commit => {
@@ -106,7 +114,9 @@ pub fn inspect_handshake(message: &[u8]) -> Result<HandshakeInfo, CryptoError> {
             for proposal in proposals {
                 match proposal {
                     ProposalOrRefIn::Proposal(proposal) => info.record(*proposal)?,
-                    ProposalOrRefIn::Reference(_) => info.referenced += 1,
+                    ProposalOrRefIn::Reference(reference) => {
+                        info.references.push(reference.as_slice().to_vec())
+                    }
                 }
             }
         }
@@ -114,6 +124,11 @@ pub fn inspect_handshake(message: &[u8]) -> Result<HandshakeInfo, CryptoError> {
             info.kind = HandshakeKind::Proposal;
             let proposal = ProposalIn::tls_deserialize(&mut bytes).map_err(|e| malformed(&e))?;
             info.record(proposal)?;
+            // The signature ends the AuthenticatedContent (a Proposal has no
+            // confirmation tag); only the membership tag follows.
+            VLBytes::tls_deserialize(&mut bytes).map_err(|e| malformed(&e))?;
+            let authenticated_content = &message[2..message.len() - bytes.len()];
+            info.proposal_ref = Some(proposal_ref(authenticated_content)?);
         }
         ContentType::Application => {
             return Err(CryptoError::invalid("message is not a handshake message"))
@@ -146,6 +161,19 @@ impl HandshakeInfo {
         }
         Ok(())
     }
+}
+
+/// `RefHash("MLS 1.0 Proposal Reference", AuthenticatedContent)`.
+fn proposal_ref(authenticated_content: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    let mut input = VLBytes::new(PROPOSAL_REF_LABEL.to_vec())
+        .tls_serialize_detached()
+        .map_err(CryptoError::mls)?;
+    input.extend(
+        VLBytes::new(authenticated_content.to_vec())
+            .tls_serialize_detached()
+            .map_err(CryptoError::mls)?,
+    );
+    Ok(Sha256::digest(input).to_vec())
 }
 
 fn read_u16(bytes: &mut &[u8]) -> Result<u16, CryptoError> {

@@ -42,15 +42,16 @@ pub(super) fn member(device: &DeviceRef) -> v2::GroupMember {
     }
 }
 
-/// `None` for kinds the SDK does not process yet (standalone Proposals and
-/// unknown kinds): they are skipped, and their seq is then confirmed as a
-/// hole by the gap backfill.
+/// `None` for unknown kinds: they are skipped, and their seq is then
+/// confirmed as a hole by the gap backfill. Proposals are handshakes like
+/// Commits (gim-crypto tells them apart from the MLS framing). The hub's
+/// `message_id` is not used yet (cross-hub dedup).
 pub(super) fn message(message: v2::Message) -> Result<Option<GroupMessage>, TransportError> {
     let kind = match message.kind {
-        v2::MessageKind::Commit => MessageKind::Commit,
+        v2::MessageKind::Commit | v2::MessageKind::Proposal => MessageKind::Commit,
         v2::MessageKind::Application => MessageKind::Application,
-        v2::MessageKind::Proposal | v2::MessageKind::Unknown => {
-            tracing::debug!(gid = %message.gid, seq = message.seq, kind = ?message.kind, "skipping message");
+        v2::MessageKind::Unknown => {
+            tracing::debug!(gid = %message.gid, seq = message.seq, "skipping a message of an unknown kind");
             return Ok(None);
         }
     };

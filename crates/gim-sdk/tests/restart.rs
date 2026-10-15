@@ -8,17 +8,19 @@ use std::path::Path;
 use std::sync::Arc;
 
 use gim_base::model::{
-    DepartedMember, MessageContent, MessageKind, PendingCommit, PendingMedia, SendState,
+    Membership, MessageContent, MessageKind, PendingCommit, PendingMedia, SendState,
 };
 use gim_base::{BaseClient, BaseError, StateReader, StateStore, StoreTxn};
 use gim_common::{now_ms, ClientId, GroupId};
 use gim_crypto::MlsEngine;
 use gim_sdk::testing::MemorySecretStorage;
-use gim_sdk::{Client, ClientBuilder, SecretStorage, COMMIT_POST_ATTEMPTS, SESSION_SECRET_KEY};
+use gim_sdk::{
+    Client, ClientBuilder, ClientError, SecretStorage, COMMIT_POST_ATTEMPTS, SESSION_SECRET_KEY,
+};
 use gim_sqlite::{DbKey, SqliteStore};
 use tempfile::TempDir;
 
-use common::{Device, FlakyTransport};
+use common::{server_handshakes, Device, FlakyTransport};
 
 /// A device on SQLite whose client can be restarted.
 struct Persistent {
@@ -141,45 +143,88 @@ async fn commit_that_never_arrived_is_posted_after_restart() {
 }
 
 #[tokio::test]
-async fn departed_member_is_still_removed_after_restart() {
+async fn a_leave_proposal_left_uncommitted_is_committed_after_restart() {
     let transport = FlakyTransport::new();
     let alice = Device::register(&transport, "alice").await;
     let node = Persistent::new(&transport);
     let bob = node.register("bob").await;
-    let carol = Device::register(&transport, "carol").await;
     let bob_id = bob.session().unwrap().device.user_id;
     let g = alice
         .client
-        .create_group_chat(None, &[bob_id, carol.user_id()])
+        .create_group_chat(None, &[bob_id])
         .await
         .unwrap();
     bob.sync_once().await.unwrap();
-    carol.sync().await;
     let service = transport.inner.service();
 
-    // Bob sees carol leave; alice (leaf 0) is the one to remove her.
-    carol.client.leave(&g).await.unwrap();
-    bob.sync_once().await.unwrap();
-    let departed = vec![DepartedMember {
-        group_id: g.clone(),
-        device: carol.device(),
-    }];
-    assert_eq!(bob.store().departed_members().unwrap(), departed);
-    assert_eq!(service.epoch(&g), Ok(1));
-
-    let bob = node.restart(bob).await;
-    assert_eq!(bob.store().departed_members().unwrap(), departed);
-    assert_eq!(service.epoch(&g), Ok(1));
-
-    // Alice leaves before removing carol: bob is now the lowest remaining
-    // leaf and removes both, carol from the record kept across the restart.
+    // Bob, the only member left, commits alice's leave; the posts fail.
     alice.client.leave(&g).await.unwrap();
-    bob.sync_once().await.unwrap();
+    transport
+        .faults
+        .fail_posts(MessageKind::Commit, false, COMMIT_POST_ATTEMPTS as usize);
+    assert!(bob.sync_once().await.is_err());
+    assert_eq!(service.epoch(&g), Ok(1));
+
+    // The commit of unknown outcome is re-posted on restore.
+    let bob = node.restart(bob).await;
     assert_eq!(service.epoch(&g), Ok(2));
+    assert_eq!(bob.store().pending_commit(&g).unwrap(), None);
     let members = bob.store().chat(&g).unwrap().unwrap().members;
     assert_eq!(members.len(), 1);
-    assert_eq!(members[0].device, bob.session().unwrap().device);
-    assert!(bob.store().departed_members().unwrap().is_empty());
+    alice.sync().await;
+    assert_eq!(
+        alice.store.chat(&g).unwrap().unwrap().membership,
+        Membership::Left
+    );
+}
+
+#[tokio::test]
+async fn leaving_survives_a_restart() {
+    let transport = FlakyTransport::new();
+    let alice = Device::register(&transport, "alice").await;
+    let node = Persistent::new(&transport);
+    let bob = node.register("bob").await;
+    let bob_id = bob.session().unwrap().device.user_id;
+    let g = alice
+        .client
+        .create_group_chat(None, &[bob_id])
+        .await
+        .unwrap();
+    bob.sync_once().await.unwrap();
+    let service = transport.inner.service();
+
+    // The proposal never reaches the hub.
+    transport
+        .faults
+        .fail_posts(MessageKind::Commit, false, COMMIT_POST_ATTEMPTS as usize);
+    assert!(bob.leave(&g).await.is_err());
+    let leave = bob.store().pending_leave(&g).unwrap().unwrap();
+    assert!(!leave.accepted);
+    assert_eq!(server_handshakes(&transport, &g), 1);
+
+    let bob = node.restart(bob).await;
+    assert_eq!(
+        bob.store().chat(&g).unwrap().unwrap().membership,
+        Membership::Leaving
+    );
+    assert!(matches!(
+        bob.send_text(&g, "still here?", None).await,
+        Err(ClientError::Base(BaseError::InvalidState(_)))
+    ));
+    // Re-submitted on restore with the same client_id.
+    let resent = bob.store().pending_leave(&g).unwrap().unwrap();
+    assert!(resent.accepted);
+    assert_eq!(resent.client_id, leave.client_id);
+    assert_eq!(server_handshakes(&transport, &g), 2);
+
+    alice.sync().await;
+    assert_eq!(service.epoch(&g), Ok(2));
+    bob.sync_once().await.unwrap();
+    assert_eq!(
+        bob.store().chat(&g).unwrap().unwrap().membership,
+        Membership::Left
+    );
+    assert_eq!(bob.store().pending_leave(&g).unwrap(), None);
 }
 
 #[tokio::test]

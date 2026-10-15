@@ -82,6 +82,7 @@ fn message_json(seq: u64, kind: &str) -> Value {
         "sender_user_id": uid(2),
         "sender_device_id": did(2),
         "client_id": "c1",
+        "message_id": format!("m-{seq}"),
         "kind": kind,
         "epoch": 2,
         "mls_message": "AQID",
@@ -739,7 +740,7 @@ async fn group_messages_from_seq_inclusive() {
 }
 
 #[tokio::test]
-async fn group_messages_skip_proposal_and_unknown_kinds() {
+async fn group_messages_skip_unknown_kinds_and_keep_proposals() {
     let server = MockServer::start().await;
     let page = |from: &str, messages: Vec<Value>| {
         Mock::given(method("GET"))
@@ -751,12 +752,9 @@ async fn group_messages_skip_proposal_and_unknown_kinds() {
             })))
     };
     // A page of skipped kinds only is followed by the next one.
-    page(
-        "4",
-        vec![message_json(4, "proposal"), message_json(5, "foo")],
-    )
-    .mount(&server)
-    .await;
+    page("4", vec![message_json(4, "foo"), message_json(5, "bar")])
+        .mount(&server)
+        .await;
     page(
         "6",
         vec![message_json(6, "application"), message_json(7, "proposal")],
@@ -769,19 +767,24 @@ async fn group_messages_skip_proposal_and_unknown_kinds() {
         .group_messages(&token(), &gid("g/1"), 4, 2)
         .await
         .unwrap();
-    assert_eq!(messages.iter().map(|m| m.seq).collect::<Vec<_>>(), vec![6]);
+    // Proposals are handshakes, applied like Commits.
+    assert_eq!(
+        messages.iter().map(|m| (m.seq, m.kind)).collect::<Vec<_>>(),
+        vec![(6, MessageKind::Application), (7, MessageKind::Commit)]
+    );
     let messages = http
         .group_messages(&token(), &gid("g/1"), 8, 2)
         .await
         .unwrap();
     assert!(messages.is_empty());
 
-    // Message events of those kinds are dropped.
+    // Message events of unknown kinds are dropped.
+    let proposal = message_json(4, "proposal");
     Mock::given(method("GET"))
         .and(path("/v2/events"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "events": [
-                {"cursor": 1, "created_at": 0, "type": "message", "data": message_json(4, "proposal")},
+                {"cursor": 1, "created_at": 0, "type": "message", "data": proposal},
                 {"cursor": 2, "created_at": 0, "type": "message", "data": message_json(5, "foo")},
                 {"cursor": 3, "created_at": 0, "type": "message", "data": message_json(6, "application")},
             ],
@@ -794,10 +797,18 @@ async fn group_messages_skip_proposal_and_unknown_kinds() {
         .await
         .unwrap();
     assert_eq!(batch.next_cursor, 3);
-    assert!(matches!(
-        batch.events.as_slice(),
-        [HubEvent::Group(IncomingEvent::Message(m))] if m.seq == 6
-    ));
+    let seqs: Vec<(u64, MessageKind)> = batch
+        .events
+        .iter()
+        .map(|e| match e {
+            HubEvent::Group(IncomingEvent::Message(m)) => (m.seq, m.kind),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        seqs,
+        vec![(4, MessageKind::Commit), (6, MessageKind::Application)]
+    );
 }
 
 #[tokio::test]

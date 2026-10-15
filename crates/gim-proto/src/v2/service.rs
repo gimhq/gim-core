@@ -93,4 +93,12 @@ pub struct PushRegistration {
     /// APNs only: deliver through the sandbox environment.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sandbox: bool,
+    /// UnifiedPush only: RFC 8291 Web Push public key (base64url of the
+    /// 65-byte uncompressed P-256 point).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p256dh: Option<String>,
+    /// UnifiedPush only: RFC 8291 authentication secret (base64url of 16
+    /// bytes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
 }

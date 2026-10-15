@@ -20,6 +20,18 @@ const GID: &str =
 const CLIENT: &str = "9f1c2a7e-0b44-4d0e-9a51-3c8f1e2d6b70";
 const TS: i64 = 1_760_479_200_000;
 
+/// Multi-homing additions of the contract (H4) that `gim_proto::v2` does
+/// not model yet; C4 adds them. Also deferred there: the error codes
+/// `duplicate_key_package` and `kp_not_claimed`.
+const DEFERRED_SCHEMAS: [&str; 4] = [
+    "HostingRecordHub",
+    "HostingRecordUpdated",
+    "HostingRecordUpdatedEvent",
+    "HubInfo",
+];
+const DEFERRED_EVENTS: [&str; 1] = ["hosting_record.updated"];
+const DEFERRED_ROUTES: [&str; 1] = ["/v2/hub"];
+
 fn spec() -> Value {
     serde_json::from_str(include_str!("../contract/hub-v2/openapi.json"))
         .expect("openapi.json parses")
@@ -42,8 +54,8 @@ fn reencode<T: Serialize + DeserializeOwned>(json: Value) -> Result<Value, Strin
 fn message_json() -> Value {
     json!({
         "gid": GID, "seq": 7, "sender_user_id": USER, "sender_device_id": DEVICE,
-        "client_id": CLIENT, "kind": "application", "epoch": 3, "mls_message": "AAEC",
-        "created_at": TS,
+        "client_id": CLIENT, "message_id": "m-01HZX3", "kind": "application", "epoch": 3,
+        "mls_message": "AAEC", "created_at": TS,
     })
 }
 
@@ -363,7 +375,10 @@ fn cases() -> Vec<Case> {
         ),
         case::<PushRegistration>(
             "PushRegistration",
-            json!({"provider": "apns", "token": "ab12", "app_id": "im.g.apps", "sandbox": true}),
+            json!({
+                "provider": "unifiedpush", "token": "https://push.example/x", "app_id": "im.g.apps",
+                "sandbox": true, "p256dh": "BCVx", "auth": "BTBZ",
+            }),
             json!({"provider": "unifiedpush", "token": "https://push.example/x"}),
         ),
         case::<BlobCreated>(
@@ -403,7 +418,11 @@ fn enums() -> Vec<(&'static str, Vec<Value>)> {
         ("GroupKind", values(&[GroupKind::Direct, GroupKind::Group])),
         (
             "MessageKind",
-            values(&[MessageKind::Commit, MessageKind::Application]),
+            values(&[
+                MessageKind::Commit,
+                MessageKind::Application,
+                MessageKind::Proposal,
+            ]),
         ),
         (
             "PushProvider",
@@ -503,6 +522,7 @@ fn every_schema_has_a_dto() {
     let mut ours: BTreeSet<String> = cases().iter().map(|c| c.schema.to_owned()).collect();
     ours.extend(enums().iter().map(|(name, _)| (*name).to_owned()));
     ours.insert("Event".to_owned());
+    ours.extend(DEFERRED_SCHEMAS.iter().map(|name| (*name).to_owned()));
     assert_eq!(
         all, ours,
         "openapi.json schema set changed; update gim_proto::v2"
@@ -545,7 +565,11 @@ fn event_types_match() {
     ];
     assert_eq!(
         keys(mapping),
-        ours.iter().map(|(t, _)| (*t).to_owned()).collect()
+        ours.iter()
+            .map(|(t, _)| *t)
+            .chain(DEFERRED_EVENTS)
+            .map(str::to_owned)
+            .collect()
     );
     for (event_type, schema) in ours {
         assert_eq!(
@@ -557,7 +581,8 @@ fn event_types_match() {
     }
 }
 
-/// Every route in openapi.json is covered by `paths` (34 operations).
+/// Every route in openapi.json but [`DEFERRED_ROUTES`] is covered by
+/// `paths` (35 operations, 1 of them deferred).
 #[test]
 fn paths_cover_openapi() {
     let spec = spec();
@@ -568,7 +593,7 @@ fn paths_cover_openapi() {
         .values()
         .map(|item| item.as_object().unwrap().len())
         .sum();
-    assert_eq!(operations, 34);
+    assert_eq!(operations, 35);
 
     // Builders called with the template names reproduce the spec's paths
     // once the escaped braces are restored.
@@ -610,6 +635,7 @@ fn paths_cover_openapi() {
             .iter()
             .map(|path| path.replace("%7B", "{").replace("%7D", "}")),
     );
+    ours.extend(DEFERRED_ROUTES.iter().map(|route| (*route).to_owned()));
     assert_eq!(routes, ours);
 }
 
@@ -814,6 +840,28 @@ fn unknown_event_type_does_not_fail_the_list() {
     );
     assert_eq!(list.events[1].data.event_type(), "presence");
     assert!(matches!(list.events[2].data, EventData::KeyPackagesLow(_)));
+}
+
+#[test]
+fn proposal_message_event() {
+    let mut proposal = message_json();
+    proposal["kind"] = json!("proposal");
+    proposal["message_id"] = json!("m-2");
+    let event: Event = round_trip(event_json(1, "message", proposal));
+    assert!(matches!(
+        &event.data,
+        EventData::Message(m) if m.message_id == "m-2" && m.kind == MessageKind::Proposal
+    ));
+}
+
+#[test]
+fn proposal_commit_result_keeps_the_epoch() {
+    // A Proposal is sequenced without an epoch change; a resubmit is a
+    // duplicate with the original result.
+    let first: CommitResult = round_trip(json!({"seq": 8, "epoch": 3, "duplicate": false}));
+    let again: CommitResult = round_trip(json!({"seq": 8, "epoch": 3, "duplicate": true}));
+    assert_eq!((first.seq, first.epoch), (again.seq, again.epoch));
+    assert!(again.duplicate && !first.duplicate);
 }
 
 #[test]
