@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use gim_common::{DeviceRef, GroupId};
+use gim_identity::{DeviceSigningKey, RootPublicKey, SignedDeviceCert};
 use openmls::prelude::tls_codec::{Deserialize as _, Serialize as _};
 use openmls::prelude::{GroupId as MlsGroupId, *};
 use openmls_basic_credential::SignatureKeyPair;
@@ -9,7 +11,8 @@ use openmls_traits::storage::{StorageProvider, CURRENT_VERSION};
 use openmls_traits::OpenMlsProvider;
 
 use crate::config::{group_create_config, group_join_config, leaf_capabilities, CIPHERSUITE};
-use crate::{CryptoError, CryptoStore, StoredIdentity};
+use crate::credential::{self, DeviceListLookup, GimCredential, NoDeviceLists};
+use crate::{CryptoError, CryptoStore, StoredIdentity, GIM_CREDENTIAL_TYPE};
 
 type Result<T> = std::result::Result<T, CryptoError>;
 
@@ -53,10 +56,29 @@ pub enum ProcessedMessage {
 }
 
 /// Stateless MLS operations. Every call borrows a [`CryptoStore`] for its
-/// duration; the engine itself holds only the crypto backend.
-#[derive(Debug, Default)]
+/// duration; the engine itself holds only the crypto backend and the
+/// [`DeviceListLookup`] used to validate gim credentials.
+///
+/// The credential mode follows the stored identity: an identity created with
+/// [`MlsEngine::create_identity_v2`] uses a [`GimCredential`] and every
+/// incoming or added leaf must pass [`credential::validate`] against the
+/// engine's lookup; a legacy identity ([`MlsEngine::create_identity`]) uses a
+/// basic credential and performs no credential validation.
 pub struct MlsEngine {
     crypto: RustCrypto,
+    device_lists: Arc<dyn DeviceListLookup + Send + Sync>,
+}
+
+impl Default for MlsEngine {
+    fn default() -> Self {
+        Self::with_device_list_lookup(Arc::new(NoDeviceLists))
+    }
+}
+
+impl std::fmt::Debug for MlsEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MlsEngine").finish_non_exhaustive()
+    }
 }
 
 /// OpenMLS provider assembled per call from the engine and a borrowed store.
@@ -87,20 +109,41 @@ impl<S: StorageProvider<CURRENT_VERSION>> OpenMlsProvider for Provider<'_, S> {
 struct Account {
     device: DeviceRef,
     signer: SignatureKeyPair,
+    /// Encoded [`GimCredential`]; `None` for a legacy identity.
+    credential: Option<Vec<u8>>,
 }
 
 impl Account {
     fn credential_with_key(&self) -> CredentialWithKey {
+        let credential = match &self.credential {
+            Some(content) => {
+                Credential::new(CredentialType::Other(GIM_CREDENTIAL_TYPE), content.clone())
+            }
+            None => BasicCredential::new(self.device.credential_identity()).into(),
+        };
         CredentialWithKey {
-            credential: BasicCredential::new(self.device.credential_identity()).into(),
+            credential,
             signature_key: self.signer.to_public_vec().into(),
         }
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        leaf_capabilities(self.credential.is_some())
     }
 }
 
 impl MlsEngine {
+    /// An engine that knows no device lists (no revocations).
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An engine validating gim credentials against `device_lists`.
+    pub fn with_device_list_lookup(device_lists: Arc<dyn DeviceListLookup + Send + Sync>) -> Self {
+        Self {
+            crypto: RustCrypto::default(),
+            device_lists,
+        }
     }
 
     /// Creates the device identity (fresh Ed25519 signature key) in `store`.
@@ -117,6 +160,37 @@ impl MlsEngine {
                 device,
                 signature_private_key,
                 signature_public_key,
+                credential: None,
+            })
+            .map_err(CryptoError::store)
+    }
+
+    /// Creates a device identity with a self-certifying [`GimCredential`]:
+    /// `signed_cert` must verify under `root_public_key` and certify the
+    /// public half of `device_key`.
+    pub fn create_identity_v2(
+        &self,
+        store: &impl CryptoStore,
+        device_key: &DeviceSigningKey,
+        root_public_key: RootPublicKey,
+        signed_cert: SignedDeviceCert,
+    ) -> Result<()> {
+        if store.load_identity().map_err(CryptoError::store)?.is_some() {
+            return Err(CryptoError::invalid("identity already exists"));
+        }
+        let credential = GimCredential::new(root_public_key, signed_cert);
+        let cert = credential.verify()?;
+        if cert.device_public_key != device_key.public() {
+            return Err(CryptoError::InvalidCredential {
+                reason: "device key does not match the certified device key".into(),
+            });
+        }
+        store
+            .save_identity(&StoredIdentity {
+                device: DeviceRef::new(cert.user_id, cert.device_id),
+                signature_private_key: device_key.to_seed().to_vec(),
+                signature_public_key: device_key.public().as_bytes().to_vec(),
+                credential: Some(credential.encode()),
             })
             .map_err(CryptoError::store)
     }
@@ -162,7 +236,7 @@ impl MlsEngine {
         MlsGroup::new_with_group_id(
             &self.provider(store),
             &account.signer,
-            &group_create_config(),
+            &group_create_config(account.capabilities()),
             mls_group_id(group_id),
             account.credential_with_key(),
         )
@@ -181,11 +255,17 @@ impl MlsEngine {
         if key_packages.is_empty() {
             return Err(CryptoError::invalid("no key packages"));
         }
+        let account = account(store)?;
         let key_packages = key_packages
             .iter()
-            .map(|bytes| self.validate_key_package(bytes))
+            .map(|bytes| {
+                let key_package = self.validate_key_package(bytes)?;
+                if account.credential.is_some() {
+                    self.validate_leaf(key_package.leaf_node())?;
+                }
+                Ok(key_package)
+            })
             .collect::<Result<Vec<_>>>()?;
-        let account = account(store)?;
         let mut group = load_group(store, group_id)?;
         let epoch = group.epoch().as_u64();
         let (commit, welcome, _group_info) = group
@@ -213,10 +293,9 @@ impl MlsEngine {
         let indices = members
             .iter()
             .map(|device| {
-                let identity = device.credential_identity();
                 group
                     .members()
-                    .find(|m| m.credential.serialized_content() == identity.as_slice())
+                    .find(|m| device_of(&m.credential).is_ok_and(|d| &d == device))
                     .map(|m| m.index)
                     .ok_or_else(|| CryptoError::invalid(format!("{device} is not a member")))
             })
@@ -283,6 +362,15 @@ impl MlsEngine {
                 "group {group_id} already exists"
             )));
         }
+        if uses_gim_credential(store)? {
+            for member in staged.members() {
+                credential::validate(
+                    &member.credential,
+                    &member.signature_key,
+                    &*self.device_lists,
+                )?;
+            }
+        }
         let group = staged.into_group(&provider).map_err(CryptoError::mls)?;
         store.add_group_id(&group_id).map_err(CryptoError::store)?;
         Ok(GroupJoined {
@@ -322,6 +410,11 @@ impl MlsEngine {
         })?;
         let sender = device_of(processed.credential())?;
         let epoch = processed.epoch().as_u64();
+        let sender_leaf = match processed.sender() {
+            Sender::Member(index) => Some(*index),
+            _ => None,
+        };
+        let validating = uses_gim_credential(store)?;
         match processed.into_content() {
             ProcessedMessageContent::ApplicationMessage(message) => {
                 Ok(ProcessedMessage::Application {
@@ -332,12 +425,26 @@ impl MlsEngine {
             }
             ProcessedMessageContent::ProposalMessage(proposal)
             | ProcessedMessageContent::ExternalJoinProposalMessage(proposal) => {
+                if validating {
+                    match proposal.proposal() {
+                        Proposal::Add(add) => {
+                            self.validate_leaf(add.key_package().leaf_node())?;
+                        }
+                        Proposal::Update(update) => {
+                            self.validate_leaf(update.leaf_node())?;
+                        }
+                        _ => {}
+                    }
+                }
                 group
                     .store_pending_proposal(store.mls_storage(), *proposal)
                     .map_err(CryptoError::mls)?;
                 Ok(ProcessedMessage::Proposal { sender })
             }
             ProcessedMessageContent::StagedCommitMessage(commit) => {
+                if validating {
+                    self.validate_commit(&group, sender_leaf, &commit)?;
+                }
                 let added = commit
                     .add_proposals()
                     .map(|p| device_of(p.add_proposal().key_package().leaf_node().credential()))
@@ -428,7 +535,7 @@ impl MlsEngine {
         account: &Account,
         last_resort: bool,
     ) -> Result<Vec<u8>> {
-        let mut builder = KeyPackage::builder().leaf_node_capabilities(leaf_capabilities());
+        let mut builder = KeyPackage::builder().leaf_node_capabilities(account.capabilities());
         if last_resort {
             builder = builder.mark_as_last_resort();
         }
@@ -441,6 +548,47 @@ impl MlsEngine {
             )
             .map_err(CryptoError::mls)?;
         serialize(&MlsMessageOut::from(bundle.key_package().clone()))
+    }
+
+    /// Validates a leaf's gim credential against the engine's lookup.
+    fn validate_leaf(&self, leaf: &LeafNode) -> Result<DeviceRef> {
+        credential::validate(
+            leaf.credential(),
+            leaf.signature_key().as_slice(),
+            &*self.device_lists,
+        )
+    }
+
+    /// Validates every new or changed leaf of an incoming commit, and the
+    /// committer's leaf (so commits from revoked devices are rejected).
+    fn validate_commit(
+        &self,
+        group: &MlsGroup,
+        sender_leaf: Option<LeafNodeIndex>,
+        commit: &StagedCommit,
+    ) -> Result<()> {
+        match commit.update_path_leaf_node() {
+            Some(leaf) => {
+                self.validate_leaf(leaf)?;
+            }
+            None => {
+                let sender = sender_leaf
+                    .and_then(|index| group.members().find(|m| m.index == index))
+                    .ok_or_else(|| CryptoError::mls("commit sender is not a member"))?;
+                credential::validate(
+                    &sender.credential,
+                    &sender.signature_key,
+                    &*self.device_lists,
+                )?;
+            }
+        }
+        for add in commit.add_proposals() {
+            self.validate_leaf(add.add_proposal().key_package().leaf_node())?;
+        }
+        for update in commit.update_proposals() {
+            self.validate_leaf(update.update_proposal().leaf_node())?;
+        }
+        Ok(())
     }
 
     fn validate_key_package(&self, bytes: &[u8]) -> Result<KeyPackage> {
@@ -471,7 +619,17 @@ fn account(store: &impl CryptoStore) -> Result<Account> {
             identity.signature_private_key,
             identity.signature_public_key,
         ),
+        credential: identity.credential,
     })
+}
+
+/// Whether the local identity uses a gim credential (and so validates
+/// leaves). No identity counts as legacy.
+fn uses_gim_credential(store: &impl CryptoStore) -> Result<bool> {
+    Ok(store
+        .load_identity()
+        .map_err(CryptoError::store)?
+        .is_some_and(|identity| identity.credential.is_some()))
 }
 
 fn group_ids(store: &impl CryptoStore) -> Result<BTreeSet<GroupId>> {
@@ -501,7 +659,13 @@ fn delete(store: &impl CryptoStore, group: &mut MlsGroup, group_id: &GroupId) ->
     store.remove_group_id(group_id).map_err(CryptoError::store)
 }
 
+/// Maps a leaf credential to its device: the certified device for a gim
+/// credential, the encoded identity for a basic one.
 fn device_of(credential: &Credential) -> Result<DeviceRef> {
+    if credential.credential_type() == CredentialType::Other(GIM_CREDENTIAL_TYPE) {
+        let cert = GimCredential::from_mls(credential)?.verify()?;
+        return Ok(DeviceRef::new(cert.user_id, cert.device_id));
+    }
     Ok(DeviceRef::from_credential_identity(
         credential.serialized_content(),
     )?)

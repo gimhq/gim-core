@@ -109,25 +109,18 @@ impl AuthResponse {
         })
     }
 
-    /// Hub-side check: the challenge decodes, is addressed to
-    /// `expected_audience` and has not expired at `now`; `device_list`
-    /// verifies for the response's user; the device is certified in it and
-    /// not revoked; `sig` verifies under the certified device key. The hub
-    /// must also check that it issued the challenge and that its nonce is
-    /// unused.
+    /// Hub-side check, in the documented order: `device_list` verifies for
+    /// the response's user and the device is certified in it and not
+    /// revoked (this yields the verifying key); `sig` verifies under the
+    /// certified device key; only then the challenge decodes, is addressed
+    /// to `expected_audience` and has not expired at `now`. The hub must
+    /// also check that it issued the challenge and that its nonce is unused.
     pub fn verify(
         &self,
         expected_audience: &str,
         now: u64,
         device_list: &SignedDeviceList,
     ) -> Result<DeviceRef, IdentityError> {
-        let challenge = AuthChallenge::from_bytes(&self.challenge)?;
-        if challenge.audience != expected_audience {
-            return Err(IdentityError::AudienceMismatch);
-        }
-        if now >= challenge.expires_at {
-            return Err(IdentityError::Expired);
-        }
         let list = device_list.verify(&self.user_id)?;
         if list.is_revoked(&self.device_id) {
             return Err(IdentityError::Revoked(self.device_id.clone()));
@@ -142,6 +135,13 @@ impl AuthResponse {
             &Self::tbs(&self.challenge, &self.user_id, &self.device_id),
             &self.sig,
         )?;
+        let challenge = AuthChallenge::from_bytes(&self.challenge)?;
+        if challenge.audience != expected_audience {
+            return Err(IdentityError::AudienceMismatch);
+        }
+        if now >= challenge.expires_at {
+            return Err(IdentityError::Expired);
+        }
         Ok(DeviceRef::new(self.user_id.clone(), self.device_id.clone()))
     }
 

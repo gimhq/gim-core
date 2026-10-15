@@ -1,6 +1,6 @@
-//! rusqlite (bundled) implementation of `StateStore` + `CryptoStore` on one
-//! database, migrations, and a shared transaction so MLS state and message
-//! rows commit atomically.
+//! rusqlite (bundled SQLCipher) implementation of `StateStore` +
+//! `CryptoStore` on one encrypted database, migrations, and a shared
+//! transaction so MLS state and message rows commit atomically.
 //!
 //! OpenMLS state is stored by `openmls_sqlite_storage` (MIT, used as a
 //! dependency) in the same database file; its provider borrows the
@@ -13,6 +13,7 @@ mod reader;
 mod rows;
 
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -25,9 +26,10 @@ use gim_base::{BaseError, StateReader, StateStore, StoreError, StoreTxn, WriteTa
 use gim_common::{DeviceRef, GroupId, MessageId, UserId};
 use gim_crypto::{CryptoStore, StoredIdentity};
 use openmls_sqlite_storage::{Codec, SqliteStorageProvider};
-use rusqlite::{params, Connection, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, ErrorCode, Transaction, TransactionBehavior};
+use zeroize::Zeroizing;
 
-pub use migrations::SCHEMA_VERSION;
+pub use migrations::{APPLICATION_ID, SCHEMA_VERSION};
 
 use reader::{bound, membership_kind_str, outbox_state_str, sql_err, Reader};
 use rows::{
@@ -78,23 +80,144 @@ impl std::fmt::Debug for SqliteStore {
     }
 }
 
+/// Length of a [`DbKey`] in bytes.
+pub const DB_KEY_LEN: usize = 32;
+
+/// Raw 256-bit SQLCipher key of the database. Zeroized on drop; `Debug`
+/// does not print it.
+pub struct DbKey(Zeroizing<[u8; DB_KEY_LEN]>);
+
+impl DbKey {
+    pub fn new(bytes: [u8; DB_KEY_LEN]) -> Self {
+        Self(Zeroizing::new(bytes))
+    }
+
+    /// `PRAGMA key` statement with the key as a raw blob literal, which
+    /// skips SQLCipher's passphrase derivation.
+    fn pragma(&self) -> Zeroizing<String> {
+        let mut sql = Zeroizing::new(String::with_capacity(20 + 2 * DB_KEY_LEN));
+        sql.push_str("PRAGMA key = \"x'");
+        for byte in self.0.iter() {
+            let _ = write!(sql, "{byte:02x}");
+        }
+        sql.push_str("'\";");
+        sql
+    }
+}
+
+impl std::fmt::Debug for DbKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DbKey(..)")
+    }
+}
+
+/// Error opening the database file.
+#[derive(Debug, thiserror::Error)]
+pub enum OpenError {
+    /// The file cannot be read with the key: a wrong key, an M1 plaintext
+    /// database, or not a database at all.
+    #[error("database cannot be decrypted with this key")]
+    NotADatabase,
+    /// The file decrypts but is not a database of this build: a foreign
+    /// `application_id` or a newer schema.
+    #[error("incompatible database: {0}")]
+    Incompatible(String),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+}
+
+impl OpenError {
+    pub fn is_not_a_database(&self) -> bool {
+        matches!(self, Self::NotADatabase)
+    }
+
+    /// Whether [`SqliteStore::open_or_reset`] discards the file. Never true
+    /// for I/O or other SQLite errors.
+    fn resets(&self) -> bool {
+        matches!(self, Self::NotADatabase | Self::Incompatible(_))
+    }
+}
+
+impl From<OpenError> for StoreError {
+    fn from(err: OpenError) -> Self {
+        match err {
+            OpenError::Store(err) => err,
+            err => StoreError::new(err),
+        }
+    }
+}
+
+impl From<OpenError> for BaseError {
+    fn from(err: OpenError) -> Self {
+        StoreError::from(err).into()
+    }
+}
+
 impl SqliteStore {
-    /// Opens (creating if needed) `<data_dir>/gim.sqlite3` and migrates it.
-    /// A missing `data_dir` is created owner-only on Unix, since the
-    /// database (and its -wal/-shm files) holds the device's private keys.
-    pub fn open(data_dir: impl AsRef<Path>) -> StoreResult<Self> {
-        let data_dir = data_dir.as_ref();
-        let mut builder = std::fs::DirBuilder::new();
-        builder.recursive(true);
-        #[cfg(unix)]
-        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-        builder.create(data_dir).map_err(StoreError::new)?;
-        let conn = Connection::open(data_dir.join(DATABASE_FILE_NAME)).map_err(sql_err)?;
-        Self::init(conn)
+    /// Opens (creating if needed) `<data_dir>/gim.sqlite3` encrypted with
+    /// `key` and migrates it. A missing `data_dir` is created owner-only on
+    /// Unix, since the database (and its -wal/-shm files) holds the
+    /// device's private keys.
+    ///
+    /// Fails with [`OpenError::NotADatabase`] if the file does not decrypt
+    /// with `key` (including M1 plaintext databases) and with
+    /// [`OpenError::Incompatible`] if it is not a database of this build;
+    /// the file is left untouched.
+    pub fn open(data_dir: impl AsRef<Path>, key: &DbKey) -> Result<Self, OpenError> {
+        let path = create_data_dir(data_dir.as_ref())?;
+        Self::open_file(&path, key)
+    }
+
+    /// Like [`Self::open`], but replaces a database that fails with
+    /// [`OpenError::NotADatabase`] or [`OpenError::Incompatible`] by a new
+    /// empty one. `discard_existing` deletes any existing database first
+    /// (a new key cannot decrypt it). Returns whether local state was
+    /// deleted.
+    pub fn open_or_reset(
+        data_dir: impl AsRef<Path>,
+        key: &DbKey,
+        discard_existing: bool,
+    ) -> Result<(Self, bool), OpenError> {
+        let path = create_data_dir(data_dir.as_ref())?;
+        let discarded = discard_existing && delete_database(&path)?;
+        match Self::open_file(&path, key) {
+            Err(err) if err.resets() => {
+                delete_database(&path)?;
+                Ok((Self::open_file(&path, key)?, true))
+            }
+            opened => Ok((opened?, discarded)),
+        }
     }
 
     pub fn open_in_memory() -> StoreResult<Self> {
         Self::init(Connection::open_in_memory().map_err(sql_err)?)
+    }
+
+    fn open_file(path: &Path, key: &DbKey) -> Result<Self, OpenError> {
+        let conn = Connection::open(path).map_err(sql_err)?;
+        conn.busy_timeout(BUSY_TIMEOUT).map_err(sql_err)?;
+        // Must be the first statement on the connection.
+        conn.execute_batch(&key.pragma()).map_err(sql_err)?;
+        let tables: u64 = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| row.get(0))
+            .map_err(|err| match err.sqlite_error_code() {
+                Some(ErrorCode::NotADatabase) => OpenError::NotADatabase,
+                _ => sql_err(err).into(),
+            })?;
+        let application_id = migrations::application_id(&conn)?;
+        let version = migrations::schema_version(&conn)?;
+        let fresh = application_id == 0 && version == 0 && tables == 0;
+        if !fresh && application_id != APPLICATION_ID {
+            return Err(OpenError::Incompatible(format!(
+                "application_id {application_id:#x}"
+            )));
+        }
+        if version > SCHEMA_VERSION {
+            return Err(OpenError::Incompatible(format!(
+                "schema v{version} is newer than this build (v{SCHEMA_VERSION})"
+            )));
+        }
+        Self::init(conn).map_err(OpenError::from)
     }
 
     fn init(mut conn: Connection) -> StoreResult<Self> {
@@ -129,6 +252,32 @@ impl SqliteStore {
     fn conn(&self) -> MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// Creates `data_dir` (owner-only on Unix) and returns the database path.
+fn create_data_dir(data_dir: &Path) -> StoreResult<std::path::PathBuf> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(data_dir).map_err(StoreError::new)?;
+    Ok(data_dir.join(DATABASE_FILE_NAME))
+}
+
+/// Deletes the database at `path` and its -wal/-shm/-journal files.
+/// Returns whether the database file existed.
+fn delete_database(path: &Path) -> StoreResult<bool> {
+    let mut existed = false;
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let mut file = path.as_os_str().to_owned();
+        file.push(suffix);
+        match std::fs::remove_file(&file) {
+            Ok(()) => existed |= suffix.is_empty(),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(StoreError::new(err)),
+        }
+    }
+    Ok(existed)
 }
 
 /// A transaction of a [`SqliteStore`]: one rusqlite [`Transaction`] that
@@ -532,8 +681,8 @@ impl<'a> CryptoStore for SqliteTxn<'a> {
         let mut stmt = self
             .txn
             .prepare_cached(
-                "SELECT user_id, device_id, signature_private_key, signature_public_key \
-                 FROM crypto_identity WHERE id = 1",
+                "SELECT user_id, device_id, signature_private_key, signature_public_key, \
+                 credential FROM crypto_identity WHERE id = 1",
             )
             .map_err(sql_err)?;
         let mut rows = stmt.query([]).map_err(sql_err)?;
@@ -546,19 +695,21 @@ impl<'a> CryptoStore for SqliteTxn<'a> {
             device: DeviceRef::parse(&user_id, &device_id).map_err(StoreError::new)?,
             signature_private_key: row.get(2).map_err(sql_err)?,
             signature_public_key: row.get(3).map_err(sql_err)?,
+            credential: row.get(4).map_err(sql_err)?,
         }))
     }
 
     fn save_identity(&self, identity: &StoredIdentity) -> StoreResult<()> {
         self.execute(
             "INSERT OR REPLACE INTO crypto_identity \
-             (id, user_id, device_id, signature_private_key, signature_public_key) \
-             VALUES (1, ?1, ?2, ?3, ?4)",
+             (id, user_id, device_id, signature_private_key, signature_public_key, credential) \
+             VALUES (1, ?1, ?2, ?3, ?4, ?5)",
             params![
                 identity.device.user_id.as_str(),
                 identity.device.device_id.as_str(),
                 identity.signature_private_key,
-                identity.signature_public_key
+                identity.signature_public_key,
+                identity.credential
             ],
         )
     }
@@ -590,5 +741,28 @@ impl<'a> CryptoStore for SqliteTxn<'a> {
             "DELETE FROM crypto_groups WHERE group_id = ?1",
             [group_id.as_str()],
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_credential_round_trip() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        for credential in [Some(vec![7u8; 48]), None] {
+            let identity = StoredIdentity {
+                device: DeviceRef::parse("alice", "phone").unwrap(),
+                signature_private_key: vec![1; 32],
+                signature_public_key: vec![2; 32],
+                credential,
+            };
+            store
+                .transaction(|txn| Ok(txn.save_identity(&identity)?))
+                .unwrap();
+            let loaded = store.transaction(|txn| Ok(txn.load_identity()?)).unwrap();
+            assert_eq!(loaded, Some(identity));
+        }
     }
 }

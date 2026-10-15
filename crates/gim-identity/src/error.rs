@@ -18,6 +18,8 @@ pub enum IdentityError {
     InvalidDeviceId(String),
     #[error("decode error: {0}")]
     Decode(String),
+    #[error("not deterministic CBOR")]
+    NonCanonical,
     #[error("unsupported format version {0}")]
     UnsupportedVersion(u64),
     #[error("device {0} is revoked")]
@@ -28,6 +30,8 @@ pub enum IdentityError {
     UnknownDevice(DeviceId),
     #[error("different device lists with the same seq {0}")]
     SeqConflict(u64),
+    #[error("seq {0} is lower than the stored seq")]
+    StaleSeq(u64),
     #[error("device list seq overflow")]
     SeqOverflow,
     #[error("expired")]
@@ -46,4 +50,38 @@ pub enum IdentityError {
     HubCount(usize),
     #[error("random number generator failed: {0}")]
     Random(String),
+}
+
+impl IdentityError {
+    /// Stable snake_case name of the error kind, independent of the
+    /// message and payload; the `expected_error` of the negative vectors
+    /// (`docs/identity.md`, "Negative vectors").
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::BadSignature => "bad_signature",
+            Self::UserIdMismatch => "user_id_mismatch",
+            Self::DeviceIdMismatch => "device_id_mismatch",
+            Self::RootKeyMismatch => "root_key_mismatch",
+            Self::InvalidKey => "invalid_key",
+            Self::InvalidUserId(_) => "invalid_user_id",
+            Self::InvalidDeviceId(_) => "invalid_device_id",
+            Self::Decode(_) => "decode_error",
+            Self::NonCanonical => "non_canonical_cbor",
+            Self::UnsupportedVersion(_) => "unsupported_version",
+            Self::Revoked(_) => "device_revoked",
+            Self::DuplicateDevice(_) => "duplicate_device",
+            Self::UnknownDevice(_) => "unknown_device",
+            Self::SeqConflict(_) => "seq_conflict",
+            Self::StaleSeq(_) => "stale_seq",
+            Self::SeqOverflow => "seq_overflow",
+            Self::Expired => "expired",
+            Self::NotYetValid => "not_yet_valid",
+            Self::AudienceMismatch => "audience_mismatch",
+            Self::HubKeyMismatch => "hub_key_mismatch",
+            Self::BadHubSignature(_) => "bad_hub_signature",
+            Self::DuplicateHub(_) => "duplicate_hub",
+            Self::HubCount(_) => "hub_count",
+            Self::Random(_) => "random",
+        }
+    }
 }

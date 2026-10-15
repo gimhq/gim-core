@@ -17,6 +17,10 @@ pub enum CryptoError {
     Store { reason: String },
     #[error("wrong epoch: {reason}")]
     WrongEpoch { reason: String },
+    /// A leaf credential failed gim credential validation; group state is
+    /// unchanged.
+    #[error("invalid credential: {reason}")]
+    InvalidCredential { reason: String },
 }
 
 impl CryptoError {
