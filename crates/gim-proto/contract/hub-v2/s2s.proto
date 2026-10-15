@@ -1,0 +1,276 @@
+// Server-to-server (hub <-> hub) protocol for gim hubs.
+//
+// Carried over the libp2p request-response protocol `/gim/s2s/1.0.0`: every
+// stream holds exactly one S2sRequest and one S2sResponse. The calling hub is
+// authenticated by its libp2p PeerID (Noise handshake); see docs/s2s.md for
+// the per-operation authorization rules, idempotency and ordering.
+//
+// Identity objects (DeviceList, UserHostingRecord, ...) are owned by gim-core
+// and are carried here only as opaque CBOR `[tbs, sig]` encodings.
+//
+// user_id and device_id are opaque strings whose format is owned by gim-core.
+// gid has the form "<owner_peer_id>/<random_128 base32>"; the owning hub is
+// the hub whose PeerID prefixes the gid.
+
+syntax = "proto3";
+
+package gim.s2s.v1;
+
+// ---------------------------------------------------------------------------
+// Envelope
+// ---------------------------------------------------------------------------
+
+message S2sRequest {
+  // Caller-chosen id, echoed in S2sResponse.request_id. Used for logging and
+  // correlation only; idempotency is per operation (see docs/s2s.md).
+  string request_id = 1;
+
+  oneof op {
+    SubmitCommitRequest submit_commit = 10;
+    SubmitMessageRequest submit_message = 11;
+    DeliverRequest deliver = 12;
+    DeliverWelcomeRequest deliver_welcome = 13;
+    ClaimKeyPackageRequest claim_key_package = 14;
+    FetchLogRequest fetch_log = 15;
+    GetDeviceListRequest get_device_list = 16;
+    GetHostingRecordRequest get_hosting_record = 17;
+    // 18-29: reserved for multi-homing (M2c) operations, e.g. hub
+    //        add/remove and migration hand-off.
+    // 30-39: reserved for push (P) operations, e.g. collapse-id coordination.
+  }
+
+  reserved 18 to 39;
+}
+
+message S2sResponse {
+  // Echo of S2sRequest.request_id.
+  string request_id = 1;
+
+  // Exactly one of `result` or `error` is set. The result variant matches the
+  // request op (same field number).
+  oneof result {
+    SubmitCommitResponse submit_commit = 10;
+    SubmitMessageResponse submit_message = 11;
+    DeliverResponse deliver = 12;
+    DeliverWelcomeResponse deliver_welcome = 13;
+    ClaimKeyPackageResponse claim_key_package = 14;
+    FetchLogResponse fetch_log = 15;
+    GetDeviceListResponse get_device_list = 16;
+    GetHostingRecordResponse get_hosting_record = 17;
+    // 18-39: reserved, mirroring S2sRequest.op.
+  }
+
+  reserved 18 to 39;
+
+  Error error = 2;
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  // Calling PeerID is not allowed by federation policy, or is not listed in
+  // the current hosting record of the acting user, or is not the owning hub
+  // for Deliver / DeliverWelcome; or the request is rejected by the owning
+  // hub's group policy (e.g. sender not a group member, or a credential not
+  // allowed by the owning hub).
+  ERROR_CODE_UNAUTHORIZED = 1;
+  // Unknown user, device, group or record.
+  ERROR_CODE_NOT_FOUND = 2;
+  // Commit or message targets an epoch older than the group's current epoch.
+  ERROR_CODE_STALE_EPOCH = 3;
+  // A different Commit was already sequenced for this epoch.
+  ERROR_CODE_CONFLICT = 4;
+  // Requested log range was pruned.
+  ERROR_CODE_GONE = 5;
+  // Caller exceeded a rate limit; retry with backoff.
+  ERROR_CODE_RATE_LIMITED = 6;
+  // Malformed request (bad gid, unparsable MLS framing, missing field, ...).
+  ERROR_CODE_INVALID = 7;
+  // Unexpected failure on the responding hub; retry with backoff.
+  ERROR_CODE_INTERNAL = 8;
+}
+
+message Error {
+  ErrorCode code = 1;
+  // Human-readable diagnostic; not for programmatic use.
+  string message = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Group messaging (member hub -> owning hub)
+// ---------------------------------------------------------------------------
+
+// Submit an MLS Commit (or Proposal) for sequencing. The owning hub reads the
+// epoch from the MLS framing; the first valid Commit for an epoch wins.
+message SubmitCommitRequest {
+  string gid = 1;
+  string sender_user_id = 2;
+  string sender_device_id = 3;
+  // Client-chosen idempotency key, unique per sender device.
+  string client_id = 4;
+  // MLSMessage (Commit or Proposal), TLS-serialized.
+  bytes mls_message = 5;
+  // MLS Welcome produced with the Commit, if it adds members.
+  optional bytes welcome = 6;
+  // Devices the Welcome is addressed to.
+  repeated string welcome_recipient_device_ids = 7;
+  // Ratchet tree for joiners when not carried in the Welcome extension.
+  optional bytes ratchet_tree = 8;
+
+  // 9-15 reserved for multi-homing (M2c), e.g. delivery strategy hints.
+  reserved 9 to 15;
+}
+
+message SubmitCommitResponse {
+  uint64 seq = 1;
+  uint64 epoch = 2;
+  // True when the same Commit (by hash) was already sequenced; seq/epoch are
+  // the originally assigned values.
+  bool duplicate = 3;
+}
+
+// Submit an MLS application message for sequencing.
+message SubmitMessageRequest {
+  string gid = 1;
+  string sender_user_id = 2;
+  string sender_device_id = 3;
+  // Client-chosen idempotency key, unique per sender device.
+  string client_id = 4;
+  // MLSMessage (PrivateMessage), TLS-serialized.
+  bytes mls_message = 5;
+
+  // 6-15 reserved for push (P), e.g. collapse id / priority hints.
+  reserved 6 to 15;
+}
+
+message SubmitMessageResponse {
+  uint64 seq = 1;
+  uint64 epoch = 2;
+  // True when (sender_device_id, client_id) was already sequenced; seq/epoch
+  // are the originally assigned values.
+  bool duplicate = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Fan-out (owning hub -> member hubs)
+// ---------------------------------------------------------------------------
+
+enum MessageKind {
+  MESSAGE_KIND_UNSPECIFIED = 0;
+  MESSAGE_KIND_COMMIT = 1;
+  MESSAGE_KIND_APPLICATION = 2;
+  MESSAGE_KIND_PROPOSAL = 3;
+  // Hub-generated membership notices; payload may be empty.
+  MESSAGE_KIND_MEMBER_ADDED = 4;
+  MESSAGE_KIND_MEMBER_REMOVED = 5;
+}
+
+// One entry of a group log as assigned by the owning hub.
+message SequencedMessage {
+  string gid = 1;
+  uint64 seq = 2;
+  uint64 epoch = 3;
+  MessageKind kind = 4;
+  string sender_user_id = 5;
+  string sender_device_id = 6;
+  string client_id = 7;
+  // MLSMessage, TLS-serialized (empty for hub notices without payload).
+  bytes payload = 8;
+  // Globally unique message id assigned by the owning hub; receivers dedup on it.
+  string message_id = 9;
+  // Sequencing time, unix milliseconds.
+  uint64 created_at = 10;
+  // Users added or removed (MEMBER_ADDED / MEMBER_REMOVED, Commits).
+  repeated string affected_user_ids = 11;
+
+  // 12-19 reserved for multi-homing (M2c) / push (P) metadata.
+  reserved 12 to 19;
+}
+
+// Batch of sequenced messages, one copy per member hub. Messages may belong
+// to several groups; within a gid they are in ascending seq order.
+message DeliverRequest {
+  repeated SequencedMessage messages = 1;
+}
+
+message GroupAck {
+  string gid = 1;
+  // Highest seq such that the receiver holds every seq up to it for this gid.
+  uint64 highest_contiguous_seq = 2;
+}
+
+message DeliverResponse {
+  // One ack per gid present in the request.
+  repeated GroupAck acks = 1;
+}
+
+// Welcome for new members, sent to the invitee's hub(s).
+message DeliverWelcomeRequest {
+  string gid = 1;
+  string sender_user_id = 2;
+  string recipient_user_id = 3;
+  repeated string recipient_device_ids = 4;
+  // MLS Welcome, TLS-serialized.
+  bytes welcome = 5;
+  optional bytes ratchet_tree = 6;
+  // Globally unique id assigned by the owning hub; receivers dedup on it.
+  string message_id = 7;
+
+  // 8-15 reserved for multi-homing (M2c) / push (P).
+  reserved 8 to 15;
+}
+
+message DeliverWelcomeResponse {}
+
+// ---------------------------------------------------------------------------
+// KeyPackages and identity lookups (any hub -> target user's hub)
+// ---------------------------------------------------------------------------
+
+message ClaimKeyPackageRequest {
+  string requester_user_id = 1;
+  string target_user_id = 2;
+  // Claim for one device only; when absent, one KeyPackage per device.
+  optional string device_id = 3;
+}
+
+message ClaimedKeyPackage {
+  string device_id = 1;
+  // MLS KeyPackage, TLS-serialized. Consumed on claim unless last_resort.
+  bytes key_package = 2;
+  bool last_resort = 3;
+}
+
+message ClaimKeyPackageResponse {
+  repeated ClaimedKeyPackage key_packages = 1;
+}
+
+message FetchLogRequest {
+  string gid = 1;
+  // First seq to return (inclusive).
+  uint64 from_seq = 2;
+  // Maximum number of messages; the owning hub may cap it further.
+  uint32 limit = 3;
+}
+
+message FetchLogResponse {
+  repeated SequencedMessage messages = 1;
+  // seq to pass as from_seq in the next call.
+  uint64 next_seq = 2;
+  // True when the log has no messages at or after next_seq.
+  bool complete = 3;
+}
+
+message GetDeviceListRequest {
+  string user_id = 1;
+}
+
+message GetDeviceListResponse {
+  bytes device_list_cbor = 1; // gim-core DeviceList, CBOR [tbs, sig]
+}
+
+message GetHostingRecordRequest {
+  string user_id = 1;
+}
+
+message GetHostingRecordResponse {
+  bytes hosting_record_cbor = 1; // gim-core UserHostingRecord, CBOR [tbs, sig]
+}
