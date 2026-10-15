@@ -1355,7 +1355,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_gim_core_checksum_method_gimclient_create_group_chat() and 0xFFFF) != 10041) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_gim_core_checksum_method_gimclient_create_identity() and 0xFFFF) != 62810) {
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_create_identity() and 0xFFFF) != 56233) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_delete_message() and 0xFFFF) != 40750) {
@@ -1394,7 +1394,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_gim_core_checksum_method_gimclient_remove_member() and 0xFFFF) != 31958) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_gim_core_checksum_method_gimclient_restore_from_recovery() and 0xFFFF) != 56825) {
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_restore_from_recovery() and 0xFFFF) != 59727) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_retry_send() and 0xFFFF) != 31098) {
@@ -1457,7 +1457,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_gim_core_checksum_method_gimclient_user_id() and 0xFFFF) != 19625) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_gim_core_checksum_method_gimclient_wait_link() and 0xFFFF) != 24066) {
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_wait_link() and 0xFFFF) != 17553) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_typinglistener_on_update() and 0xFFFF) != 51337) {
@@ -2759,6 +2759,10 @@ public interface GimClientInterface {
      * its signed DeviceList, recovery backup and KeyPackages to the hub,
      * signs in and persists the session. Returns the recovery code, which
      * is not stored and must be shown to the user once.
+     *
+     * On failure nothing of the attempt is kept: call it again (it creates
+     * a new user), also after the app restarted. `InvalidInput` once an
+     * identity exists.
      */
     suspend fun `createIdentity`(`displayName`: kotlin.String): kotlin.String
     
@@ -2824,6 +2828,10 @@ public interface GimClientInterface {
      * it they all stay active. Fails with `NotFound` if the hub has no
      * DeviceList of the user, and with `RetryLater` while the hub keeps
      * throttling the read.
+     *
+     * On failure nothing of the attempt is kept: call it again, also after
+     * the app restarted. If the failed attempt's device was published, the
+     * retry revokes it.
      */
     suspend fun `restoreFromRecovery`(`userId`: kotlin.String, `recoveryCode`: kotlin.String, `revokeOthers`: kotlin.Boolean)
     
@@ -2946,6 +2954,12 @@ public interface GimClientInterface {
      * the link, then signs in as a new device of that user. Returns the
      * SAS to compare with the one the old device shows; finish with
      * `confirm_link`.
+     *
+     * If no bundle arrived (network error, timeout), call it again with
+     * the same `link`. A failure after the bundle arrived keeps nothing of
+     * the attempt and uses `link` up: start a new link and approve it on
+     * the old device again (rejecting the first approval there revokes the
+     * failed attempt's device).
      */
     suspend fun `waitLink`(`link`: LinkSession): kotlin.String
     
@@ -3352,6 +3366,10 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
      * its signed DeviceList, recovery backup and KeyPackages to the hub,
      * signs in and persists the session. Returns the recovery code, which
      * is not stored and must be shown to the user once.
+     *
+     * On failure nothing of the attempt is kept: call it again (it creates
+     * a new user), also after the app restarted. `InvalidInput` once an
+     * identity exists.
      */
     @Throws(GimException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -3684,6 +3702,10 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
      * it they all stay active. Fails with `NotFound` if the hub has no
      * DeviceList of the user, and with `RetryLater` while the hub keeps
      * throttling the read.
+     *
+     * On failure nothing of the attempt is kept: call it again, also after
+     * the app restarted. If the failed attempt's device was published, the
+     * retry revokes it.
      */
     @Throws(GimException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -4214,6 +4236,12 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
      * the link, then signs in as a new device of that user. Returns the
      * SAS to compare with the one the old device shows; finish with
      * `confirm_link`.
+     *
+     * If no bundle arrived (network error, timeout), call it again with
+     * the same `link`. A failure after the bundle arrived keeps nothing of
+     * the attempt and uses `link` up: start a new link and approve it on
+     * the old device again (rejecting the first approval there revokes the
+     * failed attempt's device).
      */
     @Throws(GimException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")

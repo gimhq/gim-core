@@ -524,6 +524,12 @@ impl StoreTxn for MemoryTxn {
         }
         Ok(())
     }
+
+    fn clear(&mut self) -> StoreResult<()> {
+        self.rows = Rows::default();
+        self.crypto = CryptoState::default();
+        Ok(())
+    }
 }
 
 impl CryptoStore for MemoryTxn {
