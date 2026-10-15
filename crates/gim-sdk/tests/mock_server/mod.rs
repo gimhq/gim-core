@@ -22,7 +22,9 @@ use gim_common::{ClientId, DeviceRef, GroupId, MessageId, UserId};
 use gim_proto::envelope::Content;
 use gim_proto::v2::{self, EventData};
 use gim_sdk::testing::{FakeTransport, MemorySecretStorage};
-use gim_sdk::transport::{AccessToken, OutgoingCommit, PostError, Transport, TransportError};
+use gim_sdk::transport::{
+    AccessToken, OutgoingCommit, PostError, SessionError, Transport, TransportError,
+};
 use gim_sdk::{Client, ClientBuilder, ConnectionState, HttpTransport, SecretStorage, SyncSettings};
 use gim_test::{Delivered, Event, StreamEvent};
 use tokio::sync::broadcast;
@@ -48,8 +50,8 @@ pub struct Controls {
     /// The next stream connection with a cursor below this gets a
     /// `cursor_expired` frame and close 4410 (0: off).
     pub stream_expired_below: AtomicU64,
-    /// Tokens are rejected (401, or close 4401 on streams), and so are
-    /// sign-ins (403).
+    /// Tokens are rejected (401, or close 4401 on streams), and sign-ins
+    /// fail with 401 `device_not_active`.
     pub reject: AtomicBool,
     /// `cursor` of every stream connection.
     pub stream_cursors: Mutex<Vec<Option<u64>>>,
@@ -156,6 +158,7 @@ fn transport_error(err: TransportError) -> Response {
         TransportError::Unauthorized => error(StatusCode::UNAUTHORIZED, "unauthorized"),
         TransportError::NotFound(_) => error(StatusCode::NOT_FOUND, "not_found"),
         TransportError::Conflict(_) => error(StatusCode::CONFLICT, "conflict"),
+        TransportError::TooLarge(_) => error(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
         _ => error(StatusCode::BAD_REQUEST, "validation_failed"),
     }
 }
@@ -351,7 +354,7 @@ async fn create_session(
     Json(request): Json<v2::CreateSessionRequest>,
 ) -> Response {
     if state.controls.reject.load(Ordering::SeqCst) {
-        return error(StatusCode::FORBIDDEN, "forbidden");
+        return error(StatusCode::UNAUTHORIZED, "device_not_active");
     }
     match state.transport.create_session(request.response).await {
         Ok(session) => Json(v2::Session {
@@ -359,8 +362,9 @@ async fn create_session(
             expires_at: session.expires_at_ms as i64,
         })
         .into_response(),
-        Err(TransportError::Unauthorized) => error(StatusCode::FORBIDDEN, "forbidden"),
-        Err(err) => transport_error(err),
+        Err(SessionError::InvalidChallenge) => error(StatusCode::UNAUTHORIZED, "invalid_challenge"),
+        Err(SessionError::Rejected(code)) => error(StatusCode::UNAUTHORIZED, &code),
+        Err(SessionError::Transport(err)) => transport_error(err),
     }
 }
 
@@ -801,6 +805,7 @@ async fn events(
 
 async fn stream(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<v2::StreamQuery>,
     upgrade: WebSocketUpgrade,
 ) -> Response {
@@ -813,11 +818,15 @@ async fn stream(
         .lock()
         .unwrap()
         .push(query.cursor);
-    let device = query
-        .token
-        .filter(|_| !state.controls.reject.load(Ordering::SeqCst))
-        .and_then(|token| state.transport.service().authenticate(&token).ok());
-    upgrade.on_upgrade(move |socket| serve_stream(state, device, query.cursor.unwrap_or(0), socket))
+    // A Bearer header or `?token=`, like the hub.
+    let token = state
+        .token(&headers)
+        .ok()
+        .map(|t| t.as_str().to_string())
+        .or(query.token)
+        .filter(|_| !state.controls.reject.load(Ordering::SeqCst));
+    let cursor = query.cursor.unwrap_or(0);
+    upgrade.on_upgrade(move |socket| serve_stream(state, token, cursor, socket))
 }
 
 async fn close(socket: &mut WebSocket, code: u16) {
@@ -830,12 +839,14 @@ async fn close(socket: &mut WebSocket, code: u16) {
 
 async fn serve_stream(
     state: AppState,
-    device: Option<DeviceRef>,
+    token: Option<String>,
     mut cursor: u64,
     mut socket: WebSocket,
 ) {
     let controls = &state.controls;
-    let Some(device) = device else {
+    let service = state.transport.service();
+    let token = token.unwrap_or_default();
+    let Ok(device) = service.authenticate(&token) else {
         return close(&mut socket, v2::STREAM_CLOSE_UNAUTHORIZED).await;
     };
     let expired_below = controls.stream_expired_below.swap(0, Ordering::SeqCst);
@@ -855,7 +866,8 @@ async fn serve_stream(
     controls.streams_served.fetch_add(1, Ordering::SeqCst);
     let mut sent = 0;
     loop {
-        if controls.reject.load(Ordering::SeqCst) {
+        // The session is re-validated with every batch, like the hub.
+        if controls.reject.load(Ordering::SeqCst) || service.authenticate(&token).is_err() {
             return close(&mut socket, v2::STREAM_CLOSE_UNAUTHORIZED).await;
         }
         if controls.kick.swap(false, Ordering::SeqCst) {

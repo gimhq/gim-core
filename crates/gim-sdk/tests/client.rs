@@ -636,4 +636,18 @@ async fn revoked_device_is_rejected_and_removed() {
     alice.send_text(&g, "after").await;
     bob.sync().await;
     assert_eq!(bob.texts(&g), ["before", "after"]);
+
+    // The revoked tablet cannot sign in again: it is signed out.
+    service.expire_sessions(&tablet);
+    let result = bob_tablet.client.sync_once().await;
+    assert!(
+        matches!(result, Err(ClientError::DeviceNotActive(_))),
+        "{result:?}"
+    );
+    assert!(bob_tablet.client.session().is_none());
+    assert!(bob_tablet
+        .secrets
+        .get(SESSION_SECRET_KEY)
+        .unwrap()
+        .is_none());
 }

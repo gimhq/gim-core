@@ -11,9 +11,9 @@ use futures_util::FutureExt;
 use gim_base::model::{
     Chat, ChatMember, GroupMessage, IncomingEvent, Membership, MessageKind, StateChange,
 };
-use gim_base::{BaseClient, StateReader, StateStore, StoreTxn};
+use gim_base::{BaseClient, BaseError, StateReader, StateStore, StoreTxn};
 use gim_common::{now_ms, DeviceRef, GroupId, UserId};
-use gim_crypto::inspect_handshake;
+use gim_crypto::{inspect_handshake, CryptoError};
 use tokio::sync::broadcast;
 use tokio::time::Instant;
 
@@ -122,7 +122,8 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Stops the sync loop. Returns why it stopped by itself, if it did:
-    /// [`ClientError::NotRegistered`] when the sign-in was rejected.
+    /// [`ClientError::NotRegistered`] when the hub kept rejecting the token,
+    /// [`ClientError::DeviceNotActive`] when it refused the device.
     pub fn stop_sync(&self) -> Result<()> {
         let task = self
             .inner
@@ -195,6 +196,10 @@ impl<S: StateStore + 'static> Client<S> {
                 continue;
             };
             self.set_connection_state(ConnectionState::Offline);
+            if let ClientError::DeviceNotActive(_) = err {
+                tracing::warn!(error = %err, "sync stopped");
+                return Err(err);
+            }
             if matches!(err, ClientError::Transport(TransportError::Unauthorized)) {
                 tracing::warn!("sign-in rejected; sync stopped");
                 return Err(ClientError::NotRegistered);
@@ -630,16 +635,7 @@ impl<S: StateStore + 'static> Client<S> {
                 _ => None,
             })
             .collect();
-        let base = BaseClient::new(session.device.clone());
-        let mut changes = self
-            .run(move |store, engine| {
-                let mut changes = Vec::new();
-                for event in events {
-                    changes.extend(base.apply(store, engine, event)?);
-                }
-                Ok(changes)
-            })
-            .await?;
+        let mut changes = self.apply_events_fetching_lists(session, events).await?;
         for group_id in &joined {
             changes.extend(self.sync_chat_kind(session, group_id.clone()).await?);
         }
@@ -654,6 +650,54 @@ impl<S: StateStore + 'static> Client<S> {
         }
         if changes.contains(&StateChange::KeyPackagesLow) {
             self.upload_key_packages(session).await?;
+        }
+        Ok(changes)
+    }
+
+    /// Applies `events` in order. Pre-fetching lists is the normal path; as
+    /// a safety net, an event failing with `device_list_unknown` is rolled
+    /// back, the user's DeviceList fetched and the event applied once more,
+    /// skipping it as before if it fails again.
+    async fn apply_events_fetching_lists(
+        &self,
+        session: &Session,
+        events: Vec<IncomingEvent>,
+    ) -> Result<Vec<StateChange>> {
+        let strict = BaseClient::new(session.device.clone()).failing_on_unknown_device_lists();
+        let lenient = BaseClient::new(session.device.clone());
+        let mut changes = Vec::new();
+        let mut events = VecDeque::from(events);
+        // The first event is a retry.
+        let mut retry = false;
+        while !events.is_empty() {
+            let (strict, lenient) = (strict.clone(), lenient.clone());
+            let (applied, rest, unknown) = self
+                .run(move |store, engine| {
+                    let mut changes = Vec::new();
+                    let mut base = if retry { &lenient } else { &strict };
+                    while let Some(event) = events.pop_front() {
+                        match base.apply(store, engine, event.clone()) {
+                            Ok(applied) => changes.extend(applied),
+                            Err(BaseError::Crypto(CryptoError::DeviceListUnknown { user_id })) => {
+                                events.push_front(event);
+                                return Ok((changes, events, Some(user_id)));
+                            }
+                            Err(err) => return Err(err),
+                        }
+                        base = &strict;
+                    }
+                    Ok((changes, events, None))
+                })
+                .await?;
+            changes.extend(applied);
+            events = rest;
+            retry = false;
+            if let Some(user_id) = unknown {
+                tracing::info!(%user_id, "unknown device list; fetching it and retrying once");
+                let revoked = self.refresh_device_list(&user_id).await?;
+                self.record_revoked(session, revoked).await?;
+                retry = true;
+            }
         }
         Ok(changes)
     }

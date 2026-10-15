@@ -30,15 +30,31 @@ DeviceCert in the user's stored DeviceList. There is no handle-only registration
    self-certifying. The first upload creates the user on this hub. A later upload with a higher
    `seq` replaces the stored list (200); re-uploading the identical list (same `seq`, same bytes)
    is idempotent and also returns 200. A lower `seq`, or the same `seq` with different bytes, is
-   409 `stale_device_list`.
-2. `POST /v2/auth/challenge {user_id, device_id}` returns
-   `{challenge_id, challenge, expires_at, hub_peer_id}`. `challenge` is a gim-core AuthChallenge
-   (CBOR, base64) binding this hub's PeerID.
-3. The device signs the challenge bytes with its device key and calls
-   `POST /v2/auth/session {challenge_id, signature}`, which returns `{token, expires_at}` if the
-   device is still active in the stored DeviceList.
+   409 `stale_device_list`. A replacement emits a `device_list.updated` event (payload: the new
+   `{user_id, device_list}`) to the user's active devices and to every active device of users
+   sharing at least one group with them, so peers re-verify the user's MLS credentials against
+   the new list.
+2. `POST /v2/auth/challenge {user_id, device_id}` returns `{challenge, expires_at, hub_id}`
+   (404 `not_found` unless the device is active in the stored DeviceList). `challenge` is a
+   gim-core AuthChallenge (CBOR, base64) with `audience` = this hub's `hub_id`, a 32-byte random
+   nonce and a 5-minute lifetime.
+3. The device signs the exact challenge bytes into a gim-core AuthResponse (gim-core
+   docs/identity.md, *Device authentication*) and calls `POST /v2/auth/session {response}`
+   (AuthResponse CBOR, base64). The hub verifies it against the stored DeviceList and its
+   `hub_id`, and accepts each challenge once, for the device it was issued to, before
+   `expires_at`. It returns `{token, expires_at}` (token lifetime `GIM_HUB_SESSION_TTL_DAYS`,
+   default 30 days). Errors: 400 `validation_failed` (malformed body or AuthResponse); 401
+   `invalid_challenge` (unknown, used, expired or foreign challenge), `invalid_signature`, or
+   `device_not_active` (device revoked or not in the DeviceList).
 4. Use `Authorization: Bearer <token>` (or `?token=` on `GET /v2/stream`). Sign in again after
    `expires_at` or on 401.
+
+Long-lived event delivery re-checks the session (unexpired, device still active). `GET /v2/stream`
+checks it with every batch of events (after reading it, before sending it), on every wake-up and at
+least every 30 seconds; once the session is deleted, expires or its device is revoked by a
+DeviceList update, the hub sends no further events and closes the connection with code 4401 (a
+revoking upload wakes the revoked devices, so their streams close promptly). `GET /v2/events?wait=`
+checks it again when the wait ends and then answers 401 `unauthorized` instead of returning events.
 
 Linking a new device: the new device shows a QR code with a `link_id`; the old device (signed in)
 posts `POST /v2/link-bundles {link_id, sealed_bundle, expires_in}` and uploads the DeviceList that
@@ -56,14 +72,24 @@ Handshake messages (Commit, Proposal) are sent as MLS `PublicMessage`; applicati
 anyway (arch §7.3, MIMI hub model). Clients do not declare roster changes: a client-declared
 roster delta cannot be verified by the hub and is not part of the API.
 
+Group IDs: `POST /v2/groups` assigns `gid = <owner hub_id>/<random_128>`, where `hub_id` is the
+gim-core `HubId` of the owning hub's root key (`"h" || base32(...)`, not a libp2p PeerID) and
+`random_128` is 16 random bytes in lowercase unpadded base32 (26 characters). The gid is stable
+across runtime-key rotation (arch §4.1); the hub's current PeerID is resolved from its runtime
+certificate / hosting records. Clients use the UTF-8 bytes of the gid as the MLS `group_id`; the
+hub rejects a Commit whose framing carries any other group ID. Percent-encode the gid in paths
+(`/` as `%2F`).
+
 On `POST /v2/groups/{gid}/commits` the owning hub:
 
 1. parses the `PublicMessage` and reads the epoch from its framing;
 2. extracts the Add, Remove and Update proposals (inline in the Commit or referenced);
-3. for every added member, validates the gim-core MLS credential (custom credential type
-   `0xF001`, format owned by gim-core `docs/identity.md`) against the member's DeviceList: the
-   device must be active in the user's current DeviceList and the credential's key must match its
-   DeviceCert;
+3. validates gim-core MLS credentials (custom credential type `0xF001`, format owned by gim-core
+   `docs/identity.md` "MLS credential") against DeviceLists stored on this hub, failing closed:
+   - for every Add, the KeyPackage's leaf credential must certify the device that owns the claimed
+     KeyPackage it resolves to, and verify against that user's stored DeviceList;
+   - the leaf of every Update proposal and of the Commit's UpdatePath must certify the committing
+     device itself (a member cannot change identity);
 4. checks group policy (who may add or remove members);
 5. derives the member events (`group.member_added` / `group.member_removed` with `user_id` and
    `device_ids`), the group roster and the fan-out set from the parsed proposals.
@@ -71,8 +97,29 @@ On `POST /v2/groups/{gid}/commits` the owning hub:
 | Rejection | Status | Code |
 |---|---|---|
 | `mls_message` is not a `PublicMessage` Commit/Proposal for this group, or Welcome fields inconsistent | 400 | `validation_failed` |
-| Added member's credential is malformed, not type `0xF001`, or does not match an active device in the member's DeviceList | 400 | `validation_failed` |
+| A checked leaf's credential is invalid or belongs to another device (see *MLS credential checks*) | 400 | `validation_failed` |
 | Sender is not a member, or group policy does not allow the change | 403 | `not_member` / `forbidden` |
+
+### MLS credential checks
+
+`POST /v2/keypackages` applies the same check to every uploaded KeyPackage: its leaf must carry
+the calling device's credential; one failing package rejects the whole upload.
+
+A leaf credential is accepted only if all of these hold, in order:
+
+1. the credential type is `0xF001` and its content decodes (gim-core validation steps 1-2);
+2. the expected user has a valid stored DeviceList on this hub;
+3. the DeviceCert verifies under the credential's root key, the leaf's MLS signature key equals the
+   certified device key, and the stored DeviceList does not revoke the device (gim-core steps 3-5);
+4. the certified `(user_id, device_id)` is the expected device;
+5. the stored DeviceList certifies that device.
+
+The `validation_failed` message names the first failing check by its code: the gim-core
+credential codes (`wrong_credential_type`, `non_canonical_cbor`, `malformed_content`,
+`unsupported_version`, `bad_cert_signature`, `user_id_mismatch`, `device_id_mismatch`,
+`invalid_cert`, `leaf_key_mismatch`, `revoked_device`) or the hub
+codes `no_device_list`, `identity_mismatch` and `unknown_device`, e.g.
+`invalid MLS credential (leaf_key_mismatch)`.
 
 `POST /v2/groups/{gid}/messages` carries only `PrivateMessage` application messages; the hub reads
 the epoch from the framing but cannot see their content.
@@ -115,7 +162,7 @@ learned of it from a `welcome` event or from the pending list. Recovery after 41
 | New | - | recovery backups, link-bundle relay, push registration (`PUT`/`DELETE /v2/push/registration`) |
 | KeyPackage upload | `last_resort` is a separate package field | `last_resort: true` flag; the request then holds exactly one package |
 | KeyPackage claim | `{device_ids}` | `{targets: [{user_id, device_id?}]}`, one package per active device; results carry `user_id` |
-| Group ID | `group_id`, opaque | `gid = <owner_peer_id>/<random_128 base32>`, assigned by the hub; percent-encode it in paths (`/` as `%2F`) |
+| Group ID | `group_id`, opaque | `gid = <owner hub_id>/<random_128 base32lower>`, assigned by the hub (MLS group ID = gid bytes); percent-encode it in paths (`/` as `%2F`) |
 | Group create | `{kind, member_device_ids}` | `{kind}`; members are added by Commits |
 | Membership | `POST /members`, `DELETE /members/{device_id}` | removed; driven by `POST /v2/groups/{gid}/commits {client_id, mls_message, welcome?, welcome_recipients?, ratchet_tree?}` returning `{seq, epoch, duplicate}` |
 | Epoch | client `epoch` field | read by the hub from the MLS framing |
@@ -134,4 +181,14 @@ ranges.
 
 ## Status
 
-Until the hub logic lands every `/v2` route returns 501 `not_implemented`; `/healthz` is live.
+Implemented: `/healthz`, sign-in (`/v2/auth/*`), DeviceLists and users (`/v2/users/*`, `/v2/me`),
+recovery backups, device linking (`/v2/link-bundles*`), handles, KeyPackages, groups and commits,
+messages, pending Welcomes, events (long-poll and `/v2/stream`) and blobs.
+
+Pending:
+
+- `PUT`/`DELETE /v2/push/registration` return 501 `not_implemented`.
+- Validation of an added member's MLS credential (type `0xF001`) against their DeviceList is not
+  enforced yet: the hub accepts every added member until gim-core identity part 3 defines the
+  credential format. The 400 `validation_failed` rejection for credentials in the commit table
+  above applies once it lands.

@@ -17,6 +17,7 @@ use mock_server::{
 use ConnectionState::{Connected, Connecting, Offline, Syncing};
 
 struct Setup {
+    transport: FakeTransport,
     server: MockServer,
     alice: Peer,
     bob: Peer,
@@ -36,6 +37,7 @@ async fn setup(settings: SyncSettings) -> Setup {
         .await
         .unwrap();
     Setup {
+        transport,
         server,
         alice,
         bob,
@@ -50,6 +52,7 @@ async fn reconnect_after_drop_resumes_from_cursor_without_duplicates() {
         alice,
         bob,
         group_id,
+        ..
     } = setup(fast_settings()).await;
     let mut changes = bob.client.subscribe_changes();
     let mut states = bob.client.subscribe_connection_state();
@@ -110,6 +113,7 @@ async fn falls_back_to_long_poll_without_stream() {
         alice,
         bob,
         group_id,
+        ..
     } = setup(fast_settings()).await;
     server
         .controls
@@ -144,16 +148,50 @@ async fn connection_states_and_token_rejection() {
         assert_eq!(next_state(&mut states).await, expected);
     }
 
-    // Close code 4401 stops the loop.
+    // Close code 4401, and the hub refuses the sign-in (device_not_active):
+    // the loop stops and the client is signed out.
     server.streams_served(2).await;
     server.controls.reject.store(true, Ordering::SeqCst);
     assert_eq!(next_state(&mut states).await, Offline);
     wait_until("sync loop ended", || !bob.client.is_sync_running()).await;
     assert!(matches!(
         bob.client.stop_sync(),
-        Err(ClientError::NotRegistered)
+        Err(ClientError::DeviceNotActive(_))
     ));
     assert_eq!(bob.client.connection_state(), Offline);
+    assert_eq!(bob.client.session(), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn expired_stream_session_signs_in_again_and_reconnects() {
+    let Setup {
+        transport,
+        server,
+        alice,
+        bob,
+        group_id,
+    } = setup(fast_settings()).await;
+    let mut states = bob.client.subscribe_connection_state();
+    bob.client.start_sync().unwrap();
+    reach_state(&mut states, Connected).await;
+    server.streams_served(1).await;
+    let before = bob.client.session().unwrap();
+
+    // The hub drops the session: the stream closes with 4401, the client
+    // signs in again and reconnects.
+    transport.service().expire_sessions(&before.device);
+    reach_state(&mut states, Connected).await;
+    server.streams_served(2).await;
+    let after = bob.client.session().unwrap();
+    assert_ne!(after.token, before.token);
+    assert!(bob.client.is_sync_running());
+
+    alice.send_text(&group_id, "after re-sign-in").await;
+    wait_until("live message", || {
+        bob.texts(&group_id) == ["after re-sign-in"]
+    })
+    .await;
+    bob.client.stop_sync().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

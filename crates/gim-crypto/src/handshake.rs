@@ -18,6 +18,8 @@ use crate::CryptoError;
 const MLS10: u16 = 1;
 /// `WireFormat` of a PublicMessage.
 const PUBLIC_MESSAGE: u16 = 1;
+/// `WireFormat` of a PrivateMessage.
+const PRIVATE_MESSAGE: u16 = 2;
 
 /// Whether a handshake message is a Commit or a standalone Proposal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +53,20 @@ pub fn message_epoch(message: &[u8]) -> Result<u64, CryptoError> {
         .try_into_protocol_message()
         .map_err(|_| CryptoError::invalid("message is not a group message"))?;
     Ok(message.epoch().as_u64())
+}
+
+/// The epoch of an MLS 1.0 PrivateMessage (how application messages are
+/// sent); any other message is rejected.
+pub fn private_message_epoch(message: &[u8]) -> Result<u64, CryptoError> {
+    let mut header = message;
+    let version = read_u16(&mut header)?;
+    let wire_format = read_u16(&mut header)?;
+    if version != MLS10 || wire_format != PRIVATE_MESSAGE {
+        return Err(CryptoError::invalid(
+            "message is not an MLS 1.0 PrivateMessage",
+        ));
+    }
+    message_epoch(message)
 }
 
 /// Parses an MLSMessage carrying a Commit or Proposal as PublicMessage.

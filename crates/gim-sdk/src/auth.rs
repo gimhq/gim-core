@@ -10,7 +10,9 @@ use gim_identity::{AuthChallenge, AuthResponse, DeviceSigningKey, AUTH_CHALLENGE
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::client::{Session, DEVICE_KEY_SECRET_KEY, SESSION_SECRET_KEY};
-use crate::transport::{AccessToken, Challenge, PostError, SessionToken, TransportError};
+use crate::transport::{
+    AccessToken, Challenge, PostError, SessionError, SessionToken, TransportError,
+};
 use crate::{Client, SecretStorage};
 
 /// A token is renewed this long before it expires.
@@ -101,8 +103,9 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Signs in again, unless another task already replaced `rejected`
-    /// (or, without one, the expired token). Fails with `Unauthorized` if
-    /// the hub does not accept this device any more.
+    /// (or, without one, the expired token). If the hub refuses this device
+    /// for good ([`TransportError::DeviceNotActive`]), the session is
+    /// cleared: the client is signed out.
     pub(crate) async fn renew_token(
         &self,
         rejected: Option<&AccessToken>,
@@ -117,13 +120,17 @@ impl<S: StateStore + 'static> Client<S> {
             return Ok(session.token);
         }
         let key = device_key(&*self.inner.secrets)?;
-        let (token, hub_id) = self
-            .sign_in(
-                &session.device,
-                &key,
-                Some(session.hub_id.as_str()).filter(|h| !h.is_empty()),
-            )
-            .await?;
+        let pinned = Some(session.hub_id.as_str()).filter(|h| !h.is_empty());
+        let (token, hub_id) = match self.sign_in(&session.device, &key, pinned).await {
+            Err(TransportError::DeviceNotActive(reason)) => {
+                tracing::warn!(%reason, "the hub refuses this device; signing out");
+                if let Err(err) = self.clear_session() {
+                    tracing::warn!(error = %err, "cannot delete the stored session");
+                }
+                return Err(TransportError::DeviceNotActive(reason));
+            }
+            signed_in => signed_in?,
+        };
         let renewed = Session {
             device: session.device,
             token: token.token.clone(),
@@ -139,26 +146,45 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Answers a hub challenge as `device`; returns the session token and
-    /// the hub id.
+    /// the hub id. A rejected challenge (`invalid_challenge`) is retried
+    /// once with a new one; [`TransportError::DeviceNotActive`] if the hub
+    /// refuses the device.
     pub(crate) async fn sign_in(
         &self,
         device: &DeviceRef,
         key: &DeviceSigningKey,
         pinned_hub: Option<&str>,
     ) -> Result<(SessionToken, String), TransportError> {
-        let challenge = match self.inner.transport.auth_challenge(device).await {
-            // The hub does not list the device as active.
-            Err(TransportError::NotFound(_)) => return Err(TransportError::Unauthorized),
-            challenge => challenge?,
-        };
-        check_challenge(&challenge, pinned_hub)?;
-        let response = AuthResponse::sign(&challenge.challenge, key, &device.user_id);
-        let token = self
-            .inner
-            .transport
-            .create_session(response.to_bytes())
-            .await?;
-        Ok((token, challenge.hub_id))
+        let mut retried = false;
+        loop {
+            let challenge = match self.inner.transport.auth_challenge(device).await {
+                // The hub does not list the device as active.
+                Err(TransportError::NotFound(reason)) => {
+                    return Err(TransportError::DeviceNotActive(reason))
+                }
+                challenge => challenge?,
+            };
+            check_challenge(&challenge, pinned_hub)?;
+            let response = AuthResponse::sign(&challenge.challenge, key, &device.user_id);
+            match self
+                .inner
+                .transport
+                .create_session(response.to_bytes())
+                .await
+            {
+                Ok(token) => return Ok((token, challenge.hub_id)),
+                Err(SessionError::InvalidChallenge) if !retried => retried = true,
+                Err(SessionError::InvalidChallenge) => {
+                    return Err(TransportError::Server(
+                        "401 invalid_challenge for a fresh challenge".into(),
+                    ))
+                }
+                Err(SessionError::Rejected(reason)) => {
+                    return Err(TransportError::DeviceNotActive(reason))
+                }
+                Err(SessionError::Transport(err)) => return Err(err),
+            }
+        }
     }
 
     pub(crate) fn persist_session(&self, session: &Session) -> crate::Result<()> {

@@ -86,8 +86,13 @@ impl CredentialError {
 
 impl From<CredentialError> for CryptoError {
     fn from(err: CredentialError) -> Self {
-        Self::InvalidCredential {
-            reason: format!("{}: {err}", err.code()),
+        match err {
+            CredentialError::DeviceListUnknown { user } => {
+                Self::DeviceListUnknown { user_id: user }
+            }
+            err => Self::InvalidCredential {
+                reason: format!("{}: {err}", err.code()),
+            },
         }
     }
 }

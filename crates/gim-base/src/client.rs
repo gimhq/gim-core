@@ -20,6 +20,8 @@ use crate::{Result, StateReader, StateStore, StoreTxn};
 #[derive(Debug, Clone)]
 pub struct BaseClient {
     pub(crate) own: DeviceRef,
+    /// See [`BaseClient::failing_on_unknown_device_lists`].
+    fail_on_unknown_lists: bool,
 }
 
 enum Outcome {
@@ -30,7 +32,29 @@ enum Outcome {
 
 impl BaseClient {
     pub fn new(own: DeviceRef) -> Self {
-        Self { own }
+        Self {
+            own,
+            fail_on_unknown_lists: false,
+        }
+    }
+
+    /// Makes [`BaseClient::apply`] fail with
+    /// [`CryptoError::DeviceListUnknown`], rolling the event back, where it
+    /// would otherwise skip a message whose credential names a user without
+    /// a known DeviceList: the caller fetches the list and applies the event
+    /// again.
+    pub fn failing_on_unknown_device_lists(mut self) -> Self {
+        self.fail_on_unknown_lists = true;
+        self
+    }
+
+    fn rejects(&self, err: CryptoError) -> Result<Outcome> {
+        match err {
+            err @ CryptoError::DeviceListUnknown { .. } if self.fail_on_unknown_lists => {
+                Err(err.into())
+            }
+            _ => Ok(Outcome::Applied),
+        }
     }
 
     pub fn own_device(&self) -> &DeviceRef {
@@ -395,10 +419,11 @@ impl BaseClient {
             }
             // Undecryptable or malformed: skip it so it cannot block the group.
             Err(
-                CryptoError::InvalidInput { .. }
+                err @ (CryptoError::InvalidInput { .. }
                 | CryptoError::Mls { .. }
-                | CryptoError::InvalidCredential { .. },
-            ) => return Ok(Outcome::Applied),
+                | CryptoError::InvalidCredential { .. }
+                | CryptoError::DeviceListUnknown { .. }),
+            ) => return self.rejects(err),
         };
         match decrypted {
             DecryptedMessage::Envelope {
@@ -456,7 +481,7 @@ impl BaseClient {
             Ok(joined) => joined,
             Err(err @ CryptoError::Store { .. }) => return Err(err.into()),
             // Duplicate (group already joined) or invalid Welcome.
-            Err(_) => return Ok(Outcome::Applied),
+            Err(err) => return self.rejects(err),
         };
         let group_id = &message.group_id;
         if &joined.group_id != group_id {

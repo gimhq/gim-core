@@ -155,14 +155,19 @@ fn learn_all(devices: &[&Device]) {
 
 fn assert_credential_error<T: std::fmt::Debug>(result: Result<T, CryptoError>, code: &str) {
     assert!(
-        matches!(&result, Err(CryptoError::InvalidCredential { reason }) if reason.starts_with(code)),
+        matches!(&result, Err(CryptoError::InvalidCredential { reason }) if reason.starts_with(code))
+            || code == "device_list_unknown"
+                && matches!(&result, Err(CryptoError::DeviceListUnknown { .. })),
         "{result:?}"
     );
 }
 
 fn assert_invalid_credential<T: std::fmt::Debug>(result: Result<T, CryptoError>) {
     assert!(
-        matches!(result, Err(CryptoError::InvalidCredential { .. })),
+        matches!(
+            result,
+            Err(CryptoError::InvalidCredential { .. } | CryptoError::DeviceListUnknown { .. })
+        ),
         "{result:?}"
     );
 }
@@ -419,12 +424,11 @@ fn device_without_known_list_rejected() {
     let (alice, bob) = (Device::new(1), Device::new(2));
     alice.learn(&[&alice]);
     alice.engine.create_group(&alice.store, &g).unwrap();
-    assert_credential_error(
-        alice
-            .engine
-            .add_members(&alice.store, &g, &[bob.key_package()]),
-        "device_list_unknown",
-    );
+    // The error names the user, so the caller can fetch the list.
+    assert!(matches!(
+        alice.engine.add_members(&alice.store, &g, &[bob.key_package()]),
+        Err(CryptoError::DeviceListUnknown { user_id }) if user_id == bob.me.user_id
+    ));
     assert_eq!(alice.epoch(&g), 0);
 }
 

@@ -8,10 +8,14 @@ use crate::SecretStorageError;
 pub enum ClientError {
     #[error("not logged in")]
     NotLoggedIn,
-    /// The hub no longer accepts this device (sign-in rejected, e.g. the
-    /// device was revoked): it needs a new identity or a new link.
+    /// The hub keeps rejecting this device's session token: sync stops.
     #[error("device is not registered")]
     NotRegistered,
+    /// The hub refused this device's sign-in for good (`invalid_signature`
+    /// or `device_not_active`: revoked, or its keys are broken). The
+    /// session was cleared; the device needs a new identity or a new link.
+    #[error("device not active on the hub: {0}")]
+    DeviceNotActive(String),
     #[error("already logged in")]
     AlreadyLoggedIn,
     #[error("invalid stored session: {0}")]
@@ -26,7 +30,7 @@ pub enum ClientError {
     #[error("identity error: {0}")]
     Identity(String),
     #[error(transparent)]
-    Transport(#[from] TransportError),
+    Transport(TransportError),
     #[error(transparent)]
     Base(#[from] BaseError),
     #[error(transparent)]
@@ -51,13 +55,22 @@ impl From<CryptoError> for ClientError {
     }
 }
 
+impl From<TransportError> for ClientError {
+    fn from(err: TransportError) -> Self {
+        match err {
+            TransportError::DeviceNotActive(reason) => Self::DeviceNotActive(reason),
+            err => Self::Transport(err),
+        }
+    }
+}
+
 impl From<PostError> for ClientError {
     fn from(err: PostError) -> Self {
         match err {
             PostError::StaleEpoch { .. } => {
                 Self::Transport(TransportError::Conflict(err.to_string()))
             }
-            PostError::Transport(err) => Self::Transport(err),
+            PostError::Transport(err) => err.into(),
         }
     }
 }

@@ -11,8 +11,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use gim_base::model::{ChatKind, GroupMessage, IncomingEvent, MessageKind};
 use gim_common::{now_ms, ClientId, DeviceRef, GroupId, UserId};
-use gim_crypto::{inspect_handshake, message_epoch, HandshakeKind};
-use gim_identity::{AuthChallenge, AuthResponse, SignedDeviceList};
+use gim_crypto::{inspect_handshake, private_message_epoch, HandshakeKind, MlsEngine};
+use gim_identity::{AuthChallenge, AuthResponse, IdentityError, SignedDeviceList};
 use gim_test::{
     Delivered, DeliveryError, Event, FakeDeliveryService, GroupKind, MembershipChange,
     SubmitCommit, Welcome,
@@ -21,17 +21,19 @@ use zeroize::Zeroizing;
 
 use crate::transport::{
     AccessToken, Challenge, ClaimedKeyPackage, CommitAccepted, EventBatch, GroupInfo, HubEvent,
-    KeyPackageCount, OutgoingCommit, PostError, SessionToken, Transport, TransportError,
-    TransportResult, UserRecord,
+    KeyPackageCount, OutgoingCommit, PostError, SessionError, SessionToken, Transport,
+    TransportError, TransportResult, UserRecord,
 };
 use crate::{SecretStorage, SecretStorageError};
 
 /// Events returned per [`Transport::fetch_events`] call.
 const EVENTS_PER_FETCH: usize = 100;
-/// Lifetime of fake challenges.
-const CHALLENGE_LIFETIME_MS: u64 = 60_000;
-/// Lifetime of fake session tokens.
-const SESSION_LIFETIME_MS: u64 = 3_600_000;
+/// Lifetime of challenges, as on the hub.
+const CHALLENGE_LIFETIME_MS: u64 = 5 * 60_000;
+/// Lifetime of session tokens: the hub default `GIM_HUB_SESSION_TTL_DAYS`.
+const SESSION_LIFETIME_MS: u64 = 30 * 24 * 3_600_000;
+/// Largest application message, as on the hub (default).
+const MESSAGE_LIMIT_BYTES: usize = 262_144;
 
 /// Stand-in for device linking, which gim-sdk does not implement yet: the
 /// root key seed of each identity registered with a handle through a test
@@ -76,6 +78,8 @@ pub struct FakeTransport {
     service: Arc<FakeDeliveryService>,
     linking: Arc<TestLinking>,
     challenges: Arc<AtomicU64>,
+    /// Validates uploaded KeyPackages against the stored DeviceLists.
+    validator: Arc<MlsEngine>,
 }
 
 impl Default for FakeTransport {
@@ -87,6 +91,13 @@ impl Default for FakeTransport {
 impl FakeTransport {
     pub fn new() -> Self {
         let service = Arc::new(FakeDeliveryService::new());
+        let lists = service.clone();
+        let stored_list = move |user_id: &UserId| {
+            let bytes = lists.device_list(user_id)?;
+            SignedDeviceList::from_bytes(&bytes)
+                .and_then(|signed| signed.verify(user_id))
+                .ok()
+        };
         Self {
             linking: Arc::new(TestLinking {
                 service: service.clone(),
@@ -94,6 +105,7 @@ impl FakeTransport {
             }),
             service,
             challenges: Arc::default(),
+            validator: Arc::new(MlsEngine::with_device_list_lookup(Arc::new(stored_list))),
         }
     }
 
@@ -252,28 +264,45 @@ impl Transport for FakeTransport {
             expires_at: issued_at + CHALLENGE_LIFETIME_MS,
         }
         .to_bytes();
-        self.service.issue_challenge(challenge.clone());
+        self.service.issue_challenge(challenge.clone(), device);
         Ok(Challenge {
             challenge,
             hub_id: self.service.hub_id().to_string(),
         })
     }
 
-    /// Verifies the response like the hub, except that challenges are not
-    /// checked for single use.
-    async fn create_session(&self, response: Vec<u8>) -> TransportResult<SessionToken> {
-        let response =
-            AuthResponse::from_bytes(&response).map_err(|_| TransportError::Unauthorized)?;
+    /// Verifies the response like the hub: each challenge once, for the
+    /// device it was issued to, with the hub's error codes.
+    async fn create_session(&self, response: Vec<u8>) -> Result<SessionToken, SessionError> {
+        let bytes = response;
+        let response = AuthResponse::from_bytes(&bytes).map_err(invalid)?;
+        let claimed = DeviceRef::new(response.user_id().clone(), response.device_id().clone());
+        let redeemed = self
+            .service
+            .issued_challenge_in(&bytes)
+            .is_some_and(|challenge| self.service.redeem_challenge(&challenge, &claimed));
+        if !redeemed {
+            return Err(SessionError::InvalidChallenge);
+        }
+        let not_active = || SessionError::Rejected("device_not_active".into());
         let list = self
             .service
             .device_list(response.user_id())
             .and_then(|bytes| SignedDeviceList::from_bytes(&bytes).ok())
-            .ok_or(TransportError::Unauthorized)?;
+            .ok_or_else(not_active)?;
         let device = response
             .verify(self.service.hub_id(), now_ms(), &list)
-            .map_err(|_| TransportError::Unauthorized)?;
+            .map_err(|err| match err {
+                IdentityError::Revoked(_) | IdentityError::UnknownDevice(_) => not_active(),
+                IdentityError::BadSignature => SessionError::Rejected("invalid_signature".into()),
+                _ => SessionError::InvalidChallenge,
+            })?;
         Ok(SessionToken {
-            token: AccessToken::new(self.service.create_session(&device)?),
+            token: AccessToken::new(
+                self.service
+                    .create_session(&device)
+                    .map_err(TransportError::from)?,
+            ),
             expires_at_ms: now_ms() + SESSION_LIFETIME_MS,
         })
     }
@@ -348,6 +377,15 @@ impl Transport for FakeTransport {
         let device = self.device(token)?;
         if last_resort && key_packages.len() != 1 {
             return Err(invalid("one last-resort KeyPackage expected"));
+        }
+        // Each leaf must carry the uploading device's credential (fail
+        // closed); one bad package rejects the upload.
+        for key_package in &key_packages {
+            match self.validator.key_package_device(key_package) {
+                Ok(certified) if certified == device => {}
+                Ok(_) => return Err(invalid("invalid MLS credential (identity_mismatch)")),
+                Err(err) => return Err(invalid(format!("invalid MLS credential ({err})"))),
+            }
         }
         self.service
             .upload_key_packages(&device, key_packages, last_resort);
@@ -448,7 +486,10 @@ impl Transport for FakeTransport {
         mls_message: Vec<u8>,
     ) -> Result<u64, PostError> {
         let sender = self.device(token)?;
-        let epoch = message_epoch(&mls_message).map_err(invalid)?;
+        if mls_message.len() > MESSAGE_LIMIT_BYTES {
+            return Err(TransportError::TooLarge("payload_too_large".into()).into());
+        }
+        let epoch = private_message_epoch(&mls_message).map_err(invalid)?;
         Ok(self
             .service
             .post_message(group_id, &sender, client_id, epoch, mls_message)?)
