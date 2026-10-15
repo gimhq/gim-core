@@ -6,9 +6,30 @@ use gim_common::{GroupId, MessageId};
 
 use super::sent_output;
 use crate::error::{CliError, Result};
-use crate::output::{message_line, message_out, MessagesOut, Output};
+use crate::output::{message_line, message_out, MessageWrapOut, MessagesOut, Output};
 use crate::profile::Ctx;
 use crate::resolve::Directory;
+
+/// Directory of the senders, reacting users and receipt users of messages.
+pub fn message_directory(ctx: &Ctx, messages: &[Message]) -> Result<Directory> {
+    let users = messages
+        .iter()
+        .flat_map(|m| std::iter::once(&m.sender.user_id).chain(m.reactions.keys()))
+        .chain(
+            messages
+                .iter()
+                .flat_map(|m| m.receipts.keys().map(|d| &d.user_id)),
+        );
+    Directory::load(ctx.store(), users)
+}
+
+/// `{"message": Message}`, printed as its history line.
+pub fn message_output(ctx: &Ctx, message: &Message) -> Result<Output> {
+    let directory = message_directory(ctx, std::slice::from_ref(message))?;
+    let message = message_out(message, &directory);
+    let human = message_line(&message);
+    Ok(Output::new(&MessageWrapOut { message }, human))
+}
 
 /// `--reply <msg>`: a message of the same chat.
 pub fn resolve_reply(
@@ -67,15 +88,7 @@ pub async fn delete(ctx: &Ctx, msg: &str) -> Result<Output> {
 pub fn history(ctx: &Ctx, chat: &str, limit: usize) -> Result<Output> {
     let chat = ctx.resolve_chat(chat)?;
     let messages: Vec<Message> = ctx.store().messages(&chat.group_id, None, limit)?;
-    let users = messages
-        .iter()
-        .flat_map(|m| std::iter::once(&m.sender.user_id).chain(m.reactions.keys()))
-        .chain(
-            messages
-                .iter()
-                .flat_map(|m| m.receipts.keys().map(|d| &d.user_id)),
-        );
-    let directory = Directory::load(ctx.store(), users)?;
+    let directory = message_directory(ctx, &messages)?;
     let messages: Vec<_> = messages
         .iter()
         .map(|m| message_out(m, &directory))

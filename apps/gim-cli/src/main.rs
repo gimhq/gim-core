@@ -2,8 +2,9 @@
 //!
 //! Every command is one-shot: it opens the profile directory (SQLite store,
 //! `secrets.json`, `config.json`), restores the session, catches up with
-//! one `sync_once`, runs, and flushes the outbox before exiting. No
-//! background sync loop runs.
+//! one `sync_once`, runs, and flushes the outbox before exiting. Only
+//! `listen` and `wait-for` run the background sync loop, stopped before
+//! exiting.
 //!
 //! A profile must never be used by two `gim` processes at the same time
 //! (nor by anything else): there is no locking beyond SQLite's own, and
@@ -23,7 +24,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use crate::commands::{account, chats, media, messages};
+use crate::commands::{account, chats, listen, media, messages, wait_for};
 use crate::error::{exit_codes_help, CliError, Result, EXIT_OK, EXIT_USAGE};
 use crate::output::{print_error, Output};
 use crate::profile::Ctx;
@@ -138,6 +139,13 @@ enum Command {
     },
     /// Download the media of a message.
     Download { msg: String, path: PathBuf },
+    /// Print events as they arrive until Ctrl-C, --timeout, --count or
+    /// --until.
+    #[command(after_help = listen::HELP)]
+    Listen(listen::ListenArgs),
+    /// Wait until a message matches filters, or a message reaches states.
+    #[command(after_help = wait_for::HELP)]
+    WaitFor(wait_for::WaitForArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -220,12 +228,12 @@ async fn run(cli: Cli) -> Result<Output> {
         return account::register(&dir, server, handle, display_name).await;
     }
     let ctx = Ctx::connect(&dir, server).await?;
-    let output = dispatch(&ctx, cli.command).await?;
+    let output = dispatch(&ctx, cli.command, cli.json).await?;
     ctx.client.flush_outbox().await?;
     Ok(output)
 }
 
-async fn dispatch(ctx: &Ctx, command: Command) -> Result<Output> {
+async fn dispatch(ctx: &Ctx, command: Command, json: bool) -> Result<Output> {
     match command {
         Command::Register { .. } => unreachable!("handled before connecting"),
         Command::Whoami => account::whoami(ctx),
@@ -268,6 +276,8 @@ async fn dispatch(ctx: &Ctx, command: Command) -> Result<Output> {
         Command::History { chat, limit } => messages::history(ctx, &chat, limit),
         Command::Typing { chat, stop } => chats::typing(ctx, &chat, stop).await,
         Command::Download { msg, path } => media::download(ctx, &msg, &path).await,
+        Command::Listen(args) => listen::listen(ctx, &args, json).await,
+        Command::WaitFor(args) => wait_for::wait_for(ctx, &args).await,
     }
 }
 
@@ -303,6 +313,8 @@ mod tests {
             "history",
             "typing",
             "download",
+            "listen",
+            "wait-for",
         ] {
             assert!(
                 help.contains(&format!("  {name} ")),
@@ -310,6 +322,61 @@ mod tests {
             );
         }
         assert!(help.contains("5  server, network or transport error"));
+    }
+
+    #[test]
+    fn listen_and_wait_for_help_document_options_and_exit_codes() {
+        let mut cli = Cli::command();
+        for (name, options) in [
+            ("listen", &["--chat", "--timeout", "--until", "--count"][..]),
+            (
+                "wait-for",
+                &[
+                    "--text",
+                    "--from",
+                    "--msg",
+                    "--reaction",
+                    "--read-by",
+                    "--delivered-to",
+                    "--edited",
+                    "--deleted",
+                    "--timeout",
+                ],
+            ),
+        ] {
+            let help = cli
+                .find_subcommand_mut(name)
+                .unwrap()
+                .render_long_help()
+                .to_string();
+            for option in options {
+                assert!(help.contains(option), "{name} {option}:\n{help}");
+            }
+            assert!(help.contains("Exit codes:"), "{name}:\n{help}");
+            assert!(help.contains("3  "), "{name}:\n{help}");
+        }
+    }
+
+    #[test]
+    fn parses_listen_and_wait_for() {
+        let cli =
+            Cli::try_parse_from(["gim", "listen", "--chat", "crew", "--until", "ok", "--json"])
+                .unwrap();
+        assert!(cli.json);
+        assert!(matches!(
+            cli.command,
+            Command::Listen(listen::ListenArgs {
+                count: None,
+                timeout: None,
+                ..
+            })
+        ));
+        let err = Cli::try_parse_from(["gim", "listen", "--count", "0"]).unwrap_err();
+        assert_eq!(err.exit_code(), i32::from(EXIT_USAGE));
+        let err = Cli::try_parse_from(["gim", "wait-for", "crew"]).unwrap_err();
+        assert_eq!(err.exit_code(), i32::from(EXIT_USAGE));
+        let cli = Cli::try_parse_from(["gim", "wait-for", "crew", "--text", "Split"]).unwrap();
+        assert!(matches!(cli.command, Command::WaitFor(ref a) if a.timeout == 30));
     }
 
     #[test]
