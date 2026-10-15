@@ -11,7 +11,7 @@ use gim_identity::{
     HubRootKey, HubRootPublicKey, HubRuntimePublicKey, IdentityError, RootKey, RootPublicKey,
     SignedDeviceCert, SignedDeviceList, SignedHostingRecord, SignedHubRuntimeCert,
     UserHostingRecord, AUTH_RESPONSE_CONTEXT, DEVICE_CERT_CONTEXT, DEVICE_LIST_CONTEXT,
-    HOSTING_RECORD_CONTEXT, HUB_RUNTIME_CERT_CONTEXT,
+    HOSTING_ENTRY_CONTEXT, HOSTING_RECORD_CONTEXT, HUB_RUNTIME_CERT_CONTEXT,
 };
 use serde_json::{json, Value};
 
@@ -422,6 +422,37 @@ fn hosting_record_cases(cases: &mut Vec<Value>) {
         "bad_hub_signature",
     );
     add(
+        "hosting_record_unsorted_hubs",
+        &resign(|body| {
+            let Cbor::Array(hubs) = &mut body[5] else {
+                panic!("hubs is not an array")
+            };
+            hubs.reverse();
+        }),
+        context.clone(),
+        "unsorted_hubs",
+    );
+    // A hub entry correctly signed by the user root key acting as a hub.
+    add(
+        "hosting_record_user_key_is_hub_key",
+        &resign(|body| {
+            let user_root = self::root(ROOT).public();
+            let tbs = encode(&Cbor::Array(vec![
+                Cbor::Integer(1.into()),
+                text(user_root.user_id().as_str()),
+                Cbor::Bytes(user_root.as_bytes().to_vec()),
+                Cbor::Integer(0.into()),
+            ]));
+            body[5] = Cbor::Array(vec![Cbor::Array(vec![
+                Cbor::Bytes(user_root.as_bytes().to_vec()),
+                Cbor::Integer(0.into()),
+                Cbor::Bytes(sign(&seed(ROOT), HOSTING_ENTRY_CONTEXT, &tbs)),
+            ])]);
+        }),
+        context.clone(),
+        "user_key_is_hub_key",
+    );
+    add(
         "hosting_record_expired",
         &v1,
         json!({ "now": NOW + DAY }),
@@ -444,16 +475,22 @@ fn hosting_record_cases(cases: &mut Vec<Value>) {
 fn auth_response_cases(cases: &mut Vec<Value>) {
     let user_id = root(ROOT).public().user_id();
     let audience = hub(HUB_A).public().hub_id();
-    let challenge = AuthChallenge {
-        audience: audience.clone(),
-        nonce: seed(NONCE),
-        issued_at: NOW,
-        expires_at: NOW + TTL,
-    }
-    .to_bytes();
+    let challenge_for = |issued_at: u64, expires_at: u64| {
+        AuthChallenge {
+            audience: audience.clone(),
+            nonce: seed(NONCE),
+            issued_at,
+            expires_at,
+        }
+        .to_bytes()
+    };
+    let challenge = challenge_for(NOW, NOW + TTL);
     let (_, list) = device_lists();
     let context = |audience: &str, now: u64| json!({ "audience": audience, "now": now, "device_list": hex(&list.to_bytes()) });
-    let respond = |start: u8| AuthResponse::sign(&challenge, &device(start), &user_id).to_bytes();
+    let respond_to = |challenge: &[u8], start: u8| {
+        AuthResponse::sign(challenge, &device(start), &user_id).to_bytes()
+    };
+    let respond = |start: u8| respond_to(&challenge, start);
     let mut add = |name: &str, input: &[u8], context: Value, expected: &str| {
         cases.push(case(name, "auth_response", input, context, expected))
     };
@@ -520,6 +557,24 @@ fn auth_response_cases(cases: &mut Vec<Value>) {
         &ok,
         context(&audience, NOW + TTL),
         "expired",
+    );
+    add(
+        "auth_response_challenge_not_yet_valid",
+        &ok,
+        context(&audience, NOW - 1),
+        "not_yet_valid",
+    );
+    add(
+        "auth_response_challenge_empty_window",
+        &respond_to(&challenge_for(NOW, NOW), DEVICE_A),
+        context(&audience, NOW),
+        "invalid_validity_window",
+    );
+    add(
+        "auth_response_challenge_lifetime_too_long",
+        &respond_to(&challenge_for(NOW, NOW + 300_001), DEVICE_A),
+        context(&audience, NOW),
+        "lifetime_too_long",
     );
     add(
         "auth_response_wrong_audience",

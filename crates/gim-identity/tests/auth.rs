@@ -105,6 +105,36 @@ fn expired_challenge_rejected() {
 }
 
 #[test]
+fn challenge_validity_window_enforced() {
+    let (list, _) = device_lists();
+    let at = |issued_at: u64, expires_at: u64| {
+        let challenge = AuthChallenge {
+            issued_at,
+            expires_at,
+            ..challenge()
+        };
+        respond(&challenge, &device(0x20))
+    };
+    assert!(matches!(
+        at(NOW, NOW + TTL).verify(&hub_id(), NOW - 1, &list),
+        Err(IdentityError::NotYetValid)
+    ));
+    assert!(matches!(
+        at(NOW, NOW).verify(&hub_id(), NOW, &list),
+        Err(IdentityError::InvalidValidityWindow)
+    ));
+    assert!(matches!(
+        at(NOW + 1, NOW).verify(&hub_id(), NOW, &list),
+        Err(IdentityError::InvalidValidityWindow)
+    ));
+    assert!(at(NOW, NOW + 300_000).verify(&hub_id(), NOW, &list).is_ok());
+    assert!(matches!(
+        at(NOW, NOW + 300_001).verify(&hub_id(), NOW, &list),
+        Err(IdentityError::LifetimeTooLong)
+    ));
+}
+
+#[test]
 fn revoked_device_rejected() {
     let (v1, v2) = device_lists();
     let response = respond(&challenge(), &device(0x40));

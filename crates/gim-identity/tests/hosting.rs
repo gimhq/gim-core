@@ -182,6 +182,38 @@ fn record_round_trip() {
 }
 
 #[test]
+fn builder_sorts_hubs_by_priority_then_key() {
+    let record = record(&[(1, 5), (0, 9), (2, 5)]);
+    let mut expected = [
+        (5, hub(1).public()),
+        (9, hub(0).public()),
+        (5, hub(2).public()),
+    ]
+    .map(|(priority, key)| (priority, *key.as_bytes()));
+    expected.sort();
+    let actual = record
+        .hubs()
+        .iter()
+        .map(|entry| (entry.priority(), *entry.hub_root_public_key().as_bytes()))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn user_root_key_as_hub_key_rejected() {
+    let root = user_root();
+    let as_hub = HostingEntry::sign(
+        &HubRootKey::from_seed(&seed(0x00)),
+        &root.public().user_id(),
+        0,
+    );
+    assert!(matches!(
+        UserHostingRecord::new(root.public(), 1, NOW + DAY, vec![as_hub]),
+        Err(IdentityError::UserKeyIsHubKey)
+    ));
+}
+
+#[test]
 fn primary_ties_break_by_hub_id() {
     let record = record(&[(0, 5), (1, 5)]);
     let expected = [hub(0).public().hub_id(), hub(1).public().hub_id()]

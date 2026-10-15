@@ -46,6 +46,14 @@ pub enum IdentityError {
     BadHubSignature(String),
     #[error("hub {0} appears more than once")]
     DuplicateHub(String),
+    #[error("hosting record hubs are not sorted by (priority, hub_root_pubkey)")]
+    UnsortedHubs,
+    #[error("the user root key is also a hub root key of the hosting record")]
+    UserKeyIsHubKey,
+    #[error("challenge issued_at is not before expires_at")]
+    InvalidValidityWindow,
+    #[error("challenge lifetime exceeds the maximum")]
+    LifetimeTooLong,
     #[error("hosting record has {0} hubs, expected 1..=16")]
     HubCount(usize),
     #[error("random number generator failed: {0}")]
@@ -80,6 +88,10 @@ impl IdentityError {
             Self::HubKeyMismatch => "hub_key_mismatch",
             Self::BadHubSignature(_) => "bad_hub_signature",
             Self::DuplicateHub(_) => "duplicate_hub",
+            Self::UnsortedHubs => "unsorted_hubs",
+            Self::UserKeyIsHubKey => "user_key_is_hub_key",
+            Self::InvalidValidityWindow => "invalid_validity_window",
+            Self::LifetimeTooLong => "lifetime_too_long",
             Self::HubCount(_) => "hub_count",
             Self::Random(_) => "random",
         }

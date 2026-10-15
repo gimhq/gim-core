@@ -249,6 +249,11 @@ impl HostingEntry {
         self.priority
     }
 
+    /// Canonical record order: `priority`, then `hub_root_pubkey` bytes.
+    fn sort_key(&self) -> (u8, [u8; 32]) {
+        (self.priority, *self.hub_root_public_key.as_bytes())
+    }
+
     /// `[1, user_id, hub_root_pubkey, priority]`, the bytes `hub_sig` covers.
     fn tbs(user_id: &str, hub: &HubRootPublicKey, priority: u8) -> Vec<u8> {
         cbor::encode(&Value::Array(vec![
@@ -307,8 +312,22 @@ pub struct UserHostingRecord {
 }
 
 impl UserHostingRecord {
-    /// Builds an unsigned record and validates its hub entries.
+    /// Builds an unsigned record: sorts `hubs` into the canonical order
+    /// (ascending by `(priority, hub_root_pubkey)`) and validates them.
     pub fn new(
+        user_root_public_key: RootPublicKey,
+        seq: u64,
+        expires_at: u64,
+        mut hubs: Vec<HostingEntry>,
+    ) -> Result<Self, IdentityError> {
+        hubs.sort_by_key(HostingEntry::sort_key);
+        Self::validate(user_root_public_key, seq, expires_at, hubs)
+    }
+
+    /// Checks 1..=16 hubs and, for each entry in order: its hub signature,
+    /// uniqueness, canonical order after the previous entry, and that it is
+    /// not the user root key.
+    fn validate(
         user_root_public_key: RootPublicKey,
         seq: u64,
         expires_at: u64,
@@ -319,10 +338,16 @@ impl UserHostingRecord {
         }
         let user_id = user_root_public_key.user_id();
         let mut seen = HashSet::new();
-        for entry in &hubs {
+        for (i, entry) in hubs.iter().enumerate() {
             entry.verify(&user_id)?;
             if !seen.insert(*entry.hub_root_public_key.as_bytes()) {
                 return Err(IdentityError::DuplicateHub(entry.hub_id()));
+            }
+            if i > 0 && hubs[i - 1].sort_key() >= entry.sort_key() {
+                return Err(IdentityError::UnsortedHubs);
+            }
+            if entry.hub_root_public_key.as_bytes() == user_root_public_key.as_bytes() {
+                return Err(IdentityError::UserKeyIsHubKey);
             }
         }
         Ok(Self {
@@ -351,7 +376,8 @@ impl UserHostingRecord {
         self.expires_at
     }
 
-    /// Hub entries in record order.
+    /// Hub entries in canonical order: ascending by
+    /// `(priority, hub_root_pubkey)`.
     pub fn hubs(&self) -> &[HostingEntry] {
         &self.hubs
     }
@@ -432,7 +458,8 @@ impl SignedHostingRecord {
     /// Verifies the record in the documented order: extract only the claimed
     /// `user_id` and the embedded root key and check that the key derives
     /// it, check the user signature over the received `tbs`, then validate
-    /// the body (version, [`UserHostingRecord::new`] checks,
+    /// the body (version, the [`UserHostingRecord::new`] checks except that
+    /// unsorted hubs are rejected rather than sorted,
     /// `now < expires_at`). The caller compares
     /// [`UserHostingRecord::user_id`] with the user it looked up.
     pub fn verify(&self, now: u64) -> Result<UserHostingRecord, IdentityError> {
@@ -455,7 +482,7 @@ impl SignedHostingRecord {
             .into_iter()
             .map(HostingEntry::decode)
             .collect::<Result<Vec<_>, _>>()?;
-        let record = UserHostingRecord::new(user_root_public_key, seq, expires_at, hubs)?;
+        let record = UserHostingRecord::validate(user_root_public_key, seq, expires_at, hubs)?;
         if now >= expires_at {
             return Err(IdentityError::Expired);
         }
