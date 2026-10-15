@@ -12,6 +12,9 @@ use crate::{DeviceSigningKey, IdentityError, SignedDeviceList, FORMAT_VERSION};
 /// Signature context of an [`AuthResponse`].
 pub const AUTH_RESPONSE_CONTEXT: &[u8] = b"gim/auth-response/v1";
 
+/// Maximum `expires_at - issued_at` of an [`AuthChallenge`]: 5 minutes.
+pub const AUTH_CHALLENGE_MAX_LIFETIME_MS: u64 = 300_000;
+
 /// An unsigned login challenge issued by the hub `audience`. The hub keeps
 /// track of what it issued; nonce single-use is enforced hub-side.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,7 +116,9 @@ impl AuthResponse {
     /// the response's user and the device is certified in it and not
     /// revoked (this yields the verifying key); `sig` verifies under the
     /// certified device key; only then the challenge decodes, is addressed
-    /// to `expected_audience` and has not expired at `now`. The hub must
+    /// to `expected_audience`, has a valid window (`issued_at < expires_at`,
+    /// lifetime at most [`AUTH_CHALLENGE_MAX_LIFETIME_MS`]) and is valid at
+    /// `now` (`issued_at <= now < expires_at`). The hub must
     /// also check that it issued the challenge and that its nonce is unused.
     pub fn verify(
         &self,
@@ -138,6 +143,15 @@ impl AuthResponse {
         let challenge = AuthChallenge::from_bytes(&self.challenge)?;
         if challenge.audience != expected_audience {
             return Err(IdentityError::AudienceMismatch);
+        }
+        if challenge.issued_at >= challenge.expires_at {
+            return Err(IdentityError::InvalidValidityWindow);
+        }
+        if challenge.expires_at - challenge.issued_at > AUTH_CHALLENGE_MAX_LIFETIME_MS {
+            return Err(IdentityError::LifetimeTooLong);
+        }
+        if now < challenge.issued_at {
+            return Err(IdentityError::NotYetValid);
         }
         if now >= challenge.expires_at {
             return Err(IdentityError::Expired);

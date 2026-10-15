@@ -113,9 +113,9 @@ The first failing step determines the error. Per form:
 | `SignedDeviceCert` | expected root key | version, `user_id`, `device_id` |
 | `SignedDeviceList` | `root_pubkey` (element 2) derives the expected `user_id` | version, body `user_id`, certs, revoked, duplicates |
 | `SignedHubRuntimeCert` | expected hub root key | version, `hub_root_pubkey` equals it, `runtime_pubkey`, times |
-| `SignedHostingRecord` | `user_root_pubkey` (element 2) derives the claimed `user_id` (element 1) | version, hub count, entries (each step 3 then uniqueness), `expires_at` |
-| `HostingEntry` | its `hub_root_pubkey` | uniqueness within the record |
-| `AuthResponse` | device list verifies for `user_id`; `device_id` not revoked and certified | challenge version, `audience`, `expires_at` |
+| `SignedHostingRecord` | `user_root_pubkey` (element 2) derives the claimed `user_id` (element 1) | version, hub count, entries (each step 3, then uniqueness, order, not the user key), `expires_at` |
+| `HostingEntry` | its `hub_root_pubkey` | uniqueness, canonical order and distinctness from the user root key within the record |
+| `AuthResponse` | device list verifies for `user_id`; `device_id` not revoked and certified | challenge version, `audience`, validity window, lifetime, `issued_at`, `expires_at` |
 
 The embedded key position (element 2) is read before the version check;
 it is the same for every version of these bodies. A body signed by the right
@@ -226,6 +226,11 @@ certificate for it; a peer MUST check that the connection's PeerId equals
 `peer_id` of the certified `runtime_pubkey`. The vectors carry the PeerId in
 hex only.
 
+On the wire (CBOR and the hub API) a PeerId is only these bytes; gim
+defines no string encoding for it. Implementations MAY render it as
+base58btc (as libp2p does) in logs and UI, but MUST NOT put a string form
+on the wire or sign it.
+
 ## Hosting record
 
 ```
@@ -246,7 +251,7 @@ HostingRecordBody = [
   user_root_pubkey: bstr .size 32,
   seq: uint,
   expires_at: uint,             ; Unix time, milliseconds, exclusive
-  hubs: [ + HostingEntry ],     ; 1..=16 entries
+  hubs: [ + HostingEntry ],     ; 1..=16 entries, canonical order
 ]
 SignedHostingRecord = [ tbs: bstr (HostingRecordBody), sig: bstr .size 64 ]
 ```
@@ -254,6 +259,13 @@ SignedHostingRecord = [ tbs: bstr (HostingRecordBody), sig: bstr .size 64 ]
 `hub_sig` proves the hub accepted hosting `user_id` at `priority`; the user
 signature authorizes the hub list and covers every entry, so a hub cannot add
 itself and a hub entry cannot be moved to another user's record.
+
+The order of `hubs` carries no meaning (`priority` is explicit), but to keep
+one canonical encoding the entries MUST be sorted strictly ascending by
+`(priority, hub_root_pubkey bytes)`, comparing `priority` numerically and
+the keys bytewise. The builder sorts; a verifier rejects any other order.
+No `hub_root_pubkey` may appear twice, and none may equal
+`user_root_pubkey`.
 
 Verification of a `SignedHostingRecord` at time `now`:
 
@@ -268,7 +280,10 @@ Verification of a `SignedHostingRecord` at time `now`:
 5. For each entry in order: its `hub_sig` is a valid signature by its
    `hub_root_pubkey` over `"gim/hosting-entry/v1" || 0x00 || HostingEntryTbs`
    built from the record's `user_id`, that `hub_root_pubkey` and that
-   `priority`; then its `hub_root_pubkey` has not appeared before.
+   `priority`; then its `hub_root_pubkey` has not appeared before
+   (`duplicate_hub`); then its `(priority, hub_root_pubkey)` is greater than
+   the previous entry's (`unsorted_hubs`); then its `hub_root_pubkey` is not
+   `user_root_pubkey` (`user_key_is_hub_key`).
 6. `now < expires_at`.
 
 A verifier that looked the record up by user id MUST also check that the
@@ -320,8 +335,15 @@ Verification of an `AuthResponse` by the hub `expected_audience` at time
 4. `sig` is a valid signature by the certified `device_sig_pubkey` over
    `"gim/auth-response/v1" || 0x00 || AuthResponseTbs`.
 5. `challenge` decodes as an `AuthChallenge` with version `1`; its
-   `audience` equals `expected_audience` and `now < expires_at`. The hub
-   checks that it issued this challenge and that the nonce is unused.
+   `audience` equals `expected_audience`.
+6. `issued_at < expires_at` (`invalid_validity_window`), then
+   `expires_at - issued_at <= 300000` (`AUTH_CHALLENGE_MAX_LIFETIME_MS`,
+   5 minutes; `lifetime_too_long`), then `issued_at <= now`
+   (`not_yet_valid`), then `now < expires_at` (`expired`). The hub checks
+   that it issued this challenge and that the nonce is unused.
+
+A hub MUST NOT issue a challenge that fails step 6's window or lifetime
+checks.
 
 On success the hub has authenticated the device `(user_id, device_id)`.
 
@@ -393,11 +415,15 @@ to `expected_error`. Stable error codes (`IdentityError::code`):
 | `root_key_mismatch` | signing with a key other than the item's root key |
 | `duplicate_device` | a device id appears twice in a list |
 | `duplicate_hub` | a hub appears twice in a hosting record |
+| `unsorted_hubs` | hosting record hubs not strictly ascending by `(priority, hub_root_pubkey)` |
+| `user_key_is_hub_key` | the user root key is also a hub root key in the hosting record |
 | `hub_count` | hosting record without 1..=16 hubs |
 | `device_revoked` | device is revoked in the list |
 | `unknown_device` | device is not certified in the list |
 | `expired` | `now >= not_after` / `expires_at` |
-| `not_yet_valid` | `now < not_before` |
+| `not_yet_valid` | `now < not_before` / challenge `issued_at` |
+| `invalid_validity_window` | challenge `issued_at >= expires_at` |
+| `lifetime_too_long` | challenge `expires_at - issued_at` exceeds 300000 ms |
 | `audience_mismatch` | challenge addressed to another hub |
 | `seq_conflict` | same `seq`, different body |
 | `stale_seq` | lower `seq` than the stored item |
