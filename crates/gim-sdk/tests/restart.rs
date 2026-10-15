@@ -8,11 +8,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use gim_base::model::{DepartedMember, MessageContent, MessageKind, PendingMedia, SendState};
-use gim_base::{BaseClient, StateReader};
+use gim_base::{BaseClient, BaseError, StateReader};
 use gim_common::{now_ms, GroupId};
 use gim_sdk::testing::MemorySecretStorage;
 use gim_sdk::{Client, ClientBuilder, COMMIT_POST_ATTEMPTS};
-use gim_sqlite::SqliteStore;
+use gim_sqlite::{DbKey, SqliteStore};
 use tempfile::TempDir;
 
 use common::{Device, FlakyTransport};
@@ -34,11 +34,15 @@ impl Persistent {
     }
 
     fn open(&self) -> Client<SqliteStore> {
-        ClientBuilder::new(
-            Arc::new(SqliteStore::open(self.dir.path()).unwrap()),
+        ClientBuilder::open(
             Arc::new(self.transport.clone()),
             self.secrets.clone(),
+            |key, new_key| {
+                SqliteStore::open_or_reset(self.dir.path(), &DbKey::new(*key), new_key)
+                    .map_err(BaseError::from)
+            },
         )
+        .unwrap()
         .data_dir(self.dir.path())
         .build()
         .unwrap()
