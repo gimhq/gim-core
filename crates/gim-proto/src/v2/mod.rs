@@ -39,7 +39,7 @@
 //! [`StreamFrame`]. Blob bodies are raw `application/octet-stream` bytes and
 //! have no DTO.
 
-use crate::dto::base64;
+use crate::base64;
 
 mod auth;
 mod events;

@@ -1,5 +1,5 @@
 //! History backfill: messages older than the stored timeline, read from the
-//! group's server history by seq windows.
+//! group's hub history by seq windows.
 
 use gim_base::model::{MembershipChangeKind, StateChange};
 use gim_base::{BaseClient, StateReader, StateStore, StoreError};
@@ -14,13 +14,13 @@ pub struct Backfill {
     pub inserted: usize,
     /// Lowest seq the window covered; the `before_seq` of the next call.
     pub from_seq: u64,
-    /// Whether the server history may hold older messages this device can
+    /// Whether the hub history may hold older messages this device can
     /// read.
     pub has_more: bool,
 }
 
 impl<S: StateStore + 'static> Client<S> {
-    /// Reads the up to `limit` seqs of the group's server history below
+    /// Reads the up to `limit` seqs of the group's hub history below
     /// `before_seq` and applies them through gim-base (see
     /// [`BaseClient::apply_history`]): messages already stored are kept,
     /// and messages this device cannot decrypt are skipped. Seqs at or
@@ -89,7 +89,7 @@ impl<S: StateStore + 'static> Client<S> {
 }
 
 /// Seq of the Welcome that last added `own` to the group (0 for its
-/// creator): the server history at or below it is not readable.
+/// creator): the hub history at or below it is not readable.
 fn history_floor<R: StateReader + ?Sized>(
     store: &R,
     group_id: &GroupId,

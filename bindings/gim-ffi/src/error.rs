@@ -21,7 +21,7 @@ pub enum GimError {
     /// The local database or file system failed.
     #[error("storage error: {reason}")]
     Storage { reason: String },
-    /// gim-server answered with a non-success HTTP status.
+    /// The hub answered with a non-success HTTP status.
     #[error("server error {status}: {reason}")]
     Server { status: u16, reason: String },
     /// The operation was cancelled (sign-out, `stop_sync`, `cancel_send`).
@@ -55,7 +55,7 @@ impl From<gim_sdk::ClientError> for GimError {
             },
             E::Transport(err) => err.into(),
             E::Base(err) => err.into(),
-            E::Media(_) => Self::Crypto {
+            E::Media(_) | E::Identity(_) => Self::Crypto {
                 reason: err.to_string(),
             },
             E::InvalidSession(_) | E::SecretStorage(_) | E::Io(_) => Self::Storage {

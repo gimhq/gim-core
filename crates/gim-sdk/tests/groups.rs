@@ -225,3 +225,45 @@ async fn backfill_skips_what_cannot_be_decrypted() {
     }
     assert_eq!(carol.messages(&g).len(), 1);
 }
+
+#[tokio::test]
+async fn commit_whose_reply_was_lost_is_accepted_as_duplicate() {
+    let transport = FlakyTransport::new();
+    let alice = Device::register(&transport, "alice").await;
+    let bob = Device::register(&transport, "bob").await;
+    let carol = Device::register(&transport, "carol").await;
+    let g = alice
+        .client
+        .create_group_chat(None, &[bob.user_id()])
+        .await
+        .unwrap();
+    bob.sync().await;
+
+    // The hub accepts the commit but the reply is lost: the repost with the
+    // same client_id is answered `duplicate: true` and counts as success.
+    transport
+        .faults
+        .fail_posts(gim_base::model::MessageKind::Commit, true, 1);
+    alice
+        .client
+        .add_members(&g, &[carol.user_id()])
+        .await
+        .unwrap();
+    let service = transport.inner.service();
+    assert_eq!(service.epoch(&g), Ok(2));
+    let commits = service
+        .messages(&g, 0, usize::MAX)
+        .unwrap()
+        .into_iter()
+        .filter(|m| m.kind == gim_test::MessageKind::Commit)
+        .count();
+    assert_eq!(commits, 2);
+    assert!(alice.store.pending_commits().unwrap().is_empty());
+
+    alice.client.send_text(&g, "hi", None).await.unwrap();
+    for device in [&bob, &carol] {
+        device.sync().await;
+        assert_eq!(device.messages(&g).len(), 1);
+        assert_eq!(device.store.chat(&g).unwrap().unwrap().members.len(), 3);
+    }
+}

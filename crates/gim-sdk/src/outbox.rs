@@ -1,18 +1,18 @@
 //! Outbox sender: posts the entries queued in the gim-base outbox, one chat
 //! at a time in creation order, with the entry's message id as `client_id`
-//! on every attempt (gim-server is idempotent on it).
+//! on every attempt (the hub is idempotent on it).
 
 use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use gim_base::model::{MessageKind, OutboxEntry, OutboxKind, OutboxState};
+use gim_base::model::{OutboxEntry, OutboxKind, OutboxState};
 use gim_base::{BaseClient, BaseError, StateStore};
 use gim_common::{now_ms, ClientId, MessageId};
 use tokio::task::JoinHandle;
 
 use crate::client::{outcome_unknown, Session};
-use crate::transport::{OutgoingMessage, PostError};
+use crate::transport::PostError;
 use crate::{Client, ClientError, Result};
 
 /// Sleep of the sender task when nothing is scheduled.
@@ -100,7 +100,7 @@ impl<S: StateStore + 'static> Client<S> {
         let base = BaseClient::new(session.device.clone());
         if let OutboxKind::MediaUpload(pending) = entry.kind {
             let local_path = pending.local_path.clone();
-            let media = match self.upload_media(session, &id, pending).await {
+            let media = match self.upload_media(&id, pending).await {
                 Ok(media) => media,
                 Err(err) => return self.record_failure(&base, &id, err).await,
             };
@@ -124,43 +124,56 @@ impl<S: StateStore + 'static> Client<S> {
         if let Err(err) = self.settle_commit(session, &group_id).await {
             return self.record_failure(&base, &id, err).await;
         }
-        let (mid, b) = (id.clone(), base.clone());
-        let prepared = match self
-            .run(move |store, engine| b.prepare(store, engine, &mid))
-            .await
-        {
-            Ok(prepared) => prepared,
-            // Sent (own echo) or cancelled meanwhile.
-            Err(ClientError::Base(BaseError::NotFound(_))) => return Ok(true),
-            Err(err) => return self.record_failure(&base, &id, err).await,
-        };
-        let message = OutgoingMessage {
-            client_id: ClientId::new(id.as_str()).expect("message ids are client ids"),
-            epoch: prepared.epoch,
-            kind: MessageKind::Application,
-            payload: prepared.payload,
-            recipients: vec![],
-        };
-        match self
-            .inner
-            .transport
-            .post_message(&session.token, &group_id, message)
-            .await
-        {
-            Ok(seq) => {
-                self.mark_applied(&group_id, seq).await?;
-                let changes = self
-                    .run(move |store, _| base.mark_sent(store, &id, seq))
-                    .await?;
-                self.emit(&changes);
-                Ok(true)
-            }
-            Err(PostError::Transport(err)) => self.record_failure(&base, &id, err.into()).await,
-            // Not expected for application messages; the next attempt
-            // re-encrypts at the then current epoch.
-            Err(err @ PostError::EpochConflict { .. }) => {
-                self.record_failure(&base, &id, ClientError::from(err))
-                    .await
+        let client_id = ClientId::new(id.as_str()).expect("message ids are client ids");
+        let mut stale = false;
+        loop {
+            let (mid, b) = (id.clone(), base.clone());
+            let prepared = match self
+                .run(move |store, engine| b.prepare(store, engine, &mid))
+                .await
+            {
+                Ok(prepared) => prepared,
+                // Sent (own echo) or cancelled meanwhile.
+                Err(ClientError::Base(BaseError::NotFound(_))) => return Ok(true),
+                Err(err) => return self.record_failure(&base, &id, err).await,
+            };
+            let posted = self
+                .authed(|t| {
+                    let (gid, client_id) = (group_id.clone(), client_id.clone());
+                    let payload = prepared.payload.clone();
+                    async move {
+                        self.inner
+                            .transport
+                            .post_message(&t, &gid, client_id, payload)
+                            .await
+                    }
+                })
+                .await;
+            match posted {
+                Ok(seq) => {
+                    self.mark_applied(&group_id, seq).await?;
+                    let changes = self
+                        .run(move |store, _| base.mark_sent(store, &id, seq))
+                        .await?;
+                    self.emit(&changes);
+                    return Ok(true);
+                }
+                Err(PostError::Transport(err)) => {
+                    return self.record_failure(&base, &id, err.into()).await
+                }
+                // A commit this device has not applied yet: catch up, then
+                // re-encrypt at the new epoch, once.
+                Err(PostError::StaleEpoch { .. }) if !stale => {
+                    stale = true;
+                    if let Err(err) = self.sync_locked(session).await {
+                        return self.record_failure(&base, &id, err).await;
+                    }
+                }
+                Err(err) => {
+                    return self
+                        .record_failure(&base, &id, ClientError::from(err))
+                        .await
+                }
             }
         }
     }

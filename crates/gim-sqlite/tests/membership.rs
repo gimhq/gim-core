@@ -1,5 +1,5 @@
 //! Membership events recorded from commits and Welcomes, and messages
-//! applied from the server history, on the SQLite store.
+//! applied from the hub history, on the SQLite store.
 
 mod common;
 
@@ -11,7 +11,7 @@ use gim_base::model::{
 use gim_base::{StateReader, StateStore};
 use gim_common::GroupId;
 use gim_proto::envelope::Content;
-use gim_test::FakeDeliveryService;
+use gim_test::{Event, FakeDeliveryService};
 
 fn events(device: &Device, g: &GroupId) -> Vec<(u64, String, String, Kind)> {
     device
@@ -24,7 +24,11 @@ fn events(device: &Device, g: &GroupId) -> Vec<(u64, String, String, Kind)> {
 }
 
 fn event(seq: u64, user: &str, actor: &str, kind: Kind) -> (u64, String, String, Kind) {
-    (seq, user.to_string(), actor.to_string(), kind)
+    (seq, user_id(user), user_id(actor), kind)
+}
+
+fn user_id(name: &str) -> String {
+    common::user(name).to_string()
 }
 
 #[test]
@@ -54,21 +58,22 @@ fn commits_and_welcomes_record_membership_changes() {
     bob.sync(&ds);
     dave.sync(&ds);
 
-    // Dave leaves the fan-out list; alice's commit removes him from the
-    // tree, which records that he left.
-    ds.remove_member(&g, &dave.me).unwrap();
-    for device in [&alice, &carol] {
-        device.apply(IncomingEvent::MemberRemoved {
-            group_id: g.clone(),
-            device: dave.me.clone(),
-        });
-    }
+    // Dave proposes to leave; alice's commit removes him from the tree,
+    // which records that he left.
+    dave.propose_leave(&ds, &g);
+    alice.sync(&ds);
+    carol.sync(&ds);
     let remove_dave = alice.remove(&ds, &g, &[&dave]);
     carol.sync(&ds);
 
     let added_bob = event(add_bob, "bob", "alice", Kind::Added);
-    let added_carol = event(add_carol, "carol", "alice", Kind::Added);
-    let added_dave = event(add_carol, "dave", "alice", Kind::Added);
+    // Ordered by seq, then user id.
+    let mut added = [
+        event(add_carol, "carol", "alice", Kind::Added),
+        event(add_carol, "dave", "alice", Kind::Added),
+    ];
+    added.sort_by(|a, b| a.1.cmp(&b.1));
+    let [added_carol, added_dave] = added;
     let removed_bob = event(remove_bob, "bob", "alice", Kind::Removed);
     let left_dave = event(remove_dave, "dave", "alice", Kind::Left);
     assert_eq!(
@@ -81,13 +86,19 @@ fn commits_and_welcomes_record_membership_changes() {
             left_dave.clone()
         ]
     );
-    // Joiners record their own Welcome, not what came before it.
-    let welcome_bob = event(add_bob + 1, "bob", "alice", Kind::Added);
+    // Joiners record their own Welcome (at the commit seq), not what came
+    // before it.
+    let welcome_bob = event(add_bob, "bob", "alice", Kind::Added);
     assert_eq!(
         events(&bob, &g),
-        [welcome_bob, added_carol, added_dave, removed_bob.clone()]
+        [
+            welcome_bob,
+            added_carol.clone(),
+            added_dave,
+            removed_bob.clone()
+        ]
     );
-    let welcome_carol = event(add_carol + 1, "carol", "alice", Kind::Added);
+    let welcome_carol = event(add_carol, "carol", "alice", Kind::Added);
     assert_eq!(events(&carol, &g), [welcome_carol, removed_bob, left_dave]);
 }
 
@@ -122,7 +133,8 @@ fn history_messages_are_inserted_once_without_unread() {
         .messages(&g, 0, 100)
         .unwrap()
         .into_iter()
-        .map(|d| match common::to_event(d) {
+        .flat_map(|d| common::to_events(Event::Message(d)))
+        .map(|e| match e {
             IncomingEvent::Message(m) => m,
             _ => unreachable!(),
         })
@@ -174,7 +186,8 @@ fn history_messages_are_inserted_once_without_unread() {
         .messages(&g, 0, 100)
         .unwrap()
         .into_iter()
-        .filter_map(|d| match common::to_event(d) {
+        .flat_map(|d| common::to_events(Event::Message(d)))
+        .filter_map(|e| match e {
             IncomingEvent::Message(m) if m.kind == MessageKind::Application => Some(m),
             _ => None,
         })
@@ -198,8 +211,8 @@ fn leaving_records_the_own_left_event() {
     bob.sync(&ds);
     let last_seq = bob.message(&last).seq.unwrap();
 
-    // Bob left the fan-out list; his device records it as others will.
-    ds.remove_member(&g, &bob.me).unwrap();
+    // Bob proposes to leave; his device records it as others will.
+    bob.propose_leave(&ds, &g);
     let changes = bob
         .client
         .leave_chat(&bob.store, &bob.engine, &g, NOW)
@@ -228,10 +241,7 @@ fn leaving_records_the_own_left_event() {
     assert_eq!(events(&bob, &g), before);
 
     // Alice removes him from the tree and records the same kind of event.
-    alice.apply(IncomingEvent::MemberRemoved {
-        group_id: g.clone(),
-        device: bob.me.clone(),
-    });
+    alice.sync(&ds);
     let remove_bob = alice.remove(&ds, &g, &[&bob]);
     assert_eq!(
         events(&alice, &g).last(),

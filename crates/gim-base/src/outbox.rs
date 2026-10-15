@@ -1,5 +1,5 @@
 //! Outbox state machine. Every send gets a message id that doubles as the
-//! gim-server `client_id`, so retries are idempotent.
+//! hub `client_id`, so retries are idempotent.
 //!
 //! Message send state: `Pending → Sent → Delivered → Read`, or `Failed`
 //! after [`MAX_SEND_ATTEMPTS`] failed attempts or a permanent error. The
@@ -211,7 +211,7 @@ impl BaseClient {
         })
     }
 
-    /// gim-server accepted the message at `seq`. Idempotent; also applied
+    /// The hub accepted the message at `seq`. Idempotent; also applied
     /// when the own echo arrives first.
     pub fn mark_sent<S: StateStore>(
         &self,

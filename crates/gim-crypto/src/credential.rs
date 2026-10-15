@@ -22,6 +22,12 @@ pub trait DeviceListLookup {
     fn device_list(&self, user_id: &UserId) -> Option<DeviceList>;
 }
 
+impl<F: Fn(&UserId) -> Option<DeviceList>> DeviceListLookup for F {
+    fn device_list(&self, user_id: &UserId) -> Option<DeviceList> {
+        self(user_id)
+    }
+}
+
 /// A [`DeviceListLookup`] that knows no device lists: every gim credential
 /// fails validation against it with `device_list_unknown`.
 #[derive(Debug, Default, Clone, Copy)]

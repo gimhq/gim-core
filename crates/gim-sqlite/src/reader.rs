@@ -401,4 +401,11 @@ impl StateReader for Reader<'_> {
             },
         )
     }
+    fn device_lists(&self) -> StoreResult<Vec<(UserId, Vec<u8>)>> {
+        self.query(
+            "SELECT user_id, data FROM device_lists ORDER BY user_id",
+            [],
+            |row| Ok((user_id(get(row, 0)?)?, get(row, 1)?)),
+        )
+    }
 }

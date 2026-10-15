@@ -76,6 +76,7 @@ mod tests {
             "crypto_groups",
             "pending_commits",
             "departed_members",
+            "device_lists",
             "membership_events",
         ] {
             assert!(tables.iter().any(|t| t == table), "{table} in {tables:?}");

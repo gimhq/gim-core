@@ -1,7 +1,8 @@
 //! Sync: fetching events after the persisted global cursor and applying
-//! them in order through gim-base, with per-group seq gap backfill, expired
-//! cursor recovery, and the background sync loop (WebSocket stream with a
-//! long-poll fallback, reconnect with backoff).
+//! them in order through gim-base, with per-group seq gap backfill, Welcome
+//! acknowledgement, DeviceList updates, expired cursor recovery (pending
+//! Welcomes, then a resync), and the background sync loop (WebSocket stream
+//! with a long-poll fallback, reconnect with backoff).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::time::Duration;
@@ -11,13 +12,14 @@ use gim_base::model::{
     Chat, ChatMember, GroupMessage, IncomingEvent, Membership, MessageKind, StateChange,
 };
 use gim_base::{BaseClient, StateReader, StateStore, StoreTxn};
-use gim_common::{now_ms, DeviceRef, GroupId};
+use gim_common::{now_ms, DeviceRef, GroupId, UserId};
+use gim_crypto::inspect_handshake;
 use tokio::sync::broadcast;
 use tokio::time::Instant;
 
 use crate::client::Session;
 use crate::stream::{Backoff, ConnectionState};
-use crate::transport::{EventBatch, GroupInfo, TransportError};
+use crate::transport::{EventBatch, GroupInfo, HubEvent, TransportError};
 use crate::{Client, ClientError, Result, KEY_PACKAGE_BATCH};
 
 /// Shortest interval between two long-polls that returned no events.
@@ -25,6 +27,8 @@ const MIN_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Messages per `group_messages` request when backfilling.
 pub const BACKFILL_PAGE: u32 = 100;
+/// Welcomes per `pending_welcomes` request when recovering.
+const WELCOME_PAGE: u32 = 50;
 
 /// Timing of the background sync loop ([`Client::start_sync`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,7 +57,7 @@ impl Default for SyncSettings {
 /// Result of one fetch of the event stream.
 pub(crate) enum Fetched {
     Batch(EventBatch),
-    /// The cursor is older than the server's retention; `head` is where to
+    /// The cursor is older than the hub's retention; `head` is where to
     /// continue after resyncing.
     Expired {
         head: u64,
@@ -87,8 +91,9 @@ impl<S: StateStore + 'static> Client<S> {
     /// Starts the background sync loop (no-op if it is running): catches up
     /// over HTTP, then follows the WebSocket stream, or long-polls where
     /// there is none. Failures are retried with exponential backoff (see
-    /// [`SyncSettings`]); [`Client::network_reachable`] retries at once. The
-    /// loop stops by itself only when the server rejects the token; see
+    /// [`SyncSettings`]); [`Client::network_reachable`] retries at once.
+    /// Expired tokens are renewed by signing in again; the loop stops by
+    /// itself only when the hub rejects the device's sign-in; see
     /// [`Client::stop_sync`].
     pub fn start_sync(&self) -> Result<()> {
         let session = self.require_session()?;
@@ -117,7 +122,7 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Stops the sync loop. Returns why it stopped by itself, if it did:
-    /// [`ClientError::NotRegistered`] when the token was rejected.
+    /// [`ClientError::NotRegistered`] when the sign-in was rejected.
     pub fn stop_sync(&self) -> Result<()> {
         let task = self
             .inner
@@ -141,7 +146,7 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Fetches the pending events once (no waiting), applies them, persists
-    /// the cursor and replenishes KeyPackages if the server asked for it.
+    /// the cursor and replenishes KeyPackages if the hub asked for it.
     /// Returns the applied changes, which are also broadcast.
     pub async fn sync_once(&self) -> Result<Vec<StateChange>> {
         let session = self.require_session()?;
@@ -177,28 +182,7 @@ impl<S: StateStore + 'static> Client<S> {
         }
     }
 
-    /// Makes the transport resolve the devices of stored chats, which
-    /// membership events refer to by device id only.
-    pub(crate) async fn seed_device_directory(&self, session: &Session) -> Result<()> {
-        let mut devices = self
-            .run(|store, _| {
-                Ok(store
-                    .chats()?
-                    .into_iter()
-                    .flat_map(|chat| chat.members.into_iter().map(|m| m.device))
-                    .collect::<BTreeSet<DeviceRef>>())
-            })
-            .await?;
-        devices.insert(session.device.clone());
-        let devices: Vec<DeviceRef> = devices.into_iter().collect();
-        self.inner.transport.seed_device_directory(&devices);
-        Ok(())
-    }
-
     async fn sync_loop(&self, session: Session) -> Result<()> {
-        if let Err(err) = self.seed_device_directory(&session).await {
-            tracing::warn!(error = %err, "cannot seed the device directory");
-        }
         let settings = self.inner.sync_settings;
         let mut backoff = Backoff::new(settings.backoff_min, settings.backoff_max);
         let mut stream_retry_at = None;
@@ -212,7 +196,7 @@ impl<S: StateStore + 'static> Client<S> {
             };
             self.set_connection_state(ConnectionState::Offline);
             if matches!(err, ClientError::Transport(TransportError::Unauthorized)) {
-                tracing::warn!("token rejected; sync stopped");
+                tracing::warn!("sign-in rejected; sync stopped");
                 return Err(ClientError::NotRegistered);
             }
             // The failure may have been the network rather than a missing
@@ -256,9 +240,7 @@ impl<S: StateStore + 'static> Client<S> {
         if stream_retry_at.is_none_or(|at| Instant::now() >= at) {
             let cursor = self.run(|store, _| Ok(store.global_cursor()?)).await?;
             match self
-                .inner
-                .transport
-                .open_stream(&session.token, cursor)
+                .authed(|t| async move { self.inner.transport.open_stream(&t, cursor).await })
                 .await
             {
                 Ok(Some(opened)) => {
@@ -278,7 +260,16 @@ impl<S: StateStore + 'static> Client<S> {
 
         loop {
             let fetched = match stream.as_mut() {
-                Some(stream) => Fetched::from_result(stream.next().await)?,
+                Some(stream) => match stream.next().await {
+                    // The token expired under the open stream: sign in again
+                    // and reconnect.
+                    Err(TransportError::Unauthorized) => {
+                        let token = self.session().map(|s| s.token);
+                        self.renew_token(token.as_ref()).await?;
+                        return Ok(());
+                    }
+                    next => Fetched::from_result(next)?,
+                },
                 None => {
                     if stream_retry_at.is_some_and(|at| Instant::now() >= at) {
                         return Ok(());
@@ -307,12 +298,10 @@ impl<S: StateStore + 'static> Client<S> {
 
     /// Fetches the events after the persisted cursor, waiting up to `wait`
     /// for the first one. Does not take the group lock.
-    pub(crate) async fn fetch(&self, session: &Session, wait: Duration) -> Result<Fetched> {
+    pub(crate) async fn fetch(&self, _session: &Session, wait: Duration) -> Result<Fetched> {
         let cursor = self.run(|store, _| Ok(store.global_cursor()?)).await?;
         let fetched = self
-            .inner
-            .transport
-            .fetch_events(&session.token, cursor, wait)
+            .authed(|t| async move { self.inner.transport.fetch_events(&t, cursor, wait).await })
             .await;
         Fetched::from_result(fetched)
     }
@@ -362,24 +351,28 @@ impl<S: StateStore + 'static> Client<S> {
         self.resolve_pending_commits(session).await?;
         match fetched {
             Fetched::Batch(batch) => {
-                self.apply_events_locked(session, batch.events, batch.next_cursor, false)
+                self.apply_events_locked(session, batch.events, batch.next_cursor)
                     .await
             }
             Fetched::Expired { head } => self.recover_expired_locked(session, head).await,
         }
     }
 
-    /// Resyncs after an expired cursor: backfills every joined chat by seq
-    /// from its last contiguous seq, joins the server's groups that are not
-    /// joined here from their history (their Welcome may have been pruned),
-    /// tops up KeyPackages (a `KeyPackagesLow` may have been pruned), then
-    /// continues from the head cursor.
+    /// Resyncs after an expired cursor: joins the groups of the pending
+    /// Welcomes (and acknowledges them), backfills every joined chat by seq
+    /// from its last contiguous seq, refreshes the known DeviceLists,
+    /// surfaces the hub's groups that cannot be joined, tops up KeyPackages
+    /// (a `KeyPackagesLow` may have been pruned), then continues from the
+    /// head cursor.
     async fn recover_expired_locked(
         &self,
         session: &Session,
         head: u64,
     ) -> Result<Vec<StateChange>> {
-        tracing::info!(head, "event cursor expired; backfilling joined chats");
+        tracing::info!(head, "event cursor expired; resyncing");
+        let mut changes = self.join_pending_welcomes(session).await?;
+        let revoked = self.refresh_known_device_lists(session).await?;
+        self.record_revoked(session, revoked).await?;
         let chats = self.run(|store, _| Ok(store.chats()?)).await?;
         let mut joined = BTreeSet::new();
         let mut events = Vec::new();
@@ -399,27 +392,70 @@ impl<S: StateStore + 'static> Client<S> {
                 events.extend(history.into_iter().map(IncomingEvent::Message));
             }
         }
-        let unjoined = self.unjoined_server_groups(session, &joined).await?;
-        for info in &unjoined {
-            events.extend(self.welcome_history(session, &info.group_id).await?);
-        }
+        let unjoined = self.unjoined_hub_groups(&joined).await?;
         self.top_up_key_packages(session).await?;
-        let mut changes = self
-            .apply_events_locked(session, events, head, true)
-            .await?;
+        changes.extend(self.apply_group_events(session, events).await?);
+        self.set_cursor(head, true).await?;
         changes.extend(self.record_unjoinable(unjoined).await?);
         Ok(changes)
     }
 
-    /// The server's groups of this device that are not joined here. Empty
-    /// if the server cannot list them; network and auth errors are
-    /// returned.
-    async fn unjoined_server_groups(
-        &self,
-        session: &Session,
-        joined: &BTreeSet<GroupId>,
-    ) -> Result<Vec<GroupInfo>> {
-        match self.inner.transport.list_groups(&session.token).await {
+    /// Joins the groups of every pending Welcome and acknowledges them, page
+    /// by page. Welcomes of groups already joined are acknowledged too.
+    async fn join_pending_welcomes(&self, session: &Session) -> Result<Vec<StateChange>> {
+        let mut changes = Vec::new();
+        loop {
+            let page = self
+                .authed(|t| async move {
+                    self.inner
+                        .transport
+                        .pending_welcomes(&t, WELCOME_PAGE)
+                        .await
+                })
+                .await?;
+            let full = page.len() == WELCOME_PAGE as usize;
+            if page.is_empty() {
+                break;
+            }
+            tracing::info!(count = page.len(), "joining pending Welcomes");
+            let events = page.into_iter().map(IncomingEvent::Message).collect();
+            changes.extend(self.apply_group_events(session, events).await?);
+            if !full {
+                break;
+            }
+        }
+        Ok(changes)
+    }
+
+    /// Refreshes the DeviceLists of every known user; returns the devices
+    /// they newly revoke.
+    async fn refresh_known_device_lists(&self, session: &Session) -> Result<Vec<DeviceRef>> {
+        let own = session.device.user_id.clone();
+        let users = self
+            .run(move |store, _| {
+                let mut users: BTreeSet<UserId> =
+                    store.device_lists()?.into_iter().map(|(u, _)| u).collect();
+                for chat in store.chats()? {
+                    users.extend(chat.members.into_iter().map(|m| m.device.user_id));
+                }
+                users.insert(own);
+                Ok(users)
+            })
+            .await?;
+        let mut revoked = Vec::new();
+        for user_id in users {
+            revoked.extend(self.refresh_device_list(&user_id).await?);
+        }
+        Ok(revoked)
+    }
+
+    /// The hub's groups of this device that are not joined here. Empty if
+    /// the hub cannot list them; network and auth errors are returned.
+    async fn unjoined_hub_groups(&self, joined: &BTreeSet<GroupId>) -> Result<Vec<GroupInfo>> {
+        match self
+            .authed(|t| async move { self.inner.transport.list_groups(&t).await })
+            .await
+        {
             Ok(groups) => Ok(groups
                 .into_iter()
                 .filter(|g| !joined.contains(&g.group_id))
@@ -428,29 +464,10 @@ impl<S: StateStore + 'static> Client<S> {
                 Err(err.into())
             }
             Err(err) => {
-                tracing::warn!(error = %err, "cannot list groups; pruned Welcomes not looked up");
+                tracing::warn!(error = %err, "cannot list groups");
                 Ok(vec![])
             }
         }
-    }
-
-    /// The group's history from the first Welcome by another device: the
-    /// server shows a device only its own Welcomes, and nothing before
-    /// them is for this device. Empty if there is none.
-    async fn welcome_history(
-        &self,
-        session: &Session,
-        group_id: &GroupId,
-    ) -> Result<Vec<IncomingEvent>> {
-        let history = self
-            .group_history(session, group_id, 0, None)
-            .await?
-            .unwrap_or_default();
-        Ok(history
-            .into_iter()
-            .skip_while(|m| m.kind != MessageKind::Welcome || m.sender == session.device)
-            .map(IncomingEvent::Message)
-            .collect())
     }
 
     /// Stores the groups that are still not joined and not stored as `Left`
@@ -486,11 +503,14 @@ impl<S: StateStore + 'static> Client<S> {
         Ok(changes)
     }
 
-    /// Tops the server's one-time KeyPackages up to [`KEY_PACKAGE_BATCH`],
-    /// plus a last-resort one if it has none. Uploads a batch if the server
-    /// cannot count them.
+    /// Tops the hub's one-time KeyPackages up to [`KEY_PACKAGE_BATCH`], plus
+    /// a last-resort one if it has none. Uploads a batch if the hub cannot
+    /// count them.
     async fn top_up_key_packages(&self, session: &Session) -> Result<()> {
-        let count = match self.inner.transport.key_package_count(&session.token).await {
+        let counted = self
+            .authed(|t| async move { self.inner.transport.key_package_count(&t).await })
+            .await;
+        let count = match counted {
             Ok(count) => count,
             Err(err @ (TransportError::Network(_) | TransportError::Unauthorized)) => {
                 return Err(err.into())
@@ -519,24 +539,86 @@ impl<S: StateStore + 'static> Client<S> {
                 })
             })
             .await?;
-        self.inner
-            .transport
-            .upload_key_packages(&session.token, key_packages, last_resort)
+        let uploads = [
+            (key_packages, false),
+            (last_resort.into_iter().collect(), true),
+        ];
+        for (key_packages, last_resort) in uploads {
+            if key_packages.is_empty() {
+                continue;
+            }
+            self.authed(|t| {
+                let key_packages = key_packages.clone();
+                async move {
+                    self.inner
+                        .transport
+                        .upload_key_packages(&t, key_packages, last_resort)
+                        .await
+                }
+            })
             .await?;
+        }
         Ok(())
     }
 
-    /// Applies `events` in order, backfilling seq gaps first, then persists
-    /// `next_cursor` (only forward, unless `reset`), broadcasts the changes
-    /// and replenishes KeyPackages if asked to.
+    /// Applies a batch of hub events: DeviceList updates first (a device
+    /// revoked in the latest list is rejected as a sender, whatever the
+    /// event order), then the group events; then persists `next_cursor`
+    /// (only forward).
     async fn apply_events_locked(
         &self,
         session: &Session,
-        events: Vec<IncomingEvent>,
+        events: Vec<HubEvent>,
         next_cursor: u64,
-        reset: bool,
+    ) -> Result<Vec<StateChange>> {
+        let mut revoked = Vec::new();
+        let mut group_events = Vec::with_capacity(events.len());
+        for event in events {
+            match event {
+                HubEvent::Group(event) => group_events.push(event),
+                HubEvent::DeviceListUpdated {
+                    user_id,
+                    device_list,
+                } => match self.accept_device_list(&user_id, &device_list).await {
+                    Ok(newly) => revoked.extend(newly),
+                    Err(ClientError::Identity(reason)) => {
+                        tracing::warn!(%user_id, %reason, "ignoring a device list update");
+                    }
+                    Err(err) => return Err(err),
+                },
+            }
+        }
+        self.record_revoked(session, revoked).await?;
+        let changes = self.apply_group_events(session, group_events).await?;
+        self.set_cursor(next_cursor, false).await?;
+        Ok(changes)
+    }
+
+    /// Persists the global cursor: only forward, unless `reset`.
+    async fn set_cursor(&self, next_cursor: u64, reset: bool) -> Result<()> {
+        self.run(move |store, _| {
+            let cursor = store.global_cursor()?;
+            if reset || cursor.is_none_or(|c| next_cursor > c) {
+                store.transaction(|txn| Ok(txn.set_global_cursor(next_cursor)?))?;
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// Applies group events in order, after backfilling seq gaps and
+    /// fetching the DeviceLists of the devices they refer to that are not
+    /// known yet. Broadcasts the changes, acknowledges the applied Welcomes
+    /// and replenishes KeyPackages if asked to.
+    async fn apply_group_events(
+        &self,
+        session: &Session,
+        events: Vec<IncomingEvent>,
     ) -> Result<Vec<StateChange>> {
         let events = self.backfill_gaps(session, events).await?;
+        let devices = self.referenced_devices(session, &events).await?;
+        let revoked = self.fetch_device_lists(devices).await?;
+        self.record_revoked(session, revoked).await?;
         let joined: BTreeSet<GroupId> = events
             .iter()
             .filter_map(|event| match event {
@@ -558,30 +640,65 @@ impl<S: StateStore + 'static> Client<S> {
                 Ok(changes)
             })
             .await?;
-        for group_id in joined {
-            changes.extend(self.sync_chat_kind(session, group_id).await?);
+        for group_id in &joined {
+            changes.extend(self.sync_chat_kind(session, group_id.clone()).await?);
         }
-        self.run(move |store, _| {
-            let cursor = store.global_cursor()?;
-            if reset || cursor.is_none_or(|c| next_cursor > c) {
-                store.transaction(|txn| Ok(txn.set_global_cursor(next_cursor)?))?;
-            }
-            Ok(())
-        })
-        .await?;
         self.emit(&changes);
+        // Applied or unusable: either way the hub need not keep them.
+        for group_id in joined {
+            self.authed(|t| {
+                let gid = group_id.clone();
+                async move { self.inner.transport.ack_welcome(&t, &gid).await }
+            })
+            .await?;
+        }
         if changes.contains(&StateChange::KeyPackagesLow) {
             self.upload_key_packages(session).await?;
         }
         Ok(changes)
     }
 
+    /// Devices whose credentials applying `events` checks: senders, added
+    /// devices, and the hub roster of each group a Welcome joins (its
+    /// ratchet tree is only readable once joined).
+    async fn referenced_devices(
+        &self,
+        session: &Session,
+        events: &[IncomingEvent],
+    ) -> Result<BTreeSet<DeviceRef>> {
+        let mut devices = referenced_in(events);
+        let joining: BTreeSet<&GroupId> = events
+            .iter()
+            .filter_map(|event| match event {
+                IncomingEvent::Message(m)
+                    if m.kind == MessageKind::Welcome && m.sender != session.device =>
+                {
+                    Some(&m.group_id)
+                }
+                _ => None,
+            })
+            .collect();
+        for group_id in joining {
+            let info = self
+                .authed(|t| async move { self.inner.transport.group_info(&t, group_id).await })
+                .await;
+            match info {
+                Ok(info) => devices.extend(info.members),
+                Err(err @ (TransportError::Network(_) | TransportError::Unauthorized)) => {
+                    return Err(err.into())
+                }
+                // The join fails on the unknown members instead.
+                Err(err) => tracing::debug!(%group_id, error = %err, "no roster of a joined group"),
+            }
+        }
+        Ok(devices)
+    }
+
     /// Inserts the missing messages of joined chats before the first event
     /// that skips them: a message with a seq above the group's next one
     /// whose predecessors were neither applied, parked, nor in the batch.
-    /// Holes the server confirms as empty (e.g. Welcomes to other devices
-    /// take seqs too) are marked as applied, so they are not looked up
-    /// again.
+    /// Holes the hub confirms as empty are marked as applied, so they are
+    /// not looked up again.
     async fn backfill_gaps(
         &self,
         session: &Session,
@@ -669,25 +786,29 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Messages of the group after `after_seq`, up to `until` (all if
-    /// `None`), paging through the server history. `None` if the group's
+    /// `None`), paging through the hub history. `None` if the group's
     /// history cannot be read (e.g. this device was removed): network and
     /// auth errors are returned, anything else skips the group, whose holes
     /// are then looked up again on its next message.
     pub(crate) async fn group_history(
         &self,
-        session: &Session,
+        _session: &Session,
         group_id: &GroupId,
         mut after_seq: u64,
         until: Option<u64>,
     ) -> Result<Option<Vec<GroupMessage>>> {
         let mut messages = Vec::new();
         loop {
-            let page = match self
-                .inner
-                .transport
-                .group_messages(&session.token, group_id, after_seq, BACKFILL_PAGE)
-                .await
-            {
+            let from_seq = after_seq + 1;
+            let fetched = self
+                .authed(|t| async move {
+                    self.inner
+                        .transport
+                        .group_messages(&t, group_id, from_seq, BACKFILL_PAGE)
+                        .await
+                })
+                .await;
+            let page = match fetched {
                 Ok(page) => page,
                 Err(err @ (TransportError::Network(_) | TransportError::Unauthorized)) => {
                     return Err(err.into())
@@ -708,4 +829,27 @@ impl<S: StateStore + 'static> Client<S> {
         }
         Ok(Some(messages))
     }
+}
+
+/// Users whose DeviceList validating `events` needs: message senders and
+/// the users of the devices a Commit adds.
+fn referenced_in(events: &[IncomingEvent]) -> BTreeSet<DeviceRef> {
+    let mut devices = BTreeSet::new();
+    for event in events {
+        match event {
+            IncomingEvent::Message(m) => {
+                devices.insert(m.sender.clone());
+                if m.kind == MessageKind::Commit {
+                    if let Ok(info) = inspect_handshake(&m.payload) {
+                        devices.extend(info.added);
+                    }
+                }
+            }
+            IncomingEvent::MemberAdded { device, .. } => {
+                devices.insert(device.clone());
+            }
+            IncomingEvent::MemberRemoved { .. } | IncomingEvent::KeyPackagesLow => {}
+        }
+    }
+    devices
 }

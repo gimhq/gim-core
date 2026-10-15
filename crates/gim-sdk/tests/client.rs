@@ -1,4 +1,4 @@
-//! Several clients against one fake server.
+//! Several clients against one fake hub.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -8,10 +8,14 @@ use gim_base::model::{
 };
 use gim_base::{MemoryStore, StateReader};
 use gim_common::{GroupId, MessageId, UserId};
+use gim_identity::recovery::open_root_key_backup;
+use gim_identity::{RootKey, SignedDeviceList};
 use gim_proto::envelope::Content;
 use gim_sdk::testing::{FakeTransport, MemorySecretStorage};
+use gim_sdk::transport::Transport;
 use gim_sdk::{
-    Client, ClientBuilder, ClientError, SecretStorage, KEY_PACKAGE_BATCH, SESSION_SECRET_KEY,
+    Client, ClientBuilder, ClientError, SecretStorage, DEVICE_KEY_SECRET_KEY, KEY_PACKAGE_BATCH,
+    ROOT_KEY_SECRET_KEY, SESSION_SECRET_KEY,
 };
 use gim_test::KEY_PACKAGES_LOW_THRESHOLD;
 use tempfile::TempDir;
@@ -193,9 +197,11 @@ async fn lost_store_identity_signs_out() {
     assert_eq!(alice.secrets.get(SESSION_SECRET_KEY).unwrap(), None);
     assert!(!reset.restore_session().await.unwrap());
 
-    // Onboarding registers a new device.
-    let session = reset.register("alice", "Alice").await.unwrap();
-    assert_ne!(Some(session), alice.client.session());
+    // Onboarding registers a new device of the same user.
+    reset.register("alice", "Alice").await.unwrap();
+    let session = reset.session().unwrap();
+    assert_ne!(Some(session.clone()), alice.client.session());
+    assert_eq!(session.device.user_id, alice.user_id());
 }
 
 #[tokio::test]
@@ -414,7 +420,8 @@ async fn key_packages_are_replenished_when_low() {
 
     let claims = KEY_PACKAGE_BATCH as usize - KEY_PACKAGES_LOW_THRESHOLD + 1;
     for _ in 0..claims {
-        transport.service().claim_key_package(&bob_device).unwrap();
+        let (claimed, _) = transport.service().claim_key_packages(&[bob.user_id()]);
+        assert_eq!(claimed.len(), 1);
     }
     let left = KEY_PACKAGE_BATCH as usize - claims;
     assert_eq!(transport.service().key_package_count(&bob_device), left);
@@ -436,4 +443,197 @@ async fn key_packages_are_replenished_when_low() {
     alice.send_text(&g, "fresh").await;
     bob.sync().await;
     assert_eq!(bob.texts(&g), vec!["fresh"]);
+}
+
+#[tokio::test]
+async fn create_identity_uploads_list_backup_and_key_packages() {
+    let transport = FakeTransport::new();
+    let store = Arc::new(MemoryStore::new());
+    let secrets = Arc::new(MemorySecretStorage::new());
+    let data_dir = tempfile::tempdir().unwrap();
+    let client = build(&transport, &store, &secrets, data_dir.path());
+    let code = client.create_identity("Alice").await.unwrap();
+    let session = client.session().unwrap();
+    let (user, device) = (&session.device.user_id, &session.device);
+    let service = transport.service();
+
+    // The signed DeviceList certifies this device.
+    let list = SignedDeviceList::from_bytes(&service.device_list(user).unwrap())
+        .unwrap()
+        .verify(user)
+        .unwrap();
+    assert_eq!(list.seq(), 1);
+    assert!(list.contains(&device.device_id));
+    assert_eq!(service.devices(user).unwrap(), vec![device.clone()]);
+
+    // The backup opens with the recovery code to the stored root key.
+    let backup = service.recovery_backup(user).unwrap();
+    let root = open_root_key_backup(&backup, &code, user).unwrap();
+    assert_eq!(root.public().user_id(), *user);
+    let seed = secrets.get(ROOT_KEY_SECRET_KEY).unwrap().unwrap();
+    let stored = RootKey::from_seed(&<[u8; 32]>::try_from(seed.as_slice()).unwrap());
+    assert_eq!(stored.public(), root.public());
+    assert!(secrets.get(DEVICE_KEY_SECRET_KEY).unwrap().is_some());
+
+    assert_eq!(
+        service.key_package_count(device),
+        KEY_PACKAGE_BATCH as usize
+    );
+    assert!(service.has_last_resort_key_package(device));
+    // No handle unless one is claimed.
+    assert_eq!(service.user(user).unwrap().handle, None);
+    client.claim_handle("alice").await.unwrap();
+    assert_eq!(service.find_handle("alice"), Some(user.clone()));
+}
+
+#[tokio::test]
+async fn rejected_or_expired_tokens_sign_in_again() {
+    let transport = FakeTransport::new();
+    let alice = Device::register(&transport, "alice").await;
+    let bob = Device::register(&transport, "bob").await;
+    let g = alice
+        .client
+        .create_direct_chat(&bob.user_id())
+        .await
+        .unwrap();
+    bob.sync().await;
+
+    // The hub drops the session: the next call gets 401 and signs in.
+    let before = alice.client.session().unwrap();
+    transport.service().expire_sessions(&before.device);
+    alice.send_text(&g, "after 401").await;
+    let after = alice.client.session().unwrap();
+    assert_ne!(after.token, before.token);
+    assert_eq!(after.device, before.device);
+    let stored: serde_json::Value =
+        serde_json::from_slice(&alice.secrets.get(SESSION_SECRET_KEY).unwrap().unwrap()).unwrap();
+    assert_eq!(stored["token"], after.token.as_str());
+
+    // A restored session signs in before its first call.
+    transport.service().expire_sessions(&after.device);
+    let restored = build(
+        &transport,
+        &alice.store,
+        &alice.secrets,
+        alice.data_dir.path(),
+    );
+    assert!(restored.restore_session().await.unwrap());
+    restored
+        .send(
+            &g,
+            Content::Text {
+                body: "after restore".into(),
+            },
+        )
+        .await
+        .unwrap();
+    bob.sync().await;
+    assert_eq!(bob.texts(&g), ["after 401", "after restore"]);
+}
+
+#[tokio::test]
+async fn welcomes_are_acknowledged() {
+    let transport = FakeTransport::new();
+    let alice = Device::register(&transport, "alice").await;
+    let bob = Device::register(&transport, "bob").await;
+    let bob_device = bob.client.session().unwrap().device;
+    let g = alice
+        .client
+        .create_group_chat(None, &[bob.user_id()])
+        .await
+        .unwrap();
+    assert_eq!(
+        transport.service().pending_welcomes(&bob_device, 10).len(),
+        1
+    );
+    bob.sync().await;
+    assert!(bob.store.chat(&g).unwrap().is_some());
+    assert!(transport
+        .service()
+        .pending_welcomes(&bob_device, 10)
+        .is_empty());
+}
+
+#[tokio::test]
+async fn key_package_of_another_identity_is_rejected() {
+    let transport = FakeTransport::new();
+    let alice = Device::register(&transport, "alice").await;
+    let bob = Device::register(&transport, "bob").await;
+    let mallory = Device::register(&transport, "mallory").await;
+    let service = transport.service();
+    let bob_device = bob.client.session().unwrap().device;
+
+    // The hub hands out mallory's KeyPackage as bob's.
+    while service.key_package_count(&bob_device) > 0 {
+        service.claim_key_packages(&[bob.user_id()]);
+    }
+    let (mut forged, _) = service.claim_key_packages(&[mallory.user_id()]);
+    service.upload_key_packages(&bob_device, vec![forged.remove(0).key_package], false);
+
+    let result = alice.client.create_group_chat(None, &[bob.user_id()]).await;
+    assert!(result.is_err(), "{result:?}");
+    bob.sync().await;
+    mallory.sync().await;
+    assert!(bob.store.chats().unwrap().is_empty());
+    assert!(mallory.store.chats().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn revoked_device_is_rejected_and_removed() {
+    let transport = FakeTransport::new();
+    let alice = Device::register(&transport, "alice").await;
+    let bob = Device::register(&transport, "bob").await;
+    let bob_tablet = Device::register(&transport, "bob").await;
+    let tablet = bob_tablet.client.session().unwrap().device;
+    let g = alice
+        .client
+        .create_group_chat(None, &[bob.user_id()])
+        .await
+        .unwrap();
+    sync_all(&[&bob, &bob_tablet]).await;
+    alice.send_text(&g, "before").await;
+    sync_all(&[&bob, &bob_tablet]).await;
+
+    // The tablet posts, then bob revokes it with his root key.
+    bob_tablet.send_text(&g, "from the tablet").await;
+    let seed = bob.secrets.get(ROOT_KEY_SECRET_KEY).unwrap().unwrap();
+    let root = RootKey::from_seed(&<[u8; 32]>::try_from(seed.as_slice()).unwrap());
+    let user = bob.user_id();
+    let service = transport.service();
+    let revoked = SignedDeviceList::from_bytes(&service.device_list(&user).unwrap())
+        .unwrap()
+        .verify(&user)
+        .unwrap()
+        .revoke(&tablet.device_id)
+        .unwrap()
+        .sign(&root)
+        .unwrap();
+    transport
+        .put_device_list(&user, revoked.to_bytes())
+        .await
+        .unwrap();
+
+    // Alice learns of the revocation from `device_list.updated`: the
+    // tablet's message is not stored, and she removes its leaf.
+    alice.sync().await;
+    assert_eq!(alice.texts(&g), ["before"]);
+    let members = |device: &Device| -> Vec<_> {
+        device
+            .store
+            .chat(&g)
+            .unwrap()
+            .unwrap()
+            .members
+            .into_iter()
+            .map(|m| m.device)
+            .collect()
+    };
+    assert!(!members(&alice).contains(&tablet));
+    assert!(!service.group(&g).unwrap().members.contains(&tablet));
+    bob.sync().await;
+    assert!(!members(&bob).contains(&tablet));
+
+    alice.send_text(&g, "after").await;
+    bob.sync().await;
+    assert_eq!(bob.texts(&g), ["before", "after"]);
 }

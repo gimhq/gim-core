@@ -2,7 +2,7 @@
 
 use std::error::Error as _;
 
-use gim_proto::dto::{CursorExpiredError, ErrorResponse};
+use gim_proto::v2::{CursorExpiredError, ErrorResponse};
 use reqwest::StatusCode;
 
 use crate::transport::TransportError;

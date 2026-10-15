@@ -1,10 +1,9 @@
-//! Wire types: gim-server v1 REST/stream DTOs (`dto`), gim-hub API v2 DTOs
-//! (`v2`, from contract/hub-v2/openapi.json) and the versioned CBOR envelope
-//! schema. No crypto, no I/O.
+//! Wire types: gim-hub API v2 DTOs (`v2`, from contract/hub-v2/openapi.json)
+//! and the versioned CBOR envelope schema. No crypto, no I/O.
 
 #![forbid(unsafe_code)]
 
-pub mod dto;
+mod base64;
 pub mod envelope;
 mod error;
 pub mod v2;

@@ -76,7 +76,11 @@ pub fn seed(
     sent_at_ms: u64,
     body: &str,
 ) -> MessageId {
-    let message_id = MessageId::new(format!("seed-{group_id}-{seq}")).unwrap();
+    let message_id = MessageId::new(format!(
+        "seed-{}-{seq}",
+        group_id.as_str().replace('/', "-")
+    ))
+    .unwrap();
     let message = Message {
         message_id: message_id.clone(),
         group_id: group_id.clone(),
