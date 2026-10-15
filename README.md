@@ -91,6 +91,9 @@ Typing indicators expire on their own. `typing <chat> --stop` from a fresh
 process is a no-op: gim-sdk keeps typing state in memory, so only the process
 that started typing can stop it.
 
+`wait-for` waits for the chat (DM peer handle, chat name or id) to appear if
+the profile has not joined it yet.
+
 ### Output and exit codes
 
 With `--json` every command prints exactly one JSON object on stdout, errors

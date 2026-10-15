@@ -82,15 +82,15 @@ pub fn find_direct<'a>(chats: &'a [Chat], me: &UserId, user: &UserId) -> Option<
 
 /// `<chat>`: an exact group id; else the unique chat with that name; else
 /// the joined direct chat with the user of that handle (leading `@`
-/// optional).
-pub fn find_chat<'a>(
+/// optional). `None` when no chat matches; ambiguous is an error.
+pub fn lookup_chat<'a>(
     chats: &'a [Chat],
     me: &UserId,
     directory: &Directory,
     arg: &str,
-) -> Result<&'a Chat> {
+) -> Result<Option<&'a Chat>> {
     if let Some(chat) = chats.iter().find(|c| c.group_id.as_str() == arg) {
-        return Ok(chat);
+        return Ok(Some(chat));
     }
     let unique = |found: Vec<&'a Chat>, what: &str| match found.as_slice() {
         [chat] => Ok(Some(*chat)),
@@ -105,7 +105,7 @@ pub fn find_chat<'a>(
         .filter(|c| c.name.as_deref() == Some(arg))
         .collect();
     if let Some(chat) = unique(named, "chat name")? {
-        return Ok(chat);
+        return Ok(Some(chat));
     }
     let handle = arg.strip_prefix('@').unwrap_or(arg);
     let direct = chats
@@ -113,17 +113,22 @@ pub fn find_chat<'a>(
         .filter(|c| c.kind == ChatKind::Direct && c.membership == Membership::Joined)
         .filter(|c| peer_of(c, me).and_then(|p| directory.handle(p)) == Some(handle))
         .collect();
-    unique(direct, "direct chat with")?
-        .ok_or_else(|| CliError::not_found(format!("unknown chat {arg:?}")))
+    unique(direct, "direct chat with")
 }
 
 impl Ctx {
     pub fn resolve_chat(&self, arg: &str) -> Result<Chat> {
+        self.lookup_chat(arg)?
+            .ok_or_else(|| CliError::not_found(format!("unknown chat {arg:?}")))
+    }
+
+    /// Like [`Ctx::resolve_chat`], but `None` when no chat matches yet.
+    pub fn lookup_chat(&self, arg: &str) -> Result<Option<Chat>> {
         let chats = self.store().chats()?;
         let me = &self.session.device.user_id;
         let peers = chats.iter().filter_map(|c| peer_of(c, me));
         let directory = Directory::load(self.store(), peers)?;
-        find_chat(&chats, me, &directory, arg).cloned()
+        Ok(lookup_chat(&chats, me, &directory, arg)?.cloned())
     }
 
     pub fn resolve_message(&self, arg: &str) -> Result<Message> {
@@ -204,7 +209,9 @@ mod tests {
 
     fn resolve(arg: &str) -> Result<String> {
         let (chats, directory) = fixture();
-        find_chat(&chats, &uid("me"), &directory, arg).map(|c| c.group_id.to_string())
+        lookup_chat(&chats, &uid("me"), &directory, arg)?
+            .map(|c| c.group_id.to_string())
+            .ok_or_else(|| CliError::not_found(format!("unknown chat {arg:?}")))
     }
 
     #[test]
@@ -225,6 +232,16 @@ mod tests {
         // Left direct chats only resolve by id.
         assert_eq!(resolve("@carol").unwrap_err().kind, ErrorKind::NotFound);
         assert_eq!(resolve("g-left").unwrap(), "g-left");
+    }
+
+    #[test]
+    fn chat_lookup_is_none_when_unknown_and_fails_when_ambiguous() {
+        let (chats, directory) = fixture();
+        let lookup = |arg| lookup_chat(&chats, &uid("me"), &directory, arg);
+        assert!(lookup("nobody").unwrap().is_none());
+        assert!(lookup("@carol").unwrap().is_none());
+        assert_eq!(lookup("dup").unwrap_err().kind.exit_code(), 4);
+        assert_eq!(lookup("crew").unwrap().unwrap().group_id.as_str(), "g-crew");
     }
 
     #[test]

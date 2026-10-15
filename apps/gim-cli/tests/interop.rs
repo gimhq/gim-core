@@ -204,6 +204,7 @@ fn cli_to_cli_interop() {
     direct_chat(&alice, &bob);
     group_chat(&alice, &bob, &carol);
     listen(&bob, &carol);
+    wait_for_new_chat(&server, &alice);
     exit_codes(&alice);
 }
 
@@ -349,9 +350,46 @@ fn listen(bob: &Gim, carol: &Gim) {
     assert_eq!(events[0]["message"]["text"], "Wind NW 4, leaving Corfu");
 }
 
+/// `wait-for` in a fresh profile starts before the chat exists and gets
+/// the first message of the DM the other profile then opens.
+fn wait_for_new_chat(server: &str, alice: &Gim) {
+    let dave = Gim::register(server, "dave");
+    let args = [
+        "wait-for",
+        &alice.handle,
+        "--from",
+        &alice.handle,
+        "--text",
+        "Meet at Kotor",
+        "--timeout",
+        WAIT_SECS,
+    ];
+    let child = dave
+        .command(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("gim wait-for runs");
+    let chat = chat_of(&alice.ok(&["dm", &dave.handle]));
+    let sent = alice.send(&chat, "Meet at Kotor marina");
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", describe(&args, &out));
+    let got = &parse(&args, &out)["message"];
+    assert_eq!(got["id"], sent.as_str(), "{got}");
+    assert_eq!(got["chat_id"], chat.as_str(), "{got}");
+    assert_eq!(got["sender"]["handle"], alice.handle.as_str(), "{got}");
+}
+
 fn exit_codes(alice: &Gim) {
     let err = alice.fail(&["send", "no-such-chat", "hello"], EXIT_NOT_FOUND);
     assert_eq!(err["error"]["code"], "not_found", "{err}");
+    let err = alice.fail(&["history", "no-such-chat"], EXIT_NOT_FOUND);
+    assert_eq!(err["error"]["code"], "not_found", "{err}");
+    let err = alice.fail(
+        &["wait-for", "no-such-chat", "--text", "x", "--timeout", "2"],
+        EXIT_TIMEOUT,
+    );
+    assert_eq!(err["error"]["code"], "timeout", "{err}");
     let chats = alice.ok(&["chats", "list"]);
     let chat = chats["chats"][0]["id"].as_str().unwrap().to_string();
     let err = alice.fail(

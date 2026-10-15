@@ -22,10 +22,15 @@ message has all of the given states (--from then names who must have \
 reacted with --reaction). Prints the message ({\"message\":{...}} with \
 --json).
 
+Waits for the chat (DM peer handle, chat name or id) to appear if the \
+profile has not joined it yet, and likewise for the --msg message; an \
+ambiguous chat still fails at once.
+
 Exit codes:
   0  matched
-  2  no filter given, or an invalid combination
-  3  --timeout elapsed first
+  2  no filter given, an invalid combination, or --msg not in the chat
+  3  --timeout elapsed first (also if the chat never appeared)
+  4  ambiguous chat
   (other errors: see `gim --help`)";
 
 /// Messages per store page when searching a chat.
@@ -149,24 +154,59 @@ async fn filter(ctx: &Ctx, args: &WaitForArgs) -> Result<Filter> {
     })
 }
 
-/// What to wait for, in which chat.
+/// What to wait for, in which chat. `<chat>` and `--msg` are looked up
+/// lazily: they may only arrive with the sync.
 struct Target {
-    chat: GroupId,
+    /// `<chat>`.
+    arg: String,
+    /// The chat, once in the store.
+    chat: Option<GroupId>,
     msg: Option<MessageId>,
+    /// Whether `msg` was seen in the store, in `chat`.
+    msg_found: bool,
     filter: Filter,
 }
 
 impl Target {
+    /// Looks up `<chat>` and `--msg` if not done yet; whether both are known.
+    fn locate(&mut self, ctx: &Ctx) -> Result<bool> {
+        if self.chat.is_none() {
+            self.chat = ctx.lookup_chat(&self.arg)?.map(|c| c.group_id);
+        }
+        let Some(chat) = &self.chat else {
+            return Ok(false);
+        };
+        if let (Some(id), false) = (&self.msg, self.msg_found) {
+            let Some(message) = ctx.store().message(id)? else {
+                return Ok(false);
+            };
+            check_message_chat(&message, chat)?;
+            self.msg_found = true;
+        }
+        Ok(true)
+    }
+
+    fn located(&self) -> bool {
+        self.chat.is_some() && (self.msg.is_none() || self.msg_found)
+    }
+
     /// The matching message in the store: the given one, else the newest
-    /// match among the latest `pages` pages of the chat (all if `None`).
-    fn find(&self, store: &impl StateReader, pages: Option<usize>) -> Result<Option<Message>> {
+    /// match among the latest `pages` pages of the chat (all if `None`, or
+    /// if the chat was only just found).
+    fn find(&mut self, ctx: &Ctx, pages: Option<usize>) -> Result<Option<Message>> {
+        let pages = if self.located() { pages } else { None };
+        if !self.locate(ctx)? {
+            return Ok(None);
+        }
+        let store = ctx.store();
         if let Some(id) = &self.msg {
             return Ok(store.message(id)?.filter(|m| self.filter.matches(m)));
         }
+        let chat = self.chat.as_ref().expect("located");
         let mut before = None;
         let mut pages = pages;
         loop {
-            let page = store.messages(&self.chat, before, PAGE)?;
+            let page = store.messages(chat, before, PAGE)?;
             let full = page.len() == PAGE;
             let oldest = page.first().and_then(|m| m.seq);
             if let Some(m) = page.into_iter().rev().find(|m| self.filter.matches(m)) {
@@ -182,43 +222,63 @@ impl Target {
 
     /// Whether a change may make the target match.
     fn concerns(&self, change: &StateChange) -> bool {
+        let located = self.located();
         match change {
+            StateChange::ChatUpserted(_) => !located,
+            StateChange::MessageUpserted(_) if !located => true,
             StateChange::MessageUpserted(m) => match &self.msg {
                 Some(id) => &m.message_id == id,
-                None => m.group_id == self.chat,
+                None => self.chat.as_ref() == Some(&m.group_id),
             },
             StateChange::MessageRemoved { message_id, .. } => self.msg.as_ref() == Some(message_id),
             _ => false,
         }
     }
+
+    fn timeout_error(&self, secs: u64) -> CliError {
+        match (&self.chat, &self.msg) {
+            (None, _) => CliError::timeout(format!("chat {} not found before timeout", self.arg)),
+            (Some(_), Some(id)) if !self.msg_found => {
+                CliError::timeout(format!("message {id} not found before timeout"))
+            }
+            _ => CliError::timeout(format!("no match within {secs} s")),
+        }
+    }
+}
+
+/// `--msg` must be a message of `<chat>`.
+fn check_message_chat(message: &Message, chat: &GroupId) -> Result<()> {
+    if &message.group_id != chat {
+        return Err(CliError::usage(format!(
+            "message {} is not in chat {chat}",
+            message.message_id
+        )));
+    }
+    Ok(())
 }
 
 pub async fn wait_for(ctx: &Ctx, args: &WaitForArgs) -> Result<Output> {
     check_args(args)?;
-    let chat = ctx.resolve_chat(&args.chat)?.group_id;
     let msg = match &args.msg {
-        Some(arg) => {
-            let message = ctx.resolve_message(arg)?;
-            if message.group_id != chat {
-                return Err(CliError::usage(format!(
-                    "message {arg} is not in chat {chat}"
-                )));
-            }
-            Some(message.message_id)
-        }
+        Some(arg) => Some(
+            MessageId::new(arg)
+                .map_err(|_| CliError::not_found(format!("unknown message {arg:?}")))?,
+        ),
         None => None,
     };
-    let target = Target {
-        chat,
+    let mut target = Target {
+        arg: args.chat.clone(),
+        chat: None,
         msg,
+        msg_found: false,
         filter: filter(ctx, args).await?,
     };
-    if let Some(message) = target.find(ctx.store(), None)? {
+    if let Some(message) = target.find(ctx, None)? {
         return message_output(ctx, &message);
     }
     let mut changes = ctx.client.subscribe_changes();
     ctx.client.start_sync()?;
-    let result = wait(ctx, &target, args.timeout, &mut changes).await;
+    let result = wait(ctx, &mut target, args.timeout, &mut changes).await;
     let stopped = stop_sync(ctx).await;
     let message = result?;
     stopped?;
@@ -227,7 +287,7 @@ pub async fn wait_for(ctx: &Ctx, args: &WaitForArgs) -> Result<Output> {
 
 async fn wait(
     ctx: &Ctx,
-    target: &Target,
+    target: &mut Target,
     secs: u64,
     changes: &mut tokio::sync::broadcast::Receiver<StateChange>,
 ) -> Result<Message> {
@@ -239,16 +299,16 @@ async fn wait(
     loop {
         let found = tokio::select! {
             () = &mut timeout => {
-                return Err(CliError::timeout(format!("no match within {secs} s")));
+                return Err(target.timeout_error(secs));
             }
             _ = tick.tick() => {
                 check_sync(ctx)?;
-                target.find(ctx.store(), Some(1))?
+                target.find(ctx, Some(1))?
             }
             change = changes.recv() => match change {
-                Ok(change) if target.concerns(&change) => target.find(ctx.store(), Some(1))?,
+                Ok(change) if target.concerns(&change) => target.find(ctx, Some(1))?,
                 Ok(_) => None,
-                Err(RecvError::Lagged(_)) => target.find(ctx.store(), None)?,
+                Err(RecvError::Lagged(_)) => target.find(ctx, None)?,
                 Err(RecvError::Closed) => return Err(CliError::other("change stream closed")),
             },
         };
@@ -419,6 +479,65 @@ mod tests {
             check_args(&args).unwrap();
             assert_eq!(args.timeout, 30);
         }
+    }
+
+    fn target(chat: Option<&str>, msg: Option<&str>, msg_found: bool) -> Target {
+        Target {
+            arg: "@bob".into(),
+            chat: chat.map(|c| GroupId::new(c).unwrap()),
+            msg: msg.map(|m| MessageId::new(m).unwrap()),
+            msg_found,
+            filter: Filter::default(),
+        }
+    }
+
+    #[test]
+    fn unknown_chat_or_message_keeps_waiting_for_any_upsert() {
+        let m = message();
+        let other = |id: &str| {
+            let mut m = message();
+            m.message_id = MessageId::new(id).unwrap();
+            m.group_id = GroupId::new("g-other").unwrap();
+            StateChange::MessageUpserted(m)
+        };
+        let chat_upsert = StateChange::ChatUpserted(gim_base::model::Chat::new(
+            GroupId::new("g-new").unwrap(),
+            gim_base::model::ChatKind::Direct,
+            0,
+        ));
+        for pending in [
+            target(None, None, false),
+            target(None, Some("m-1"), false),
+            target(Some("g-1"), Some("m-1"), false),
+        ] {
+            assert!(!pending.located());
+            assert!(pending.concerns(&chat_upsert));
+            assert!(pending.concerns(&other("m-9")));
+        }
+        let chat = target(None, None, false).timeout_error(5);
+        assert_eq!(chat.kind.exit_code(), 3);
+        assert_eq!(chat.message, "chat @bob not found before timeout");
+        let msg = target(Some("g-1"), Some("m-1"), false).timeout_error(5);
+        assert_eq!(msg.message, "message m-1 not found before timeout");
+
+        // Once located, only changes of the chat (or message) count.
+        let chat = target(Some("g-1"), None, false);
+        assert!(chat.located());
+        assert!(!chat.concerns(&chat_upsert));
+        assert!(!chat.concerns(&other("m-9")));
+        assert!(chat.concerns(&StateChange::MessageUpserted(m.clone())));
+        let msg = target(Some("g-1"), Some("m-1"), true);
+        assert!(!msg.concerns(&other("m-9")));
+        assert!(msg.concerns(&other("m-1")));
+        assert_eq!(msg.timeout_error(5).message, "no match within 5 s");
+    }
+
+    #[test]
+    fn message_of_another_chat_is_a_usage_error() {
+        let m = message();
+        check_message_chat(&m, &GroupId::new("g-1").unwrap()).unwrap();
+        let err = check_message_chat(&m, &GroupId::new("g-2").unwrap()).unwrap_err();
+        assert_eq!(err.kind.exit_code(), 2);
     }
 
     #[test]
