@@ -1,0 +1,15 @@
+{
+  "blob": "8601783875636971666d72323275356b676772326d616b633536786e376670666c6f706e676b653279716f706a77353269646d786b77656478626461831840010150101112131415161718191a1b1c1d1e1f4c303132333435363738393a3b58340d1f932520826186434fee492136cae550db8bd9101cff4b6fc576a52b3a6a6abe9737f6768962ccc3245ea09192b4e30206ee39",
+  "code_bytes": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7",
+  "code_display": "M2GT-58X4-MPKA-FA59-NANT-SBDE-NYRB-3CNK-PJTV-DDR",
+  "description": "gim recovery backup test vectors, see docs/identity.md",
+  "kdf_params": {
+    "m_kib": 64,
+    "p": 1,
+    "t": 1
+  },
+  "nonce": "303132333435363738393a3b",
+  "root_seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "salt": "101112131415161718191a1b1c1d1e1f",
+  "user_id": "uciqfmr22u5kggr2makc56xn7fpflopngke2yqopjw52idmxkwedxbda"
+}
