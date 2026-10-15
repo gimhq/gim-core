@@ -45,7 +45,10 @@ impl Device {
 
     /// A device whose store holds `identity` as written, bypassing the
     /// checks of `create_identity_v2`.
-    fn crafted(seed: u8, identity: impl FnOnce(&RootKey, &DeviceSigningKey) -> StoredIdentity) -> Self {
+    fn crafted(
+        seed: u8,
+        identity: impl FnOnce(&RootKey, &DeviceSigningKey) -> StoredIdentity,
+    ) -> Self {
         let root = RootKey::from_seed(&[seed; 32]);
         let key = DeviceSigningKey::from_seed(&[seed.wrapping_add(100); 32]);
         let device = Self::empty(root, key);
@@ -110,7 +113,10 @@ impl Device {
     }
 
     fn join(&self, welcome: &[u8]) -> Result<GroupId, CryptoError> {
-        Ok(self.engine.join_from_welcome(&self.store, welcome)?.group_id)
+        Ok(self
+            .engine
+            .join_from_welcome(&self.store, welcome)?
+            .group_id)
     }
 
     fn process(&self, g: &GroupId, message: &[u8]) -> Result<ProcessedMessage, CryptoError> {
@@ -177,7 +183,7 @@ fn three_devices_create_join_add_remove_message() {
 
     let out = alice
         .engine
-        .remove_members(&alice.store, &g, &[bob.me.clone()])
+        .remove_members(&alice.store, &g, std::slice::from_ref(&bob.me))
         .unwrap();
     alice.engine.merge_pending_commit(&alice.store, &g).unwrap();
     match carol.process(&g, &out.commit).unwrap() {
@@ -198,7 +204,10 @@ fn three_devices_create_join_add_remove_message() {
         restored.load_identity().unwrap(),
         alice.store.load_identity().unwrap()
     );
-    let ct = alice.engine.encrypt(&restored, &g, b"after restart").unwrap();
+    let ct = alice
+        .engine
+        .encrypt(&restored, &g, b"after restart")
+        .unwrap();
     assert!(matches!(
         carol.process(&g, &ct).unwrap(),
         ProcessedMessage::Application { .. }
@@ -259,11 +268,11 @@ fn forged_cert_rejected_on_add() {
     let alice = Device::new(1);
     let mallory = forged_device(9);
     alice.engine.create_group(&alice.store, &g).unwrap();
-    assert_invalid_credential(alice.engine.add_members(
-        &alice.store,
-        &g,
-        &[mallory.key_package()],
-    ));
+    assert_invalid_credential(
+        alice
+            .engine
+            .add_members(&alice.store, &g, &[mallory.key_package()]),
+    );
     assert_eq!(alice.epoch(&g), 0);
     assert!(matches!(
         alice.engine.merge_pending_commit(&alice.store, &g),
@@ -298,11 +307,11 @@ fn leaf_key_mismatch_rejected() {
         }
     });
     alice.engine.create_group(&alice.store, &g).unwrap();
-    assert_invalid_credential(alice.engine.add_members(
-        &alice.store,
-        &g,
-        &[eve.key_package()],
-    ));
+    assert_invalid_credential(
+        alice
+            .engine
+            .add_members(&alice.store, &g, &[eve.key_package()]),
+    );
 
     let bob = Device::new(2);
     eve.engine.create_group(&eve.store, &g).unwrap();
@@ -316,18 +325,23 @@ fn revoked_device_rejected_on_add() {
     let (alice, dave) = (Device::new(1), Device::new(4));
     alice.engine.create_group(&alice.store, &g).unwrap();
     alice.learn_revocation(&dave);
-    assert_invalid_credential(alice.engine.add_members(
-        &alice.store,
-        &g,
-        &[dave.key_package()],
-    ));
+    assert_invalid_credential(
+        alice
+            .engine
+            .add_members(&alice.store, &g, &[dave.key_package()]),
+    );
     assert_eq!(alice.epoch(&g), 0);
 }
 
 #[test]
 fn revoked_device_rejected_on_incoming_commit() {
     let g = group();
-    let (alice, bob, carol, dave) = (Device::new(1), Device::new(2), Device::new(3), Device::new(4));
+    let (alice, bob, carol, dave) = (
+        Device::new(1),
+        Device::new(2),
+        Device::new(3),
+        Device::new(4),
+    );
     alice.engine.create_group(&alice.store, &g).unwrap();
     let (_, welcome) = alice.add(&g, &[&bob, &carol]);
     bob.join(&welcome).unwrap();

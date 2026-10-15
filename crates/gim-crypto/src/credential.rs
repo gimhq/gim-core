@@ -180,7 +180,10 @@ mod tests {
         let (credential, _) = sample();
         let bytes = credential.encode();
         assert_eq!(GimCredential::decode(&bytes).unwrap(), credential);
-        assert_eq!(GimCredential::from_mls(&credential.to_mls()).unwrap(), credential);
+        assert_eq!(
+            GimCredential::from_mls(&credential.to_mls()).unwrap(),
+            credential
+        );
     }
 
     #[test]

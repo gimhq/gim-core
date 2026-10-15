@@ -132,7 +132,10 @@ mod tests {
         let seed = [0x24; 32];
         let key = DeviceSigningKey::from_seed(&seed);
         assert_eq!(*key.to_seed(), seed);
-        assert_eq!(DeviceSigningKey::from_seed(&key.to_seed()).public(), key.public());
+        assert_eq!(
+            DeviceSigningKey::from_seed(&key.to_seed()).public(),
+            key.public()
+        );
     }
 
     #[test]

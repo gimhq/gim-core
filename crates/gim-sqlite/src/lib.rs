@@ -761,9 +761,7 @@ mod tests {
             store
                 .transaction(|txn| Ok(txn.save_identity(&identity)?))
                 .unwrap();
-            let loaded = store
-                .transaction(|txn| Ok(txn.load_identity()?))
-                .unwrap();
+            let loaded = store.transaction(|txn| Ok(txn.load_identity()?)).unwrap();
             assert_eq!(loaded, Some(identity));
         }
     }
