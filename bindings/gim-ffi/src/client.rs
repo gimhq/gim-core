@@ -9,7 +9,7 @@ use gim_base::model::{ChatKind as BaseChatKind, Membership, MessageContent as Ba
 use gim_base::StateReader;
 use gim_common::{GroupId, MessageId, UserId};
 use gim_sdk::transport::Transport;
-use gim_sdk::{Client, ClientBuilder, OutboxSender, SESSION_SECRET_KEY};
+use gim_sdk::{Client, ClientBuilder, HttpTransport, OutboxSender, SESSION_SECRET_KEY};
 use gim_sqlite::{SqliteStore, DATABASE_FILE_NAME};
 use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
@@ -17,7 +17,6 @@ use url::Url;
 
 use crate::error::parse_id;
 use crate::hooks::HookSecrets;
-use crate::transport::UnavailableTransport;
 use crate::{
     ChatListDiff, ChatListListener, ConnectionState, GimError, PlatformHooks, Session, TaskHandle,
     Timeline, UserProfile,
@@ -60,8 +59,11 @@ pub async fn create_client(
     config: ClientConfig,
     hooks: Arc<dyn PlatformHooks>,
 ) -> Result<Arc<GimClient>, GimError> {
-    // The gim-server HTTP transport does not exist yet.
-    GimClient::open(config, hooks, |_| None).await.map(Arc::new)
+    GimClient::open(config, hooks, |url| {
+        Ok(Arc::new(HttpTransport::new(url.clone())?) as Arc<dyn Transport>)
+    })
+    .await
+    .map(Arc::new)
 }
 
 /// Like [`create_client`], over an in-memory fake server shared by every
@@ -73,7 +75,7 @@ pub async fn create_client_with_fake_transport(
     transport: gim_sdk::testing::FakeTransport,
 ) -> Result<Arc<GimClient>, GimError> {
     GimClient::open(config, hooks, move |_| {
-        Some(Arc::new(transport) as Arc<dyn Transport>)
+        Ok(Arc::new(transport) as Arc<dyn Transport>)
     })
     .await
     .map(Arc::new)
@@ -136,8 +138,6 @@ pub struct GimClient {
     sdk: Sdk,
     hooks: Arc<dyn PlatformHooks>,
     data_dir: PathBuf,
-    /// Whether `sdk` talks to a real (or fake) server.
-    has_transport: bool,
     signed_out: AtomicBool,
     shared: Arc<Shared>,
     sync: Mutex<Option<SyncTasks>>,
@@ -147,7 +147,7 @@ impl GimClient {
     async fn open(
         config: ClientConfig,
         hooks: Arc<dyn PlatformHooks>,
-        transport: impl FnOnce(&Url) -> Option<Arc<dyn Transport>>,
+        transport: impl FnOnce(&Url) -> Result<Arc<dyn Transport>, GimError>,
     ) -> Result<Self, GimError> {
         let server_url = parse_server_url(&config.server_url)?;
         let data_dir = PathBuf::from(hooks.data_dir());
@@ -158,11 +158,9 @@ impl GimClient {
         }
         let dir = data_dir.clone();
         let store = tokio::task::spawn_blocking(move || SqliteStore::open(dir)).await??;
-        let transport = transport(&server_url);
-        let has_transport = transport.is_some();
         let sdk = ClientBuilder::new(
             Arc::new(store),
-            transport.unwrap_or_else(|| Arc::new(UnavailableTransport)),
+            transport(&server_url)?,
             Arc::new(HookSecrets(hooks.clone())),
         )
         .data_dir(&data_dir)
@@ -177,7 +175,6 @@ impl GimClient {
             sdk,
             hooks,
             data_dir,
-            has_transport,
             signed_out: AtomicBool::new(false),
             shared,
             sync: Mutex::new(None),
@@ -190,15 +187,6 @@ impl GimClient {
             return Err(GimError::NotRegistered);
         }
         Ok(&self.sdk)
-    }
-
-    /// The SDK client for a call that needs the server.
-    fn network(&self) -> Result<&Sdk, GimError> {
-        let sdk = self.sdk()?;
-        if !self.has_transport {
-            return Err(GimError::NotImplemented);
-        }
-        Ok(sdk)
     }
 
     /// Runs a store read off the async runtime.
@@ -367,7 +355,7 @@ impl GimClient {
         handle: String,
         display_name: String,
     ) -> Result<Session, GimError> {
-        let session = self.network()?.register(&handle, &display_name).await?;
+        let session = self.sdk()?.register(&handle, &display_name).await?;
         Ok(Session {
             user_id: session.device.user_id.to_string(),
             device_id: session.device.device_id.to_string(),
@@ -397,7 +385,7 @@ impl GimClient {
 
     /// Starts the background sync loop and outbox sender.
     pub async fn start_sync(&self) -> Result<(), GimError> {
-        let sdk = self.network()?;
+        let sdk = self.sdk()?;
         if sdk.session().is_none() {
             return Err(GimError::NotRegistered);
         }
@@ -434,14 +422,14 @@ impl GimClient {
 
     /// Looks up a user by handle; `None` if no such user exists.
     pub async fn find_user(&self, handle: String) -> Result<Option<UserProfile>, GimError> {
-        let user = self.network()?.find_user(&handle).await?;
+        let user = self.sdk()?.find_user(&handle).await?;
         Ok(user.map(Into::into))
     }
 
     /// Returns the chat id of the direct chat with `user_id`, creating it if
     /// needed.
     pub async fn create_direct_chat(&self, user_id: String) -> Result<String, GimError> {
-        let sdk = self.network()?;
+        let sdk = self.sdk()?;
         let user_id: UserId = parse_id("user_id", user_id)?;
         let own = self.own_user()?;
         let other = user_id.clone();
@@ -460,7 +448,7 @@ impl GimClient {
         name: String,
         member_user_ids: Vec<String>,
     ) -> Result<String, GimError> {
-        let sdk = self.network()?;
+        let sdk = self.sdk()?;
         let users = member_user_ids
             .into_iter()
             .map(|id| parse_id("member_user_ids", id))
@@ -474,7 +462,7 @@ impl GimClient {
         chat_id: String,
         user_ids: Vec<String>,
     ) -> Result<(), GimError> {
-        let sdk = self.network()?;
+        let sdk = self.sdk()?;
         let group_id: GroupId = parse_id("chat_id", chat_id)?;
         let users = user_ids
             .into_iter()
@@ -484,7 +472,7 @@ impl GimClient {
     }
 
     pub async fn remove_member(&self, chat_id: String, user_id: String) -> Result<(), GimError> {
-        let sdk = self.network()?;
+        let sdk = self.sdk()?;
         let group_id: GroupId = parse_id("chat_id", chat_id)?;
         let user_id: UserId = parse_id("user_id", user_id)?;
         Ok(sdk.remove_members(&group_id, &[user_id]).await?)
@@ -499,7 +487,7 @@ impl GimClient {
     }
 
     pub async fn leave_chat(&self, chat_id: String) -> Result<(), GimError> {
-        let sdk = self.network()?;
+        let sdk = self.sdk()?;
         let group_id: GroupId = parse_id("chat_id", chat_id)?;
         Ok(sdk.leave(&group_id).await?)
     }
@@ -636,7 +624,7 @@ impl GimClient {
     }
 
     pub async fn set_typing(&self, chat_id: String, active: bool) -> Result<(), GimError> {
-        let sdk = self.network()?;
+        let sdk = self.sdk()?;
         let group_id: GroupId = parse_id("chat_id", chat_id)?;
         Ok(sdk.set_typing(&group_id, active).await?)
     }
@@ -649,7 +637,7 @@ impl GimClient {
         message_id: String,
         dest_path: String,
     ) -> Result<String, GimError> {
-        let sdk = self.network()?;
+        let sdk = self.sdk()?;
         let group_id: GroupId = parse_id("chat_id", chat_id)?;
         let message_id: MessageId = parse_id("message_id", message_id)?;
         sdk.fetch_media(&group_id, &message_id, &dest_path).await?;

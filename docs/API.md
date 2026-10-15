@@ -151,7 +151,7 @@ The chat list is ordered most recently updated first; a timeline oldest first.
 | `Storage(reason)` | Local database or file system failure. | Report; may need disk space. |
 | `Server(status, reason)` | Non-success HTTP status from gim-server. | Show generic error. |
 | `Cancelled` | Cancelled by `stopSync`, `signOut` or `cancelSend`. | Ignore. |
-| `NotImplemented` | In the contract but not implemented in this build. Until the gim-server HTTP transport lands, every call that needs the server (`register`, `findUser`, chat creation and membership, `startSync`, `setTyping`, `fetchMedia`) returns it; sends are queued locally. | Development builds only. |
+| `NotImplemented` | In the contract but not implemented in this build. | Development builds only. |
 | `Internal(reason)` | Bug, or an unexpected exception thrown by a platform hook. | Report. |
 
 Kotlin throws `GimException.<Variant>`; Swift throws `GimError.<Variant>`.

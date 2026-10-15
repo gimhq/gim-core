@@ -15,7 +15,6 @@ crate-type = ["lib", "cdylib", "staticlib"]
 testing = ["gim-sdk/testing"]
 
 [dependencies]
-async-trait.workspace = true
 futures-util.workspace = true
 gim-base.workspace = true
 gim-common.workspace = true

@@ -9,7 +9,6 @@ mod error;
 mod hooks;
 mod task_handle;
 mod timeline;
-mod transport;
 mod types;
 
 pub use chat_list::{ChatListDiff, ChatListListener};
@@ -95,24 +94,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn opens_local_state_without_transport() {
+    async fn opens_local_state_without_network() {
         let hooks = hooks();
-        let client = create_client(config("https://gim.example.org"), hooks.clone())
+        // Nothing listens on the discard port.
+        let client = create_client(config("http://127.0.0.1:9"), hooks.clone())
             .await
             .unwrap();
         assert!(hooks.0.path().join("gim.sqlite3").is_file());
         assert_eq!(client.session().await, Ok(None));
         client.set_network_reachable(false);
 
-        // No HTTP transport yet: network calls are not implemented.
-        let id = || "x".to_string();
-        assert_eq!(
-            client.register(id(), id()).await,
-            Err(GimError::NotImplemented)
-        );
-        assert_eq!(client.start_sync().await, Err(GimError::NotImplemented));
-        assert_eq!(client.find_user(id()).await, Err(GimError::NotImplemented));
+        assert!(matches!(
+            client
+                .register("alice".to_string(), "Alice".to_string())
+                .await,
+            Err(GimError::Network { .. })
+        ));
         // Everything else needs a session.
+        let id = || "x".to_string();
+        assert_eq!(client.start_sync().await, Err(GimError::NotRegistered));
+        assert_eq!(client.find_user(id()).await, Err(GimError::NotRegistered));
         assert_eq!(
             client.send_text(id(), id(), None).await,
             Err(GimError::NotRegistered)

@@ -83,7 +83,7 @@ impl From<gim_sdk::TransportError> for GimError {
                 status: 409,
                 reason,
             },
-            E::Gone => Self::Server {
+            E::Gone { .. } => Self::Server {
                 status: 410,
                 reason,
             },
