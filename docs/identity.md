@@ -154,6 +154,10 @@ associated data).
   `p >= 1` before deriving, so a storage provider cannot downgrade the cost.
   The `test-params` cargo feature of `gim-identity` lowers the floor and
   exposes low-cost sealing for tests; production builds MUST NOT enable it.
+- Opening MUST reject parameters that exceed the ceiling `m_kib <= 262144`
+  (256 MiB), `t <= 16`, `p <= 8` in any field, before deriving, so a storage provider
+  cannot make a client spend unbounded memory or CPU. The `test-params`
+  feature does not change the ceiling.
 
 **Blob.**
 
@@ -181,7 +185,7 @@ Opening a blob with a recovery code for an expected `user_id`:
 1. The blob is deterministic CBOR, an array of six elements with version `1`.
 2. The blob's `user_id` equals the expected `user_id` (otherwise a
    user-mismatch error).
-3. The KDF parameters meet the floor.
+3. The KDF parameters are within the floor and the ceiling.
 4. AEAD decryption succeeds (otherwise a decryption error; a wrong code and a
    tampered blob are indistinguishable).
 5. The plaintext is a `Plaintext` with version `1`.

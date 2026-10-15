@@ -43,6 +43,8 @@ pub enum RecoveryError {
     UserMismatch,
     #[error("backup KDF parameters are below the minimum")]
     WeakParams,
+    #[error("backup KDF parameters exceed the maximum")]
+    ExcessiveParams,
     #[error(transparent)]
     Identity(#[from] IdentityError),
 }
@@ -146,6 +148,10 @@ impl KdfParams {
     #[cfg(feature = "test-params")]
     pub const FLOOR: Self = Self::new(64, 1, 1);
 
+    /// Maximum accepted when opening, so a hub cannot make a client spend
+    /// unbounded memory or CPU. Not affected by the `test-params` feature.
+    pub const CEILING: Self = Self::new(262144, 16, 8);
+
     /// Arbitrary parameters. Only for tests with low-cost sealing
     /// (`test-params` feature); production code seals with [`Self::DEFAULT`].
     pub const fn new(m_kib: u32, t: u32, p: u32) -> Self {
@@ -166,6 +172,10 @@ impl KdfParams {
 
     fn at_least(&self, floor: &Self) -> bool {
         self.m_kib >= floor.m_kib && self.t >= floor.t && self.p >= floor.p
+    }
+
+    fn at_most(&self, ceiling: &Self) -> bool {
+        self.m_kib <= ceiling.m_kib && self.t <= ceiling.t && self.p <= ceiling.p
     }
 
     fn derive_key(
@@ -292,6 +302,9 @@ pub fn open_root_key_backup(
     if !params.at_least(&KdfParams::FLOOR) {
         return Err(RecoveryError::WeakParams);
     }
+    if !params.at_most(&KdfParams::CEILING) {
+        return Err(RecoveryError::ExcessiveParams);
+    }
     let salt: [u8; SALT_LEN] = cbor::bytes_value(salt)?
         .try_into()
         .map_err(|_| decode_error("salt is not 16 bytes"))?;
@@ -346,6 +359,51 @@ mod tests {
             KdfParams::new(65536, 3, 0),
         ] {
             assert!(!weak.at_least(&floor), "{weak:?}");
+        }
+    }
+
+    #[test]
+    fn ceiling_bounds_each_field() {
+        let ceiling = KdfParams::CEILING;
+        assert_eq!(ceiling, KdfParams::new(262144, 16, 8));
+        assert!(KdfParams::DEFAULT.at_most(&ceiling));
+        assert!(ceiling.at_most(&ceiling));
+        for excessive in [
+            KdfParams::new(262145, 16, 8),
+            KdfParams::new(262144, 17, 8),
+            KdfParams::new(262144, 16, 9),
+        ] {
+            assert!(!excessive.at_most(&ceiling), "{excessive:?}");
+        }
+    }
+
+    /// A blob with the given parameters and a dummy ciphertext; the bounds
+    /// are checked before deriving, so Argon2 never runs at these costs.
+    fn blob_with(params: KdfParams, user_id: &str) -> Vec<u8> {
+        cbor::encode(&Value::Array(vec![
+            Value::Integer(FORMAT_VERSION.into()),
+            Value::Text(user_id.to_string()),
+            params.to_value(),
+            Value::Bytes(vec![0; SALT_LEN]),
+            Value::Bytes(vec![0; NONCE_LEN]),
+            Value::Bytes(vec![0; 52]),
+        ]))
+    }
+
+    #[test]
+    fn open_rejects_excessive_params_before_deriving() {
+        let user_id = RootKey::from_seed(&[0; 32]).public().user_id();
+        let code = RecoveryCode::from_bytes([0; RECOVERY_CODE_LEN]);
+        for excessive in [
+            KdfParams::new(262145, 16, 8),
+            KdfParams::new(262144, 17, 8),
+            KdfParams::new(262144, 16, 9),
+            KdfParams::new(u32::MAX, u32::MAX, u32::MAX),
+        ] {
+            assert!(matches!(
+                open_root_key_backup(&blob_with(excessive, user_id.as_str()), &code, &user_id),
+                Err(RecoveryError::ExcessiveParams)
+            ));
         }
     }
 
