@@ -240,6 +240,71 @@ pub struct MediaCacheEntry {
     pub last_access_ms: u64,
 }
 
+/// An own commit whose acceptance is not confirmed yet, or whose follow-up
+/// is not done yet. One per group; written in the transaction that creates
+/// the MLS pending commit, so a restarted client re-posts the same commit
+/// (same `client_id`) before any other work in the group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingCommit {
+    pub group_id: GroupId,
+    pub client_id: ClientId,
+    pub epoch: u64,
+    pub payload: Vec<u8>,
+    /// Accepted and merged; only `then` is left to do.
+    pub merged: bool,
+    pub then: AfterCommit,
+}
+
+/// What follows an accepted [`PendingCommit`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AfterCommit {
+    Nothing,
+    /// Post the Welcome of the added devices.
+    Welcome(PendingWelcome),
+    /// Drop the removed devices from the group's fan-out list.
+    RemoveFromFanOut(Vec<DeviceRef>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingWelcome {
+    pub client_id: ClientId,
+    pub epoch: u64,
+    pub payload: Vec<u8>,
+    pub recipients: Vec<DeviceRef>,
+}
+
+/// A device dropped from a group's fan-out list (a `member_removed` event)
+/// that may still be in the MLS tree and has to be removed by a commit.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DepartedMember {
+    pub group_id: GroupId,
+    pub device: DeviceRef,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MembershipChangeKind {
+    Added,
+    /// Removed by another member.
+    Removed,
+    /// Removed by themselves.
+    Left,
+}
+
+/// A user joining or leaving a chat, recorded when the MLS commit or
+/// Welcome that did it is applied. One per (group, seq, user).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MembershipEvent {
+    pub group_id: GroupId,
+    /// Seq of the commit or Welcome.
+    pub seq: u64,
+    /// The user who joined or left.
+    pub user_id: UserId,
+    /// The user whose commit (or Welcome) did it.
+    pub actor: UserId,
+    pub kind: MembershipChangeKind,
+    pub at_ms: u64,
+}
+
 /// User directory cache entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserInfo {
@@ -293,6 +358,7 @@ pub enum StateChange {
         group_id: GroupId,
         message_id: MessageId,
     },
+    MembershipChanged(MembershipEvent),
     /// Transient; never persisted.
     Typing {
         group_id: GroupId,

@@ -8,6 +8,10 @@ use crate::SecretStorageError;
 pub enum ClientError {
     #[error("not logged in")]
     NotLoggedIn,
+    /// The server rejected the device's token: the device must register
+    /// again.
+    #[error("device is not registered")]
+    NotRegistered,
     #[error("already logged in")]
     AlreadyLoggedIn,
     #[error("invalid stored session: {0}")]

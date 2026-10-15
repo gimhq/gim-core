@@ -11,7 +11,7 @@ mod error;
 use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -23,9 +23,10 @@ use reqwest::{Body, Method, RequestBuilder, Response, StatusCode};
 use serde::de::DeserializeOwned;
 use tokio_util::io::ReaderStream;
 
+use crate::stream::ws;
 use crate::transport::{
-    AccessToken, EventBatch, GroupInfo, OutgoingMessage, PostError, Registration, Transport,
-    TransportError, TransportResult,
+    AccessToken, EventBatch, EventStream, GroupInfo, OutgoingMessage, PostError, Registration,
+    Transport, TransportError, TransportResult,
 };
 
 pub use reqwest::Url;
@@ -51,16 +52,19 @@ impl Default for HttpConfig {
     }
 }
 
-/// HTTP [`Transport`] for one gim-server.
-#[derive(Debug)]
+/// HTTP [`Transport`] for one gim-server, with the `/v1/stream` WebSocket
+/// as its live event stream. Clones share the connection pool and the
+/// device directory.
+#[derive(Debug, Clone)]
 pub struct HttpTransport {
     client: reqwest::Client,
     /// Without a trailing `/`; route paths start with one.
     base_url: String,
+    connect_timeout: Duration,
     request_timeout: Duration,
     /// Users of the devices seen in responses. Membership events carry
     /// device ids only; this resolves them to [`DeviceRef`]s.
-    directory: Mutex<HashMap<DeviceId, UserId>>,
+    directory: Arc<Mutex<HashMap<DeviceId, UserId>>>,
 }
 
 impl HttpTransport {
@@ -77,8 +81,9 @@ impl HttpTransport {
         Ok(Self {
             client,
             base_url: base_url.as_str().trim_end_matches('/').to_string(),
+            connect_timeout: config.connect_timeout,
             request_timeout: config.request_timeout,
-            directory: Mutex::default(),
+            directory: Arc::default(),
         })
     }
 
@@ -193,6 +198,45 @@ impl HttpTransport {
         Ok(())
     }
 
+    /// Maps stream events onto [`IncomingEvent`]s, resolving the devices of
+    /// membership events; unknown event types are skipped.
+    pub(crate) async fn convert_events(
+        &self,
+        token: &AccessToken,
+        events: Vec<dto::Event>,
+    ) -> TransportResult<Vec<IncomingEvent>> {
+        self.remember(
+            &events
+                .iter()
+                .filter_map(|event| match &event.data {
+                    EventData::Message(m) => Some(DeviceRef::new(
+                        m.sender_user_id.clone(),
+                        m.sender_device_id.clone(),
+                    )),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+        );
+        self.resolve_members(token, &events).await?;
+        Ok(events
+            .into_iter()
+            .flat_map(|event| match event.data {
+                EventData::Message(m) => vec![IncomingEvent::Message(convert::message(m))],
+                EventData::MemberAdded(change) => self.membership(change, |group_id, device| {
+                    IncomingEvent::MemberAdded { group_id, device }
+                }),
+                EventData::MemberRemoved(change) => self.membership(change, |group_id, device| {
+                    IncomingEvent::MemberRemoved { group_id, device }
+                }),
+                EventData::KeyPackagesLow(_) => vec![IncomingEvent::KeyPackagesLow],
+                EventData::Unknown { event_type, .. } => {
+                    tracing::debug!(%event_type, cursor = event.cursor, "skipping unknown event");
+                    vec![]
+                }
+            })
+            .collect())
+    }
+
     fn membership(
         &self,
         change: dto::MembershipChange,
@@ -245,6 +289,23 @@ impl Transport for HttpTransport {
         let request = self
             .api(Method::GET, paths::USERS, Some(token))
             .query(&query);
+        match Self::json::<dto::User>(request).await {
+            Ok(user) => Ok(Some(UserInfo {
+                user_id: user.user_id,
+                handle: user.handle,
+                display_name: user.display_name,
+            })),
+            Err(TransportError::NotFound(_)) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn user(
+        &self,
+        token: &AccessToken,
+        user_id: &UserId,
+    ) -> TransportResult<Option<UserInfo>> {
+        let request = self.api(Method::GET, &paths::user(user_id), Some(token));
         match Self::json::<dto::User>(request).await {
             Ok(user) => Ok(Some(UserInfo {
                 user_id: user.user_id,
@@ -432,42 +493,25 @@ impl Transport for HttpTransport {
                 .query(&query),
         )
         .await?;
-        self.remember(
-            &list
-                .events
-                .iter()
-                .filter_map(|event| match &event.data {
-                    EventData::Message(m) => Some(DeviceRef::new(
-                        m.sender_user_id.clone(),
-                        m.sender_device_id.clone(),
-                    )),
-                    _ => None,
-                })
-                .collect::<Vec<_>>(),
-        );
-        self.resolve_members(token, &list.events).await?;
-        let events = list
-            .events
-            .into_iter()
-            .flat_map(|event| match event.data {
-                EventData::Message(m) => vec![IncomingEvent::Message(convert::message(m))],
-                EventData::MemberAdded(change) => self.membership(change, |group_id, device| {
-                    IncomingEvent::MemberAdded { group_id, device }
-                }),
-                EventData::MemberRemoved(change) => self.membership(change, |group_id, device| {
-                    IncomingEvent::MemberRemoved { group_id, device }
-                }),
-                EventData::KeyPackagesLow(_) => vec![IncomingEvent::KeyPackagesLow],
-                EventData::Unknown { event_type, .. } => {
-                    tracing::debug!(%event_type, cursor = event.cursor, "skipping unknown event");
-                    vec![]
-                }
-            })
-            .collect();
         Ok(EventBatch {
-            events,
+            events: self.convert_events(token, list.events).await?,
             next_cursor: list.next_cursor,
         })
+    }
+
+    async fn open_stream(
+        &self,
+        token: &AccessToken,
+        cursor: Option<u64>,
+    ) -> TransportResult<Option<Box<dyn EventStream>>> {
+        let url = ws::stream_url(&self.base_url, cursor)?;
+        let timeout = self.connect_timeout + self.request_timeout;
+        let stream = ws::WsEventStream::connect(self.clone(), token.clone(), url, timeout).await?;
+        Ok(stream.map(|s| Box::new(s) as Box<dyn EventStream>))
+    }
+
+    fn seed_device_directory(&self, devices: &[DeviceRef]) {
+        self.remember(devices);
     }
 
     async fn group_messages(

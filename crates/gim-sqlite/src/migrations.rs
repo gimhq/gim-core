@@ -8,6 +8,8 @@ use rusqlite::{Connection, TransactionBehavior};
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_state.sql"),
     include_str!("../migrations/0002_crypto.sql"),
+    include_str!("../migrations/0003_commits.sql"),
+    include_str!("../migrations/0004_membership.sql"),
 ];
 
 /// Schema version written by this build.
@@ -91,6 +93,60 @@ mod tests {
             )
             .unwrap();
         assert_eq!(updated, 7);
+    }
+
+    #[test]
+    fn migrates_from_v2_keeping_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_to(&mut conn, 2).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), 2);
+        assert!(!tables(&conn).iter().any(|t| t == "pending_commits"));
+        conn.execute("INSERT INTO crypto_groups (group_id) VALUES ('crew')", [])
+            .unwrap();
+
+        migrate(&mut conn).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), SCHEMA_VERSION);
+        let tables = tables(&conn);
+        for table in ["pending_commits", "departed_members"] {
+            assert!(tables.iter().any(|t| t == table), "{table} in {tables:?}");
+        }
+        let groups: u64 = conn
+            .query_row("SELECT COUNT(*) FROM crypto_groups", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(groups, 1);
+    }
+
+    #[test]
+    fn migrates_from_v3_keeping_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_to(&mut conn, 3).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), 3);
+        assert!(!tables(&conn).iter().any(|t| t == "membership_events"));
+        conn.execute(
+            "INSERT INTO pending_commits (group_id, data) VALUES ('crew', x'00')",
+            [],
+        )
+        .unwrap();
+
+        migrate(&mut conn).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), 4);
+        assert!(tables(&conn).iter().any(|t| t == "membership_events"));
+        let commits: u64 = conn
+            .query_row("SELECT COUNT(*) FROM pending_commits", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(commits, 1);
+        conn.execute(
+            "INSERT INTO membership_events (group_id, seq, user_id, actor, kind, at_ms) \
+             VALUES ('crew', 2, 'bob', 'alice', 'added', 7)",
+            [],
+        )
+        .unwrap();
+        let bad_kind = conn.execute(
+            "INSERT INTO membership_events (group_id, seq, user_id, actor, kind, at_ms) \
+             VALUES ('crew', 3, 'bob', 'alice', 'joined', 7)",
+            [],
+        );
+        assert!(bad_kind.is_err());
     }
 
     #[test]

@@ -157,6 +157,14 @@ pub enum SendState {
 
 type StoreResult<T> = Result<T, StoreError>;
 
+pub(crate) fn membership_change_kind(kind: model::MembershipChangeKind) -> MembershipChangeKind {
+    match kind {
+        model::MembershipChangeKind::Added => MembershipChangeKind::Added,
+        model::MembershipChangeKind::Removed => MembershipChangeKind::Removed,
+        model::MembershipChangeKind::Left => MembershipChangeKind::Left,
+    }
+}
+
 /// Profile from the user directory, else the chat member list, else the
 /// bare user id.
 pub(crate) fn profile<R: StateReader + ?Sized>(

@@ -11,21 +11,43 @@ use eyeball_im::{ObservableVector, Vector, VectorDiff};
 pub(crate) fn update<T, K>(vector: &mut ObservableVector<T>, new: &[T], key: impl Fn(&T) -> K)
 where
     T: Clone + PartialEq + 'static,
-    K: Eq + Hash,
+    K: Clone + Eq + Hash,
 {
+    let old_keys: Vec<K> = vector.iter().map(&key).collect();
+    let new_keys: Vec<K> = new.iter().map(&key).collect();
+    update_keyed(vector, old_keys, new, &new_keys);
+}
+
+/// [`update`] with the keys given alongside the items, for items that do
+/// not carry their key: `old_keys` are the keys of `vector`'s items and
+/// `new_keys` those of `new`.
+pub(crate) fn update_keyed<T, K>(
+    vector: &mut ObservableVector<T>,
+    old_keys: Vec<K>,
+    new: &[T],
+    new_keys: &[K],
+) where
+    T: Clone + PartialEq + 'static,
+    K: Clone + Eq + Hash,
+{
+    debug_assert_eq!(vector.len(), old_keys.len());
+    debug_assert_eq!(new.len(), new_keys.len());
     let mut tx = vector.transaction();
-    let new_index: HashMap<K, usize> = new.iter().enumerate().map(|(i, v)| (key(v), i)).collect();
+    // The keys of `tx`'s items, kept in step with it.
+    let mut keys = old_keys;
+    let new_index: HashMap<&K, usize> = new_keys.iter().enumerate().map(|(i, k)| (k, i)).collect();
     for i in (0..tx.len()).rev() {
-        if !new_index.contains_key(&key(&tx[i])) {
+        if !new_index.contains_key(&keys[i]) {
             tx.remove(i);
+            keys.remove(i);
         }
     }
     // Every remaining item is in `new`; positions before `i` are final.
     let mut i = 0;
     while i < new.len() {
-        let wanted = key(&new[i]);
+        let wanted = &new_keys[i];
         if i < tx.len() {
-            if key(&tx[i]) == wanted {
+            if &keys[i] == wanted {
                 if tx[i] != new[i] {
                     tx.set(i, new[i].clone());
                 }
@@ -34,23 +56,26 @@ where
             }
             // Either the item at `i` moved down or the wanted one moved up;
             // move the one that travels further (on a tie, the wanted one).
-            let down = new_index[&key(&tx[i])] - i;
+            let down = new_index[&keys[i]] - i;
             let up = (i + 1..tx.len())
-                .find(|&j| key(&tx[j]) == wanted)
+                .find(|&j| &keys[j] == wanted)
                 .map(|j| (j, j - i));
             match up {
                 Some((_, up)) if down > up => {
                     // Inserted again when its new position is reached.
                     tx.remove(i);
+                    keys.remove(i);
                     continue;
                 }
                 Some((j, _)) => {
                     tx.remove(j);
+                    keys.remove(j);
                 }
                 None => {}
             }
         }
         tx.insert(i, new[i].clone());
+        keys.insert(i, wanted.clone());
         i += 1;
     }
     debug_assert_eq!(tx.len(), new.len());

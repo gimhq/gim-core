@@ -106,6 +106,16 @@ pub enum PostError {
 
 pub type TransportResult<T> = Result<T, TransportError>;
 
+/// A live event stream opened by [`Transport::open_stream`].
+#[async_trait]
+pub trait EventStream: Send {
+    /// The next events, in cursor order; `next_cursor` is the cursor of the
+    /// last one. [`TransportError::Gone`] if the stream's cursor expired,
+    /// [`TransportError::Unauthorized`] if the token was rejected; any
+    /// error ends the stream.
+    async fn next(&mut self) -> TransportResult<EventBatch>;
+}
+
 #[async_trait]
 pub trait Transport: Send + Sync {
     /// Registers a new device; a known handle gets another device of the
@@ -120,6 +130,13 @@ pub trait Transport: Send + Sync {
         &self,
         token: &AccessToken,
         handle: &str,
+    ) -> TransportResult<Option<UserInfo>>;
+
+    /// Looks a user up by id; `None` if there is no such user.
+    async fn user(
+        &self,
+        token: &AccessToken,
+        user_id: &UserId,
     ) -> TransportResult<Option<UserInfo>>;
 
     async fn list_devices(
@@ -189,6 +206,22 @@ pub trait Transport: Send + Sync {
         cursor: Option<u64>,
         wait: Duration,
     ) -> TransportResult<EventBatch>;
+
+    /// Opens the live event stream after `cursor`: it replays the pending
+    /// events, then pushes new ones. `Ok(None)` if the transport or server
+    /// has no live stream; the caller long-polls
+    /// [`Transport::fetch_events`] instead.
+    async fn open_stream(
+        &self,
+        _token: &AccessToken,
+        _cursor: Option<u64>,
+    ) -> TransportResult<Option<Box<dyn EventStream>>> {
+        Ok(None)
+    }
+
+    /// Makes `devices` known for resolving the device ids of membership
+    /// events, e.g. the members of stored chats after a restart.
+    fn seed_device_directory(&self, _devices: &[DeviceRef]) {}
 
     /// Up to `limit` messages of the group with `seq > after_seq`, ascending.
     async fn group_messages(

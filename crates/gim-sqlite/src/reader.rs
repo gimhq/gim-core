@@ -4,13 +4,14 @@
 use std::collections::BTreeSet;
 
 use gim_base::model::{
-    Chat, GroupCursor, GroupMessage, MediaCacheEntry, Message, OutboxEntry, OutboxState, UserInfo,
+    Chat, DepartedMember, GroupCursor, GroupMessage, MediaCacheEntry, MembershipChangeKind,
+    MembershipEvent, Message, OutboxEntry, OutboxState, PendingCommit, UserInfo,
 };
 use gim_base::{StateReader, StoreError};
-use gim_common::{GroupId, MessageId, UserId};
+use gim_common::{DeviceRef, GroupId, MessageId, UserId};
 use rusqlite::{params, Connection, Params, Row};
 
-use crate::rows::{decode, ChatData, MessageData, OutboxData, ParkedData};
+use crate::rows::{decode, ChatData, MessageData, OutboxData, ParkedData, PendingCommitData};
 
 type StoreResult<T> = Result<T, StoreError>;
 
@@ -30,6 +31,29 @@ fn sql_limit(value: usize) -> i64 {
 
 pub(crate) fn sql_err(err: rusqlite::Error) -> StoreError {
     StoreError::new(err)
+}
+
+pub(crate) fn membership_kind_str(kind: MembershipChangeKind) -> &'static str {
+    match kind {
+        MembershipChangeKind::Added => "added",
+        MembershipChangeKind::Removed => "removed",
+        MembershipChangeKind::Left => "left",
+    }
+}
+
+fn membership_kind(value: &str) -> StoreResult<MembershipChangeKind> {
+    match value {
+        "added" => Ok(MembershipChangeKind::Added),
+        "removed" => Ok(MembershipChangeKind::Removed),
+        "left" => Ok(MembershipChangeKind::Left),
+        other => Err(StoreError::new(format!(
+            "unknown membership kind '{other}'"
+        ))),
+    }
+}
+
+fn user_id(value: String) -> StoreResult<UserId> {
+    UserId::new(value).map_err(StoreError::new)
 }
 
 pub(crate) fn outbox_state_str(state: OutboxState) -> &'static str {
@@ -134,6 +158,17 @@ impl Reader<'_> {
                 prepared: data.prepared.map(Into::into),
                 created_at_ms: get(row, 4)?,
             })
+        })
+    }
+
+    fn pending_commits_where(
+        &self,
+        sql: &str,
+        params: impl Params,
+    ) -> StoreResult<Vec<PendingCommit>> {
+        self.query(sql, params, |row| {
+            let data: PendingCommitData = decode(&get::<Vec<u8>>(row, 1)?)?;
+            Ok(data.into_model(group_id(get(row, 0)?)?))
         })
     }
 
@@ -313,6 +348,55 @@ impl StateReader for Reader<'_> {
                     user_id: UserId::new(get::<String>(row, 0)?).map_err(StoreError::new)?,
                     handle: get(row, 1)?,
                     display_name: get(row, 2)?,
+                })
+            },
+        )
+    }
+
+    fn pending_commit(&self, group_id: &GroupId) -> StoreResult<Option<PendingCommit>> {
+        Ok(self
+            .pending_commits_where(
+                "SELECT group_id, data FROM pending_commits WHERE group_id = ?1",
+                [group_id.as_str()],
+            )?
+            .pop())
+    }
+
+    fn pending_commits(&self) -> StoreResult<Vec<PendingCommit>> {
+        self.pending_commits_where(
+            "SELECT group_id, data FROM pending_commits ORDER BY group_id",
+            [],
+        )
+    }
+
+    fn departed_members(&self) -> StoreResult<Vec<DepartedMember>> {
+        self.query(
+            "SELECT group_id, user_id, device_id FROM departed_members \
+             ORDER BY group_id, user_id, device_id",
+            [],
+            |row| {
+                Ok(DepartedMember {
+                    group_id: group_id(get(row, 0)?)?,
+                    device: DeviceRef::parse(&get::<String>(row, 1)?, &get::<String>(row, 2)?)
+                        .map_err(StoreError::new)?,
+                })
+            },
+        )
+    }
+
+    fn membership_events(&self, group_id: &GroupId) -> StoreResult<Vec<MembershipEvent>> {
+        self.query(
+            "SELECT group_id, seq, user_id, actor, kind, at_ms FROM membership_events \
+             WHERE group_id = ?1 ORDER BY seq, user_id",
+            [group_id.as_str()],
+            |row| {
+                Ok(MembershipEvent {
+                    group_id: self::group_id(get(row, 0)?)?,
+                    seq: get(row, 1)?,
+                    user_id: user_id(get(row, 2)?)?,
+                    actor: user_id(get(row, 3)?)?,
+                    kind: membership_kind(&get::<String>(row, 4)?)?,
+                    at_ms: get(row, 5)?,
                 })
             },
         )
