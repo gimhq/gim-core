@@ -219,7 +219,8 @@ impl Device {
             Arc::new(MemorySecretStorage::new()) as Arc<dyn SecretStorage>,
         )
         .data_dir(data_dir.path())
-        .build();
+        .build()
+        .unwrap();
         client.register(handle, handle).await.unwrap();
         Self {
             client,

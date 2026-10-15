@@ -9,13 +9,25 @@ publish.workspace = true
 name = "gim_core"
 crate-type = ["lib", "cdylib", "staticlib"]
 
+[features]
+# Exposes `create_client_with_fake_transport` (Rust only, not exported over
+# FFI) over gim-sdk's `FakeTransport`.
+testing = ["gim-sdk/testing"]
+
 [dependencies]
+futures-util.workspace = true
+gim-base.workspace = true
 gim-common.workspace = true
 gim-crypto.workspace = true
+gim-sdk.workspace = true
+gim-sqlite.workspace = true
+gim-ui.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "time"] }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 uniffi = { workspace = true, features = ["tokio"] }
 url.workspace = true
 
 [dev-dependencies]
+gim-ffi = { path = ".", features = ["testing"] }
+tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

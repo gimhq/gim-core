@@ -161,6 +161,13 @@ async fn interrupted_download_resumes_from_the_partial_file() {
     ));
     assert!(!dest.exists());
     assert_eq!(leftovers(&bob).len(), 1);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let part = bob.data_dir.path().join("tmp").join(&leftovers(&bob)[0]);
+        let mode = fs::metadata(part).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
 
     *transport.faults.downloads_left.lock().unwrap() = None;
     bob.client.fetch_media(&g, &id, &dest).await.unwrap();

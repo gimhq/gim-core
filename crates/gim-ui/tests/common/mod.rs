@@ -12,23 +12,32 @@ use gim_proto::envelope::Content;
 use gim_sdk::testing::{FakeTransport, MemorySecretStorage};
 use gim_sdk::{Client, ClientBuilder, SecretStorage};
 use gim_ui::{Vector, VectorDiff};
+use tempfile::TempDir;
 
 pub struct Device {
     pub client: Client<MemoryStore>,
     pub store: Arc<MemoryStore>,
+    pub data_dir: TempDir,
 }
 
 impl Device {
     pub async fn register(transport: &FakeTransport, handle: &str, display_name: &str) -> Self {
         let store = Arc::new(MemoryStore::new());
+        let data_dir = tempfile::tempdir().unwrap();
         let client = ClientBuilder::new(
             store.clone(),
             Arc::new(transport.clone()),
             Arc::new(MemorySecretStorage::new()) as Arc<dyn SecretStorage>,
         )
-        .build();
+        .data_dir(data_dir.path())
+        .build()
+        .unwrap();
         client.register(handle, display_name).await.unwrap();
-        Self { client, store }
+        Self {
+            client,
+            store,
+            data_dir,
+        }
     }
 
     pub fn device(&self) -> DeviceRef {
