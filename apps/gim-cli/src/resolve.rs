@@ -80,6 +80,11 @@ pub fn find_direct<'a>(chats: &'a [Chat], me: &UserId, user: &UserId) -> Option<
     })
 }
 
+/// A `<handle>` argument that is a user id.
+fn user_id_arg(arg: &str) -> Option<UserId> {
+    gim_identity::parse_user_id(arg).ok()
+}
+
 /// `<chat>`: an exact group id; else the unique chat with that name; else
 /// the joined direct chat with the user of that handle (leading `@`
 /// optional). `None` when no chat matches; ambiguous is an error.
@@ -137,18 +142,25 @@ impl Ctx {
         self.store().message(&id)?.ok_or_else(unknown)
     }
 
-    pub async fn resolve_user(&self, handle: &str) -> Result<UserInfo> {
+    /// `<handle>`: a handle of the own hub's directory (leading `@`
+    /// optional), or a user id (handles are per hub, so users of other
+    /// hubs are named by id).
+    pub async fn resolve_user(&self, handle: &str) -> Result<UserId> {
+        if let Some(user_id) = user_id_arg(handle) {
+            return Ok(user_id);
+        }
         let handle = handle.strip_prefix('@').unwrap_or(handle);
         self.client
             .find_user(handle)
             .await?
+            .map(|user| user.user_id)
             .ok_or_else(|| CliError::not_found(format!("unknown user @{handle}")))
     }
 
     pub async fn resolve_users(&self, handles: &[String]) -> Result<Vec<UserId>> {
         let mut users = Vec::with_capacity(handles.len());
         for handle in handles {
-            users.push(self.resolve_user(handle).await?.user_id);
+            users.push(self.resolve_user(handle).await?);
         }
         Ok(users)
     }
@@ -221,6 +233,15 @@ mod tests {
         // A chat name beats a peer handle.
         assert_eq!(resolve("bob").unwrap(), "g-named");
         assert_eq!(resolve("@bob").unwrap(), "g-bob");
+    }
+
+    #[test]
+    fn user_ids_are_accepted_for_handles() {
+        let root = gim_identity::RootKey::generate().unwrap();
+        let user_id = root.public().user_id();
+        assert_eq!(user_id_arg(user_id.as_str()), Some(user_id));
+        assert_eq!(user_id_arg("bob"), None);
+        assert_eq!(user_id_arg("@bob"), None);
     }
 
     #[test]
