@@ -48,7 +48,9 @@ fn leftovers(device: &Device) -> Vec<String> {
     }
 }
 
-async fn chat_with_image(transport: &FlakyTransport) -> (Device, Device, GroupId, MessageId, Vec<u8>) {
+async fn chat_with_image(
+    transport: &FlakyTransport,
+) -> (Device, Device, GroupId, MessageId, Vec<u8>) {
     let alice = Device::register(transport, "alice").await;
     let bob = Device::register(transport, "bob").await;
     let g = alice

@@ -153,7 +153,8 @@ impl<S: StateStore + 'static> Client<S> {
             // Not expected for application messages; the next attempt
             // re-encrypts at the then current epoch.
             Err(err @ PostError::EpochConflict { .. }) => {
-                self.record_failure(&base, &id, ClientError::from(err)).await
+                self.record_failure(&base, &id, ClientError::from(err))
+                    .await
             }
         }
     }

@@ -467,15 +467,20 @@ impl<S: StateStore + 'static> Client<S> {
                                 client_id: new_client_id()?,
                                 epoch: output.epoch + 1,
                                 kind: MessageKind::Welcome,
-                                payload: output.welcome.clone().expect("an add commit has a Welcome"),
+                                payload: output
+                                    .welcome
+                                    .clone()
+                                    .expect("an add commit has a Welcome"),
                                 recipients,
                             });
                             Ok(Some((output, then)))
                         }
                         CommitOp::Remove { devices, fan_out } => {
                             let members = engine.group_members(&*txn, &gid)?;
-                            let devices: Vec<DeviceRef> =
-                                devices.into_iter().filter(|d| members.contains(d)).collect();
+                            let devices: Vec<DeviceRef> = devices
+                                .into_iter()
+                                .filter(|d| members.contains(d))
+                                .collect();
                             if devices.is_empty() {
                                 return Ok(None);
                             }
@@ -546,9 +551,7 @@ impl<S: StateStore + 'static> Client<S> {
                         pending.merged = true;
                     }
                 }
-                Err(PostError::Transport(err)) if outcome_unknown(&err) => {
-                    return Err(err.into())
-                }
+                Err(PostError::Transport(err)) if outcome_unknown(&err) => return Err(err.into()),
                 Err(err) => {
                     let gid = group_id.clone();
                     self.run(move |store, engine| {
@@ -625,7 +628,9 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     pub(crate) async fn settle_commit(&self, session: &Session, group_id: &GroupId) -> Result<()> {
-        self.resolve_pending_commit(session, group_id).await.map(drop)
+        self.resolve_pending_commit(session, group_id)
+            .await
+            .map(drop)
     }
 
     pub(crate) fn has_pending_commit(&self, group_id: &GroupId) -> bool {

@@ -134,7 +134,8 @@ impl<S: StateStore + 'static> Client<S> {
             fs::create_dir_all(part.parent().expect("temp files have a parent"))?;
             let mut header = Vec::new();
             if let Ok(file) = File::open(&part) {
-                file.take(MEDIA_HEADER_LEN as u64).read_to_end(&mut header)?;
+                file.take(MEDIA_HEADER_LEN as u64)
+                    .read_to_end(&mut header)?;
             }
             if header.len() < MEDIA_HEADER_LEN {
                 File::create(&part)?;
@@ -254,10 +255,13 @@ fn image_dimensions(path: &Path) -> std::io::Result<Option<(u32, u32)>> {
     let be = |i: usize| u32::from_be_bytes(header[i..i + 4].try_into().expect("4 bytes"));
     let le16 = |i: usize| u32::from(u16::from_le_bytes([header[i], header[i + 1]]));
     Ok(
-        if header.len() >= 24 && header.starts_with(b"\x89PNG\r\n\x1a\n") && &header[12..16] == b"IHDR"
+        if header.len() >= 24
+            && header.starts_with(b"\x89PNG\r\n\x1a\n")
+            && &header[12..16] == b"IHDR"
         {
             Some((be(16), be(20)))
-        } else if header.len() >= 10 && (header.starts_with(b"GIF87a") || header.starts_with(b"GIF89a"))
+        } else if header.len() >= 10
+            && (header.starts_with(b"GIF87a") || header.starts_with(b"GIF89a"))
         {
             Some((le16(6), le16(8)))
         } else {

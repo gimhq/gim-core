@@ -150,11 +150,9 @@ async fn failed_entry_blocks_nothing_and_can_be_retried_or_cancelled() {
         .await
         .unwrap();
 
-    transport.faults.fail_posts(
-        MessageKind::Application,
-        false,
-        MAX_SEND_ATTEMPTS as usize,
-    );
+    transport
+        .faults
+        .fail_posts(MessageKind::Application, false, MAX_SEND_ATTEMPTS as usize);
     let first = alice.client.send_text(&g, "first", None).await.unwrap();
     // Strict per-chat order: the second waits behind the first.
     let second = alice.client.send_text(&g, "second", None).await.unwrap();

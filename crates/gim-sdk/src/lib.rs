@@ -28,6 +28,6 @@ pub use client::{
 pub use error::{ClientError, Result};
 pub use media::DOWNLOAD_PIECE;
 pub use outbox::OutboxSender;
-pub use send::TYPING_INTERVAL;
 pub use secrets::{SecretStorage, SecretStorageError};
+pub use send::TYPING_INTERVAL;
 pub use transport::{Transport, TransportError};
