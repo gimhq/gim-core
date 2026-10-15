@@ -82,7 +82,10 @@ bash scripts/generate-swift.sh      # Linux or macOS: out/swift (Swift sources, 
 bash scripts/build-xcframework.sh   # macOS + Xcode: out/ios/GIMCore.xcframework{,.zip,.zip.sha256}
 ```
 
-See `bindings/apple/README.md` for the output layout. `out/` is never committed.
+The xcframework holds arm64 device and arm64 simulator slices only (no Intel-Mac
+simulator), built with the size-tuned `release-apple` profile and stripped, so
+the zip stays below 50 MB. See `bindings/apple/README.md` for the output layout
+and size notes. `out/` is never committed.
 
 ## CI
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Builds GIMCore.xcframework (device + simulator static libraries) and the
-# matching Swift sources. macOS only (needs Xcode).
+# Builds GIMCore.xcframework (arm64 device + arm64 simulator static libraries)
+# and the matching Swift sources. macOS only (needs Xcode).
 #
 #   bindings/apple/build-xcframework.sh
 #
@@ -23,27 +23,35 @@ cd "$repo"
 export IPHONEOS_DEPLOYMENT_TARGET=18.0
 
 device_target=aarch64-apple-ios
-sim_targets=(aarch64-apple-ios-sim x86_64-apple-ios)
+# Apple-silicon simulators only; Intel-Mac simulators (x86_64-apple-ios) are
+# not supported.
+sim_target=aarch64-apple-ios-sim
+profile=release-apple
 out=out/ios
 lib_name=libgim_core.a
 
-rustup target add "$device_target" "${sim_targets[@]}"
+rustup target add "$device_target" "$sim_target"
 
-for target in "$device_target" "${sim_targets[@]}"; do
-    cargo build -p gim-ffi --release --target "$target"
+# `--crate-type staticlib` alone: with gim-ffi's "lib" crate type in the same
+# build the archive also bundles every dependency's rlib objects (and their
+# embedded bitcode) next to the LTO output, which multiplies its size.
+for target in "$device_target" "$sim_target"; do
+    cargo rustc -p gim-ffi --lib --crate-type staticlib --profile "$profile" --target "$target"
 done
 
-device_lib=target/$device_target/release/$lib_name
-sim_dir=target/ios-simulator-universal/release
-sim_lib=$sim_dir/$lib_name
-mkdir -p "$sim_dir"
-sim_inputs=()
-for target in "${sim_targets[@]}"; do
-    sim_inputs+=("target/$target/release/$lib_name")
-done
-lipo -create "${sim_inputs[@]}" -output "$sim_lib"
+device_lib=target/$device_target/$profile/$lib_name
+sim_lib=target/$sim_target/$profile/$lib_name
 
 GIM_CORE_LIB=$device_lib bash bindings/apple/generate-swift.sh
+
+# Debug and local symbols only; the exported UniFFI symbols must survive.
+for lib in "$device_lib" "$sim_lib"; do
+    strip -S -x "$lib"
+    if ! nm -gU "$lib" | grep -c ' _uniffi_gim_core_fn_' >/dev/null; then
+        echo "error: $lib lost its uniffi_gim_core_fn_* exports after strip" >&2
+        exit 1
+    fi
+done
 
 rm -rf "$out"
 mkdir -p "$out/Sources/GIMCore"
@@ -61,3 +69,7 @@ cp out/swift/GIM_CORE_VERSION "$out/GIM_CORE_VERSION"
 
 echo "GIMCore.xcframework $(cat "$out/GIM_CORE_VERSION") written to $out"
 echo "checksum: $(cat "$out/GIMCore.xcframework.zip.sha256")"
+for lib in "$device_lib" "$sim_lib"; do
+    echo "$lib: $(wc -c < "$lib" | tr -d ' ') bytes"
+done
+echo "$out/GIMCore.xcframework.zip: $(wc -c < "$out/GIMCore.xcframework.zip" | tr -d ' ') bytes"
