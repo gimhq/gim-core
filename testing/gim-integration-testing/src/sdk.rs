@@ -37,8 +37,9 @@ pub struct Faults {
     pub expire_cursor: AtomicBool,
     /// Every commit result the hub returned, in order.
     pub commit_results: Mutex<Vec<CommitAccepted>>,
-    /// Every application message `seq` the hub returned, in order.
-    pub message_seqs: Mutex<Vec<u64>>,
+    /// Every application message post the hub accepted: its `client_id`
+    /// and the `seq` the hub returned, in order.
+    pub message_posts: Mutex<Vec<(ClientId, u64)>>,
 }
 
 fn lost_reply() -> TransportError {
@@ -205,9 +206,13 @@ impl Transport for FaultyHub {
     ) -> Result<u64, PostError> {
         let seq = self
             .inner
-            .post_message(t, g, client_id, mls_message)
+            .post_message(t, g, client_id.clone(), mls_message)
             .await?;
-        self.faults.message_seqs.lock().unwrap().push(seq);
+        self.faults
+            .message_posts
+            .lock()
+            .unwrap()
+            .push((client_id, seq));
         if self.faults.lose_message_reply.swap(false, Ordering::SeqCst) {
             return Err(lost_reply().into());
         }

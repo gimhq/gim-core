@@ -22,7 +22,7 @@ point downwards only
 | `bindings/android`, `bindings/apple` | packaging scripts |
 | `uniffi-bindgen` | `uniffi-bindgen` binary used by the packaging scripts |
 | `testing/gim-test` | fixtures and `FakeDeliveryService` (in-memory gim-server delivery) |
-| `testing/gim-integration-testing` | tests against a real gim-server container (skeleton) |
+| `testing/gim-integration-testing` | tests against a real gim-hub container (`scripts/integration-test.sh`) |
 
 MLS ciphersuite: `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`, pure-Rust
 crypto (RustCrypto provider), no C toolchain needed.
@@ -38,10 +38,44 @@ docker run --rm --label ai-agent=true -v "$PWD:$PWD" -w "$PWD" \
   sh -c 'rustup component add rustfmt clippy && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test'
 ```
 
+## Integration tests
+
+`scripts/integration-test.sh` builds gim-hub from `GIM_HUB_SRC` (default
+`/srv/gimhq/im-client/hub`) at `GIM_HUB_REV` (default `e11ad00`, exported with
+`git archive`, so local changes in the checkout are ignored) as
+`ai-agent/gim-hub`, runs it on the `traefik` network, waits for `/healthz`,
+prints the hub commit and runs `testing/gim-integration-testing` in a `rust:1`
+container against it. The hub is stopped on exit. Extra arguments filter the
+tests:
+
+```sh
+scripts/integration-test.sh                    # everything
+GIM_HUB_BUILD=0 scripts/integration-test.sh link   # reuse the image, one test
+```
+
+The tests are `#[ignore]`d and skip without `GIM_HUB_URL`, so `cargo test`
+stays offline. Scenarios, several clients in one process:
+
+- `tests/scenario.rs`, gim-ffi clients: identity creation, handle claim and
+  sign-in after restart; direct chat (receipts, typing, reply, edit,
+  reaction, delete, reconnect, restart); file and image (blob) send and fetch;
+  group add, remove and leave; linking a second device with the SAS, which
+  then reads and writes in an existing chat, and revoking it (its credential
+  is rejected); restoring from the recovery code.
+- `tests/faults.rs`, gim-sdk clients over the hub's HTTP API with faults
+  injected at the transport (`src/sdk.rs`): a lost reply to an accepted
+  Commit and to an application message (the re-post gets the hub's
+  idempotent result); two devices committing from the same epoch (409
+  `stale_epoch`, catch up, commit again); an expired event cursor recovered
+  through the pending Welcomes and per-group backfill. The hub cannot expire
+  a cursor on demand (`GIM_HUB_EVENT_RETENTION_DAYS` is at least 1), so the
+  410 is injected at the hub's head cursor; the recovery itself runs against
+  the hub.
+
 ## CLI (gim)
 
 `apps/gim-cli` builds `gim`, a command-line client on the public gim-sdk
-API, for scripted interop runs against gim-server and the mobile apps.
+API, for scripted interop runs against gim-hub and the mobile apps.
 
 ```sh
 cargo build -p gim-cli          # -> target/debug/gim
@@ -124,21 +158,23 @@ gim --json wait-for "$chat" --text hi | jq -r .message.id   # exit 3 on timeout
 gim --json listen --chat "$chat" --count 1 --timeout 30     # one JSON line
 ```
 
-### Dev server and interop test
+### Dev hub and interop test
 
-`scripts/gim-server-dev.sh` builds gim-server from `GIM_SERVER_SRC` (default
-`/srv/gimhq/im-client/server`) and runs it on the `traefik` network:
+`scripts/gim-hub-dev.sh` builds gim-hub from `GIM_HUB_SRC` at `GIM_HUB_REV`
+(see [Integration tests](#integration-tests)) and runs it on the `traefik`
+network:
 
 ```sh
-url=$(scripts/gim-server-dev.sh start)    # prints http://<ip>:8080
-scripts/gim-server-dev.sh stop
+url=$(scripts/gim-hub-dev.sh start)       # prints http://<ip>:8080
+scripts/gim-hub-dev.sh commit             # the hub commit of the image
+scripts/gim-hub-dev.sh stop
 ```
 
-`testing/gim-cli-interop.sh` starts a server, runs
+`testing/gim-cli-interop.sh` starts a hub, runs
 `apps/gim-cli/tests/interop.rs` (alice, bob and carol through the real binary:
 DM, reply, reaction, edit, delete, read receipt, image, group of three,
-`listen`, exit codes) in a `rust:1` container and stops the server. Without
-`GIM_SERVER_URL` the test is skipped, so `cargo test` stays offline.
+`listen`, exit codes) in a `rust:1` container and stops the hub. Without
+`GIM_HUB_URL` the test is skipped, so `cargo test` stays offline.
 
 ```sh
 testing/gim-cli-interop.sh
@@ -147,11 +183,11 @@ testing/gim-cli-interop.sh
 ### Two-client walkthrough
 
 Two terminals, alice and bob. For an Android interop run, replace either side
-with the app (registered against the same server) and use its handle.
+with the app (registered against the same hub) and use its handle.
 
 ```sh
-scripts/gim-server-dev.sh start           # once; prints the URL
-url=$(scripts/gim-server-dev.sh url)      # in each terminal
+scripts/gim-hub-dev.sh start              # once; prints the URL
+url=$(scripts/gim-hub-dev.sh url)         # in each terminal
 
 # terminal 1: alice
 export GIM_PROFILE=/tmp/alice

@@ -90,7 +90,7 @@ async fn direct_chat_lifecycle() {
         .unwrap()
         .expect("bob is in the directory");
     assert_eq!(found.user_id, bob.user_id);
-    assert_eq!(found.display_name, "Bob");
+    assert_eq!(found.handle, bob.handle);
     assert_eq!(
         alice
             .client

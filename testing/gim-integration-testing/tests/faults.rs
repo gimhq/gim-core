@@ -4,9 +4,9 @@
 use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;
 
-use gim_common::DeviceRef;
+use gim_common::{ClientId, DeviceRef};
 use gim_integration_testing::sdk::SdkDevice;
-use gim_integration_testing::server_url;
+use gim_integration_testing::{server_url, wait_for};
 
 fn devices(of: &[&SdkDevice]) -> BTreeSet<DeviceRef> {
     of.iter()
@@ -57,19 +57,30 @@ async fn duplicate_commit_and_message_retry() {
         devices(&[&alice, &bob, &carol])
     );
 
-    // Same for an application message: re-posted with its client_id and
-    // stored once.
+    // Same for an application message: the outbox re-posts it with the same
+    // client_id and the hub returns the stored message.
     alice
         .hub
         .faults
         .lose_message_reply
         .store(true, Ordering::SeqCst);
-    alice.client.send_text(&g, "hi carol", None).await.unwrap();
-    let seqs = alice.hub.faults.message_seqs.lock().unwrap().clone();
-    let [.., first, retry] = seqs.as_slice() else {
-        panic!("expected a re-post: {seqs:?}");
-    };
-    assert_eq!(first, retry, "the hub returned the stored message");
+    let _sender = alice.client.start_outbox_sender();
+    let id = alice.client.send_text(&g, "hi carol", None).await.unwrap();
+    let client_id = ClientId::new(id.as_str()).unwrap();
+    let seqs = wait_for("the message re-posted", || {
+        let posts = alice.hub.faults.message_posts.lock().unwrap();
+        let seqs: Vec<u64> = posts
+            .iter()
+            .filter(|(c, _)| *c == client_id)
+            .map(|(_, seq)| *seq)
+            .collect();
+        (seqs.len() >= 2).then_some(seqs)
+    })
+    .await;
+    assert!(
+        seqs.iter().all(|seq| *seq == seqs[0]),
+        "the hub returned the stored message: {seqs:?}"
+    );
     bob.sync().await;
     carol.sync().await;
     assert_eq!(bob.texts(&g), ["hi carol"]);
