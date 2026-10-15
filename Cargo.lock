@@ -1211,8 +1211,11 @@ name = "gim-crypto"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "ciborium",
+ "data-encoding",
  "getrandom 0.2.17",
  "gim-common",
+ "gim-identity",
  "gim-proto",
  "gim-test",
  "openmls",
@@ -1220,6 +1223,7 @@ dependencies = [
  "openmls_memory_storage",
  "openmls_rust_crypto",
  "openmls_traits",
+ "serde_json",
  "sha2 0.10.9",
  "subtle",
  "thiserror",
