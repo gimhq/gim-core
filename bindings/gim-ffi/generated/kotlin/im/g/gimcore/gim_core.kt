@@ -681,6 +681,9 @@ internal interface UniffiCallbackInterfacePlatformHooksMethod3 : com.sun.jna.Cal
 internal interface UniffiCallbackInterfacePlatformHooksMethod4 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: ByteByReference,uniffiCallStatus: UniffiRustCallStatus,)
 }
+internal interface UniffiCallbackInterfaceLocalTimeZoneMethod0 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`atMs`: Long,`uniffiOutReturn`: IntByReference,uniffiCallStatus: UniffiRustCallStatus,)
+}
 internal interface UniffiCallbackInterfaceTimelineListenerMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`diffs`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
@@ -769,6 +772,25 @@ internal open class UniffiVTableCallbackInterfacePlatformHooks(
         `secureStoreDelete` = other.`secureStoreDelete`
         `dataDir` = other.`dataDir`
         `isNetworkReachable` = other.`isNetworkReachable`
+    }
+
+}
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "utcOffsetSecs")
+internal open class UniffiVTableCallbackInterfaceLocalTimeZone(
+    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+    @JvmField internal var `utcOffsetSecs`: UniffiCallbackInterfaceLocalTimeZoneMethod0? = null,
+) : Structure() {
+    class UniffiByValue(
+        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+        `utcOffsetSecs`: UniffiCallbackInterfaceLocalTimeZoneMethod0? = null,
+    ): UniffiVTableCallbackInterfaceLocalTimeZone(`uniffiFree`,`uniffiClone`,`utcOffsetSecs`,), Structure.ByValue
+
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceLocalTimeZone) {
+        `uniffiFree` = other.`uniffiFree`
+        `uniffiClone` = other.`uniffiClone`
+        `utcOffsetSecs` = other.`utcOffsetSecs`
     }
 
 }
@@ -890,6 +912,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_set_group_info(
     ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_set_local_time_zone(
+    ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_set_network_reachable(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_set_typing(
@@ -938,6 +962,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_gim_core_checksum_method_taskhandle_is_finished(
     ): Int
+    external fun uniffi_gim_core_checksum_method_localtimezone_utc_offset_secs(
+    ): Int
     external fun uniffi_gim_core_checksum_method_timeline_add_listener(
     ): Int
     external fun uniffi_gim_core_checksum_method_timeline_chat_id(
@@ -964,6 +990,7 @@ internal object UniffiLib {
         Native.register(UniffiLib::class.java, findLibraryName(componentName = "gim_core"))
         uniffiCallbackInterfaceChatListListener.register(this)
         uniffiCallbackInterfaceConnectionStateListener.register(this)
+        uniffiCallbackInterfaceLocalTimeZone.register(this)
         uniffiCallbackInterfacePlatformHooks.register(this)
         uniffiCallbackInterfaceTimelineListener.register(this)
         uniffiCallbackInterfaceTypingListener.register(this)
@@ -1055,6 +1082,8 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_set_group_info(`ptr`: Long,`chatId`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,`avatarFilePath`: RustBuffer.ByValue,
     ): Long
+    external fun uniffi_gim_core_fn_method_gimclient_set_local_time_zone(`ptr`: Long,`zone`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_gim_core_fn_method_gimclient_set_network_reachable(`ptr`: Long,`reachable`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_gim_core_fn_method_gimclient_set_typing(`ptr`: Long,`chatId`: RustBuffer.ByValue,`active`: Byte,
@@ -1127,6 +1156,14 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_gim_core_fn_method_taskhandle_is_finished(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
+    external fun uniffi_gim_core_fn_clone_localtimezone(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_gim_core_fn_free_localtimezone(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_gim_core_fn_init_callback_vtable_localtimezone(`vtable`: UniffiVTableCallbackInterfaceLocalTimeZone,
+    ): Unit
+    external fun uniffi_gim_core_fn_method_localtimezone_utc_offset_secs(`ptr`: Long,`atMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
     external fun uniffi_gim_core_fn_clone_timeline(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_gim_core_fn_free_timeline(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1381,6 +1418,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_gim_core_checksum_method_gimclient_set_group_info() and 0xFFFF) != 58408) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_set_local_time_zone() and 0xFFFF) != 51577) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_set_network_reachable() and 0xFFFF) != 23325) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1451,6 +1491,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_taskhandle_is_finished() and 0xFFFF) != 55140) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_gim_core_checksum_method_localtimezone_utc_offset_secs() and 0xFFFF) != 1483) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_timeline_add_listener() and 0xFFFF) != 55113) {
@@ -1746,6 +1789,29 @@ public object FfiConverterUInt: FfiConverter<UInt, Int> {
 /**
  * @suppress
  */
+public object FfiConverterInt: FfiConverter<Int, Int> {
+    override fun lift(value: Int): Int {
+        return value
+    }
+
+    override fun read(buf: ByteBuffer): Int {
+        return buf.getInt()
+    }
+
+    override fun lower(value: Int): Int {
+        return value
+    }
+
+    override fun allocationSize(value: Int) = 4UL
+
+    override fun write(value: Int, buf: ByteBuffer) {
+        buf.putInt(value)
+    }
+}
+
+/**
+ * @suppress
+ */
 public object FfiConverterULong: FfiConverter<ULong, Long> {
     override fun lift(value: Long): ULong {
         return value.toULong()
@@ -1763,6 +1829,29 @@ public object FfiConverterULong: FfiConverter<ULong, Long> {
 
     override fun write(value: ULong, buf: ByteBuffer) {
         buf.putLong(value.toLong())
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterLong: FfiConverter<Long, Long> {
+    override fun lift(value: Long): Long {
+        return value
+    }
+
+    override fun read(buf: ByteBuffer): Long {
+        return buf.getLong()
+    }
+
+    override fun lower(value: Long): Long {
+        return value
+    }
+
+    override fun allocationSize(value: Long) = 8UL
+
+    override fun write(value: Long, buf: ByteBuffer) {
+        buf.putLong(value)
     }
 }
 
@@ -2778,6 +2867,14 @@ public interface GimClientInterface {
      * encrypted and uploaded before this returns.
      */
     suspend fun `setGroupInfo`(`chatId`: kotlin.String, `name`: kotlin.String?, `avatarFilePath`: kotlin.String?)
+    
+    /**
+     * Sets the local time zone that timeline date separators split
+     * calendar days in; `None` (the default) is UTC. Call it again when
+     * the system time zone changes: open timelines move their date
+     * separators through their listeners.
+     */
+    fun `setLocalTimeZone`(`zone`: LocalTimeZone?)
     
     /**
      * Reports a reachability change from the platform network monitor.
@@ -3807,6 +3904,25 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
 
     
     /**
+     * Sets the local time zone that timeline date separators split
+     * calendar days in; `None` (the default) is UTC. Call it again when
+     * the system time zone changes: open timelines move their date
+     * separators through their listeners.
+     */override fun `setLocalTimeZone`(`zone`: LocalTimeZone?)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_gim_core_fn_method_gimclient_set_local_time_zone(
+        it,
+        
+        FfiConverterOptionalTypeLocalTimeZone.lower(`zone`),_status)
+}
+    }
+    
+    
+
+    
+    /**
      * Reports a reachability change from the platform network monitor.
      */override fun `setNetworkReachable`(`reachable`: kotlin.Boolean)
         = 
@@ -4425,6 +4541,336 @@ public object FfiConverterTypeLinkSession: FfiConverter<LinkSession, Long> {
     override fun allocationSize(value: LinkSession) = 8UL
 
     override fun write(value: LinkSession, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+/**
+ * The local time zone date separators split calendar days in. Implemented
+ * in Kotlin/Swift and set with `GimClient::set_local_time_zone`. May be
+ * called from any Rust thread; do not call back into `GimClient` from it.
+ */
+public interface LocalTimeZone {
+    
+    /**
+     * Offset from UTC in seconds in effect at `at_ms` (Unix milliseconds),
+     * DST included.
+     */
+    fun `utcOffsetSecs`(`atMs`: kotlin.Long): kotlin.Int
+    
+    companion object
+}
+
+/**
+ * The local time zone date separators split calendar days in. Implemented
+ * in Kotlin/Swift and set with `GimClient::set_local_time_zone`. May be
+ * called from any Rust thread; do not call back into `GimClient` from it.
+ */
+open class LocalTimeZoneImpl: Disposable, AutoCloseable, LocalTimeZone
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    /**
+     * Whether the current object has been destroyed and its reference is gone in the Rust side.
+     */
+    val uniffiIsDestroyed: Boolean get() = wasDestroyed.get()
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_gim_core_fn_free_localtimezone(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_gim_core_fn_clone_localtimezone(handle, status)
+        }
+    }
+
+    
+    /**
+     * Offset from UTC in seconds in effect at `at_ms` (Unix milliseconds),
+     * DST included.
+     */override fun `utcOffsetSecs`(`atMs`: kotlin.Long): kotlin.Int {
+            return FfiConverterInt.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_gim_core_fn_method_localtimezone_utc_offset_secs(
+        it,
+        
+        FfiConverterLong.lower(`atMs`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+
+    
+
+
+    
+    
+    /**
+     * @suppress
+     */
+    companion object
+    
+}
+
+
+
+// Put the implementation in an object so we don't pollute the top-level namespace
+internal object uniffiCallbackInterfaceLocalTimeZone {
+    internal object `utcOffsetSecs`: UniffiCallbackInterfaceLocalTimeZoneMethod0 {
+        override fun callback(`uniffiHandle`: Long,`atMs`: Long,`uniffiOutReturn`: IntByReference,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeLocalTimeZone.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`utcOffsetSecs`(
+                    FfiConverterLong.lift(`atMs`),
+                )
+            }
+            val writeReturn = { value: kotlin.Int -> uniffiOutReturn.setValue(FfiConverterInt.lower(value)) }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
+        override fun callback(handle: Long) {
+            FfiConverterTypeLocalTimeZone.handleMap.remove(handle)
+        }
+    }
+
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeLocalTimeZone.handleMap.clone(handle)
+        }
+    }
+
+    internal var vtable = UniffiVTableCallbackInterfaceLocalTimeZone.UniffiByValue(
+        uniffiFree,
+        uniffiClone,
+        `utcOffsetSecs`,
+    )
+
+    // Registers the foreign callback with the Rust side.
+    // This method is generated for each callback interface.
+    internal fun register(lib: UniffiLib) {
+        lib.uniffi_gim_core_fn_init_callback_vtable_localtimezone(vtable)
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeLocalTimeZone: FfiConverter<LocalTimeZone, Long> {
+    internal val handleMap = UniffiHandleMap<LocalTimeZone>()
+
+    override fun lower(value: LocalTimeZone): Long {
+        if (value is LocalTimeZoneImpl) {
+             // Rust-implemented object.  Clone the handle and return it
+            return value.uniffiCloneHandle()
+         } else {
+            // Kotlin object, generate a new vtable handle and return that.
+            return handleMap.insert(value)
+         }
+    }
+
+    override fun lift(value: Long): LocalTimeZone {
+        if ((value and 1.toLong()) == 0.toLong()) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return LocalTimeZoneImpl(UniffiWithHandle, value)
+        } else {
+            // Kotlin-generated handle, get the object from the handle map
+            return handleMap.remove(value)
+        }
+    }
+
+    override fun read(buf: ByteBuffer): LocalTimeZone {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: LocalTimeZone) = 8UL
+
+    override fun write(value: LocalTimeZone, buf: ByteBuffer) {
         buf.putLong(lower(value))
     }
 }
@@ -8495,6 +8941,38 @@ public object FfiConverterOptionalByteArray: FfiConverterRustBuffer<kotlin.ByteA
         } else {
             buf.put(1)
             FfiConverterByteArray.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeLocalTimeZone: FfiConverterRustBuffer<LocalTimeZone?> {
+    override fun read(buf: ByteBuffer): LocalTimeZone? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeLocalTimeZone.read(buf)
+    }
+
+    override fun allocationSize(value: LocalTimeZone?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeLocalTimeZone.allocationSize(value)
+        }
+    }
+
+    override fun write(value: LocalTimeZone?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeLocalTimeZone.write(value, buf)
         }
     }
 }
