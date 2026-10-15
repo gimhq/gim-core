@@ -7,6 +7,7 @@
 
 mod config;
 pub mod credential;
+mod device_list_cache;
 mod engine;
 mod envelope;
 mod error;
@@ -20,6 +21,7 @@ pub use config::{
 pub use credential::{
     CredentialError, DeviceListLookup, GimCredential, NoDeviceLists, GIM_CREDENTIAL_TYPE,
 };
+pub use device_list_cache::DeviceListCache;
 pub use engine::{
     CommitOutput, GroupJoined, MlsEngine, ProcessedMessage, MAX_KEY_PACKAGES_PER_CALL,
 };
