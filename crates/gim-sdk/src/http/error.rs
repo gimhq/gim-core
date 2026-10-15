@@ -46,9 +46,7 @@ pub(super) fn from_status(
         StatusCode::FORBIDDEN if code == v2::HOSTING_RECORD_REQUIRED => {
             TransportError::HostingRecordRequired(message)
         }
-        StatusCode::BAD_GATEWAY if code == v2::PEER_REFUSED => {
-            TransportError::PeerRefused(message)
-        }
+        StatusCode::BAD_GATEWAY if code == v2::PEER_REFUSED => TransportError::PeerRefused(message),
         StatusCode::SERVICE_UNAVAILABLE if code == v2::PEER_UNAVAILABLE => {
             TransportError::PeerUnavailable {
                 retry_after_secs: retry_after,

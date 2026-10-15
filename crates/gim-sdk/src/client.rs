@@ -597,7 +597,9 @@ impl<S: StateStore + 'static> Client<S> {
         let group_id = self
             .authed(|t| async move { self.inner.transport.create_group(&t, kind).await })
             .await?;
-        if owner_hub(&group_id).is_some_and(|hub| !session.hub_id.is_empty() && hub != session.hub_id) {
+        if owner_hub(&group_id)
+            .is_some_and(|hub| !session.hub_id.is_empty() && hub != session.hub_id)
+        {
             tracing::warn!(%group_id, hub_id = %session.hub_id, "the own hub created a group it does not own");
         }
         let (gid, base) = (group_id.clone(), BaseClient::new(session.device.clone()));
@@ -1177,7 +1179,12 @@ impl<S: StateStore + 'static> Client<S> {
         let claimed = self
             .authed(|t| {
                 let users = users.clone();
-                async move { self.inner.transport.claim_key_packages(&t, &users).await }
+                async move {
+                    self.inner
+                        .transport
+                        .claim_key_packages_federated(&t, &users)
+                        .await
+                }
             })
             .await?;
         // Only requested users, one KeyPackage per device: the hub must not

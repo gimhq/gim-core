@@ -17,9 +17,10 @@ use gim_common::{ClientId, DeviceRef, GroupId, MessageId, UserId};
 use gim_identity::{HostingEntry, HubRootKey, RootKey};
 use gim_sdk::testing::{FakeTransport, MemorySecretStorage};
 use gim_sdk::transport::{
-    AccessToken, Challenge, CommitAccepted, EventBatch, GroupInfo, HostingEntryGrant, HubEvent,
-    KeyPackageClaim, KeyPackageCount, OutgoingCommit, PostError, SessionError,
-    SessionToken, StoredHostingRecord, Transport, TransportError, TransportResult, UserRecord,
+    AccessToken, Challenge, ClaimedKeyPackage, CommitAccepted, EventBatch, GroupInfo,
+    HostingEntryGrant, HubEvent, KeyPackageClaim, KeyPackageCount, OutgoingCommit, PostError,
+    SessionError, SessionToken, StoredHostingRecord, Transport, TransportError, TransportResult,
+    UserRecord,
 };
 use gim_sdk::{Client, ClientBuilder, SecretStorage};
 use tempfile::TempDir;
@@ -243,13 +244,22 @@ impl Transport for FlakyTransport {
         &self,
         t: &AccessToken,
         users: &[UserId],
+    ) -> TransportResult<Vec<ClaimedKeyPackage>> {
+        self.inner.claim_key_packages(t, users).await
+    }
+
+    async fn claim_key_packages_federated(
+        &self,
+        t: &AccessToken,
+        users: &[UserId],
     ) -> TransportResult<KeyPackageClaim> {
         let unreachable = self.faults.unreachable.lock().unwrap().clone();
         let (unavailable, reachable): (Vec<UserId>, Vec<UserId>) =
             users.iter().cloned().partition(|u| unreachable.contains(u));
-        let mut claim = self.inner.claim_key_packages(t, &reachable).await?;
-        claim.unavailable = unavailable;
-        Ok(claim)
+        Ok(KeyPackageClaim {
+            key_packages: self.inner.claim_key_packages(t, &reachable).await?,
+            unavailable,
+        })
     }
 
     async fn create_group(&self, t: &AccessToken, kind: ChatKind) -> TransportResult<GroupId> {

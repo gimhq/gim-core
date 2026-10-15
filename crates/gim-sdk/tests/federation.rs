@@ -98,7 +98,10 @@ async fn unavailable_invitee_is_added_by_the_sync_loop() {
 
     transport.faults.unreachable.lock().unwrap().clear();
     let (hub, gid, bob_id) = (transport.clone(), g.clone(), bob.user_id());
-    wait_until("bob added", move || hub_members(&hub, &gid).contains(&bob_id)).await;
+    wait_until("bob added", move || {
+        hub_members(&hub, &gid).contains(&bob_id)
+    })
+    .await;
     assert!(alice.client.pending_invites(&g).is_empty());
     // The group name follows the commit.
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -420,7 +423,10 @@ async fn remote_user_without_handle_is_named_by_short_user_id() {
     let bob = Peer::fake(&transport, "bob").await;
     // The hub has no profile, and Bob has no handle (as a remote user).
     bob.client.release_handle("bob").await.unwrap();
-    assert_eq!(transport.service().user(&bob.user_id()).unwrap().handle, None);
+    assert_eq!(
+        transport.service().user(&bob.user_id()).unwrap().handle,
+        None
+    );
 
     let g = alice
         .client

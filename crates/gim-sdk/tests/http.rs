@@ -299,7 +299,7 @@ async fn claim_key_packages_by_user() {
         .mount(&server)
         .await;
     let claimed = transport(&server)
-        .claim_key_packages(&token(), &[user(2), user(3), user(4)])
+        .claim_key_packages_federated(&token(), &[user(2), user(3), user(4)])
         .await
         .unwrap();
     assert_eq!(
@@ -447,13 +447,17 @@ async fn peer_failures_of_posts() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v2/groups/h2%2F1/messages"))
-        .and(body_json(json!({ "client_id": "c1", "mls_message": "AQID" })))
+        .and(body_json(
+            json!({ "client_id": "c1", "mls_message": "AQID" }),
+        ))
         .respond_with(throttled(503, "peer_unavailable", "7"))
         .mount(&server)
         .await;
     Mock::given(method("POST"))
         .and(path("/v2/groups/h2%2F1/messages"))
-        .and(body_json(json!({ "client_id": "c2", "mls_message": "AQID" })))
+        .and(body_json(
+            json!({ "client_id": "c2", "mls_message": "AQID" }),
+        ))
         .respond_with(ResponseTemplate::new(503).set_body_json(error_body("peer_unavailable")))
         .mount(&server)
         .await;

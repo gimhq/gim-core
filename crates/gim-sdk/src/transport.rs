@@ -92,7 +92,7 @@ pub struct ClaimedKeyPackage {
     pub key_package: Vec<u8>,
 }
 
-/// Result of [`Transport::claim_key_packages`].
+/// Result of [`Transport::claim_key_packages_federated`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KeyPackageClaim {
     pub key_packages: Vec<ClaimedKeyPackage>,
@@ -379,13 +379,26 @@ pub trait Transport: Send + Sync {
     async fn key_package_count(&self, token: &AccessToken) -> TransportResult<KeyPackageCount>;
 
     /// Claims one KeyPackage of every active device of `users`; devices
-    /// without any are left out, users whose hub is unreachable are listed
-    /// as unavailable.
+    /// without any are left out.
     async fn claim_key_packages(
         &self,
         token: &AccessToken,
         users: &[UserId],
-    ) -> TransportResult<KeyPackageClaim>;
+    ) -> TransportResult<Vec<ClaimedKeyPackage>>;
+
+    /// Like [`Transport::claim_key_packages`], also listing the users whose
+    /// hub could not be reached (federation). Transports without
+    /// federation report none.
+    async fn claim_key_packages_federated(
+        &self,
+        token: &AccessToken,
+        users: &[UserId],
+    ) -> TransportResult<KeyPackageClaim> {
+        Ok(KeyPackageClaim {
+            key_packages: self.claim_key_packages(token, users).await?,
+            unavailable: vec![],
+        })
+    }
 
     /// Creates a group (epoch 0, the caller as its only member); the hub
     /// assigns its id.

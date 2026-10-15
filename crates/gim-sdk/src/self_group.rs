@@ -324,7 +324,10 @@ impl<S: StateStore + 'static> Client<S> {
         group_id: &GroupId,
         device: &DeviceRef,
     ) -> Result<bool> {
-        let claimed = self.claim_key_packages(session, &[], &[]).await?.key_packages;
+        let claimed = self
+            .claim_key_packages(session, &[], &[])
+            .await?
+            .key_packages;
         let Some(key_package) = claimed.into_iter().find(|k| &k.device == device) else {
             return Ok(false);
         };

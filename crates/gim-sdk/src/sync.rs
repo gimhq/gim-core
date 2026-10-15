@@ -423,7 +423,10 @@ impl<S: StateStore + 'static> Client<S> {
             matches!(e, HubEvent::Group(IncomingEvent::Message(m)) if deferred.contains_key(&m.group_id))
         });
         if !held.is_empty() {
-            tracing::debug!(count = held.len(), "holding back messages of groups with a pending commit");
+            tracing::debug!(
+                count = held.len(),
+                "holding back messages of groups with a pending commit"
+            );
             self.run(move |store, _| {
                 store.transaction(|txn| {
                     for event in held {
@@ -445,7 +448,9 @@ impl<S: StateStore + 'static> Client<S> {
     /// commit was dropped; those still not applicable are parked again.
     pub(crate) async fn apply_parked(&self, session: &Session, group_id: &GroupId) -> Result<()> {
         let gid = group_id.clone();
-        let parked = self.run(move |store, _| Ok(store.parked_messages(&gid)?)).await?;
+        let parked = self
+            .run(move |store, _| Ok(store.parked_messages(&gid)?))
+            .await?;
         if parked.is_empty() {
             return Ok(());
         }

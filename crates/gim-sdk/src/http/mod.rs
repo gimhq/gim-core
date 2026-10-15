@@ -24,8 +24,9 @@ use tokio_util::io::ReaderStream;
 use crate::stream::ws;
 use crate::transport::{
     AccessToken, Challenge, ClaimedKeyPackage, CommitAccepted, EventBatch, EventStream, GroupInfo,
-    HostingEntryGrant, HubEvent, KeyPackageClaim, KeyPackageCount, OutgoingCommit, PostError, SessionError,
-    SessionToken, StoredHostingRecord, Transport, TransportError, TransportResult, UserRecord,
+    HostingEntryGrant, HubEvent, KeyPackageClaim, KeyPackageCount, OutgoingCommit, PostError,
+    SessionError, SessionToken, StoredHostingRecord, Transport, TransportError, TransportResult,
+    UserRecord,
 };
 
 pub use reqwest::Url;
@@ -424,6 +425,17 @@ impl Transport for HttpTransport {
     }
 
     async fn claim_key_packages(
+        &self,
+        token: &AccessToken,
+        users: &[UserId],
+    ) -> TransportResult<Vec<ClaimedKeyPackage>> {
+        Ok(self
+            .claim_key_packages_federated(token, users)
+            .await?
+            .key_packages)
+    }
+
+    async fn claim_key_packages_federated(
         &self,
         token: &AccessToken,
         users: &[UserId],

@@ -638,11 +638,7 @@ async fn claim_key_packages(
             .iter()
             .map(|t| user_id(&t.user_id))
             .collect::<Result<Vec<_>, _>>()?;
-        let claimed = state
-            .transport
-            .claim_key_packages(&token, &users)
-            .await?
-            .key_packages;
+        let claimed = state.transport.claim_key_packages(&token, &users).await?;
         let missing = users
             .iter()
             .filter(|u| !claimed.iter().any(|c| &c.device.user_id == *u))
