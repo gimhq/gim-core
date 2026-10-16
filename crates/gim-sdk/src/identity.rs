@@ -438,6 +438,25 @@ impl<S: StateStore + 'static> Client<S> {
     /// it newly revokes. Unknown users and lists that do not verify are
     /// skipped; network and auth errors are returned.
     pub(crate) async fn refresh_device_list(&self, user_id: &UserId) -> Result<Vec<DeviceRef>> {
+        self.refresh_device_list_with(user_id, false).await
+    }
+
+    /// [`Client::refresh_device_list`] for a caller that cannot go on
+    /// without the list: a read whose outcome is unknown (5xx, 429, the
+    /// user's hub down) is returned as an error too, so the caller retries
+    /// later instead of deciding on the cached list.
+    pub(crate) async fn refresh_device_list_strict(
+        &self,
+        user_id: &UserId,
+    ) -> Result<Vec<DeviceRef>> {
+        self.refresh_device_list_with(user_id, true).await
+    }
+
+    async fn refresh_device_list_with(
+        &self,
+        user_id: &UserId,
+        strict: bool,
+    ) -> Result<Vec<DeviceRef>> {
         let fetched = self
             .read_routed(
                 |transport, t| async move { transport.device_list(Some(&t), user_id).await },
@@ -449,6 +468,7 @@ impl<S: StateStore + 'static> Client<S> {
             Err(err @ (TransportError::Network(_) | TransportError::Unauthorized)) => {
                 return Err(err.into())
             }
+            Err(err) if strict && err.outcome_unknown() => return Err(err.into()),
             Err(err) => {
                 tracing::debug!(%user_id, error = %err, "cannot fetch a device list");
                 return Ok(vec![]);

@@ -266,13 +266,20 @@ impl<S: StateStore + 'static> Client<S> {
         Ok(())
     }
 
-    /// The listed hubs (not removed) in registry order.
+    /// The hubs the current hosting record lists, as the registry knows
+    /// them, in registry order. A hub the registry knows only from a
+    /// shared hub map (`self.hubs`) is not listed.
     async fn listed_hubs(&self) -> Result<Vec<HubRecord>> {
+        let user_id = self.require_session()?.device.user_id;
+        let record = self.hub_hosting_record(&user_id).await?;
+        let listed: Option<Vec<String>> =
+            record.map(|r| r.hubs().iter().map(HostingEntry::hub_id).collect());
         let mut hubs: Vec<HubRecord> = self
             .run(|store, _| Ok(store.hubs()?))
             .await?
             .into_iter()
             .filter(|h| h.state != HubState::Removed)
+            .filter(|h| listed.as_ref().is_none_or(|l| l.contains(&h.hub_id)))
             .collect();
         sort(&mut hubs);
         Ok(hubs)

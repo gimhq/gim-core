@@ -41,9 +41,8 @@ docker run --rm --label ai-agent=true -v "$PWD:$PWD" -w "$PWD" \
 ## Integration tests
 
 `scripts/integration-test.sh` builds gim-hub from `GIM_HUB_SRC` (default
-`/srv/gimhq/im-client/hub`) at `GIM_HUB_REV` (default
-`18afc7bdde8cd643e4f4e21a35758fdb3a0bc155`, exported with
-`git archive`, so local changes in the checkout are ignored) as
+`/srv/gimhq/im-client/hub`) at `GIM_HUB_REV` (default: the pinned commit,
+printed by `scripts/gim-hub-dev.sh rev`; exported with `git archive`, so local changes in the checkout are ignored) as
 `ai-agent/gim-hub`, runs it on the `traefik` network, waits for `/healthz`,
 prints the hub commit and runs `testing/gim-integration-testing` in a `rust:1`
 container against it. The hub is stopped on exit. Extra arguments filter the
@@ -108,6 +107,22 @@ down: a post to a `hub-b`-owned group (503) and an invite of a `hub-b` user
 logs `Hello refused`, nothing reaches either side); `cross_hub_image_fetch`:
 the receiver's hub fetches an image uploaded on the sender's hub from its
 origin (hub-v2 federation.md §5.6, gim-hub H5).
+
+### Multi-homing suite
+
+`GIM_MULTIHOMING=1 scripts/integration-test.sh` runs `tests/multihoming.rs`
+the same way on three allowlisted hubs (`GIM_FED_HUBS=3`; the tests stop and
+start `hub-a`). gim-sdk clients open every hub through a recording transport
+(`src/sdk.rs`), so the tests see which hub got each submission, claim and
+event. Covered: adding a hub (records on both hubs, a linked device learns
+and verifies the URL through the self group, a message arrives through both
+hubs and is stored once); failover with the primary stopped (sending through
+`hub-b`, receiving from `hub-b` and `hub-c`, no duplicates and the same order
+after `hub-a` is back); KeyPackages disjoint per hub and never claimed
+twice, also while `hub-a` is down, then the last resort and top-up;
+`set_primary_hub`; `remove_hub` (`HubOwnsGroups`, `HomeHub`, `LastHub`,
+messaging in a group the removed hub owns); a shared URL of another hub stays
+unverified without a sign-in.
 
 `GIM_FEDERATION=1 testing/gim-cli-interop.sh` runs the cross-hub CLI variant
 (`cli_to_cli_interop_across_hubs`): profiles on `hub-a` and `hub-b`, naming
