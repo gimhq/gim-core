@@ -41,7 +41,8 @@ docker run --rm --label ai-agent=true -v "$PWD:$PWD" -w "$PWD" \
 ## Integration tests
 
 `scripts/integration-test.sh` builds gim-hub from `GIM_HUB_SRC` (default
-`/srv/gimhq/im-client/hub`) at `GIM_HUB_REV` (default `9608f34`, exported with
+`/srv/gimhq/im-client/hub`) at `GIM_HUB_REV` (default
+`18afc7bdde8cd643e4f4e21a35758fdb3a0bc155`, exported with
 `git archive`, so local changes in the checkout are ignored) as
 `ai-agent/gim-hub`, runs it on the `traefik` network, waits for `/healthz`,
 prints the hub commit and runs `testing/gim-integration-testing` in a `rust:1`
@@ -104,9 +105,9 @@ either hub, messages both ways, leave by Proposal from `hub-b`, remove);
 concurrent Commits from both hubs (one 409, catch up, recommit); `hub-b`
 down: a post to a `hub-b`-owned group (503) and an invite of a `hub-b` user
 (claim `unavailable`) go through once it is back; `hub-x` refused (`hub-a`
-logs `Hello refused`, nothing reaches either side). `cross_hub_image_fetch`
-fails against gim-hub `9608f34`: blobs stay on the hub they were uploaded to
-(hub-v2 multihoming.md Q6) and the receiver's hub answers 404.
+logs `Hello refused`, nothing reaches either side); `cross_hub_image_fetch`:
+the receiver's hub fetches an image uploaded on the sender's hub from its
+origin (hub-v2 federation.md §5.6, gim-hub H5).
 
 `GIM_FEDERATION=1 testing/gim-cli-interop.sh` runs the cross-hub CLI variant
 (`cli_to_cli_interop_across_hubs`): profiles on `hub-a` and `hub-b`, naming
@@ -317,6 +318,24 @@ bitcode and link-test notes. `out/` is never committed.
 - `xcframework` (pushes to `main` and manual runs, macOS): runs
   `scripts/build-xcframework.sh` and uploads `gim-core-ios-<sha>` with the zip,
   its checksum, the Swift sources and `GIM_CORE_VERSION`.
+- `integration` (every push, pull request, manual run): checks out gim-hub at
+  the pinned commit (`scripts/gim-hub-dev.sh rev`, the `GIM_HUB_REV` default,
+  so CI and local runs test the same hub) with the read-only deploy key in the
+  `GIM_HUB_DEPLOY_KEY` secret, builds the hub image from that checkout
+  (`GIM_HUB_CHECKOUT`, no `git archive`) and runs the single-hub and
+  federation suites of `scripts/integration-test.sh` and both modes of
+  `testing/gim-cli-interop.sh` on a `gim-ci` network. Hub logs are printed
+  on failure. Without the secret (pull requests from forks) the
+  `integration-gate` job skips it.
+
+To build the hub from a directory that already holds `GIM_HUB_REV` locally:
+
+```sh
+GIM_HUB_CHECKOUT=/path/to/gim-hub scripts/integration-test.sh
+```
+
+A git checkout must have `GIM_HUB_REV` checked out; any other directory (an
+archive extraction) is built as is and labelled `GIM_HUB_REV`.
 
 ## Android packaging
 

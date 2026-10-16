@@ -8,6 +8,7 @@ set -euo pipefail
 usage() {
     cat <<'EOF'
 Usage: gim-hub-dev.sh <start|stop|ip|url|status|commit|logs> [name]
+       gim-hub-dev.sh <build|rev>
        gim-hub-dev.sh <fed-start|fed-stop> <run>
 
 Commands:
@@ -21,6 +22,8 @@ Commands:
   status  Print running/stopped; exit 0 if running, 1 otherwise.
   commit  Print the hub commit the image was built from.
   logs    Pass through to docker logs.
+  build   Build the image (always, regardless of GIM_HUB_BUILD).
+  rev     Print GIM_HUB_REV (the pinned hub commit CI checks out).
 
 Closed federation (multi-hub mode):
   fed-start  Build the image (unless GIM_HUB_BUILD=0) and start GIM_FED_HUBS
@@ -44,8 +47,13 @@ Arguments:
 
 Env:
   GIM_HUB_SRC      gim-hub git checkout (default /srv/gimhq/im-client/hub)
-  GIM_HUB_REV      commit to build (default 9608f34); exported with
+  GIM_HUB_REV      commit to build (default
+                   18afc7bdde8cd643e4f4e21a35758fdb3a0bc155); exported with
                    `git archive`, so local changes in the checkout are ignored
+  GIM_HUB_CHECKOUT directory holding gim-hub at GIM_HUB_REV (e.g. a CI
+                   checkout); when set, the image is built from it as is,
+                   with no `git archive` of GIM_HUB_SRC. If it is a git
+                   checkout, its HEAD must be GIM_HUB_REV.
   GIM_HUB_NAME     container name (default ai-agent-gim-hub-dev)
   GIM_HUB_IMAGE    image tag (default ai-agent/gim-hub)
   GIM_HUB_NETWORK  docker network (default traefik)
@@ -59,7 +67,7 @@ EOF
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 GIM_HUB_SRC=${GIM_HUB_SRC:-/srv/gimhq/im-client/hub}
-GIM_HUB_REV=${GIM_HUB_REV:-9608f34}
+GIM_HUB_REV=${GIM_HUB_REV:-18afc7bdde8cd643e4f4e21a35758fdb3a0bc155}
 GIM_HUB_IMAGE=${GIM_HUB_IMAGE:-ai-agent/gim-hub}
 GIM_HUB_NETWORK=${GIM_HUB_NETWORK:-traefik}
 GIM_HUB_BUILD=${GIM_HUB_BUILD:-1}
@@ -70,7 +78,7 @@ case "$cmd" in
         usage
         exit 0
         ;;
-    start | stop | ip | url | status | commit | logs | fed-start | fed-stop) ;;
+    start | stop | ip | url | status | commit | logs | build | rev | fed-start | fed-stop) ;;
     *)
         usage >&2
         exit 2
@@ -117,6 +125,10 @@ image_commit() {
 # temp dir, never from the (possibly dirty) checkout itself.
 build() {
     local commit tmp
+    if [ -n "${GIM_HUB_CHECKOUT:-}" ]; then
+        build_checkout
+        return
+    fi
     commit=$(git -C "$GIM_HUB_SRC" rev-parse --verify "$GIM_HUB_REV^{commit}")
     tmp=$repo/.tmp/gim-hub-src-$$
     rm -rf "$tmp"
@@ -128,6 +140,23 @@ build() {
         -t "$image" "$tmp" >&2 || status=$?
     rm -rf "$tmp"
     return "$status"
+}
+
+# Builds the image from GIM_HUB_CHECKOUT, a directory that already holds
+# GIM_HUB_REV (CI checks it out with actions/checkout).
+build_checkout() {
+    local src=$GIM_HUB_CHECKOUT commit=$GIM_HUB_REV head
+    if [ -e "$src/.git" ]; then
+        head=$(git -C "$src" rev-parse HEAD)
+        commit=$(git -C "$src" rev-parse --verify "$GIM_HUB_REV^{commit}")
+        if [ "$head" != "$commit" ]; then
+            echo "$src is at $head, expected GIM_HUB_REV $GIM_HUB_REV" >&2
+            return 1
+        fi
+    fi
+    echo "building $image from $src @ $commit" >&2
+    docker build --label ai-agent=true --label "gim.hub.commit=$commit" \
+        -t "$image" "$src" >&2
 }
 
 wait_healthy() {
@@ -287,6 +316,8 @@ fed_start() {
 
 case "$cmd" in
     start) start ;;
+    build) build ;;
+    rev) echo "$GIM_HUB_REV" ;;
     fed-start) fed_start ;;
     fed-stop) fed_stop ;;
     stop) docker stop "$name" >/dev/null 2>&1 || true ;;

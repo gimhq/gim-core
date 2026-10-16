@@ -3,7 +3,8 @@
 Sign-off: L1 accepted §9 entirely and the recommendations for Q1-Q9 (§13). Q1 (application
 messages fan out to every listed hub) is a deliberate deviation from arch §9.2, chosen for
 simplicity and failure tolerance at our scale, at a bandwidth cost. Q6 (blobs are not replicated)
-is a known limit. The migration is `0007_multihoming.sql` (`0006` is taken).
+is a known limit, narrowed by federated blob reads (H5-B1, fed §5.6). The migration is
+`0007_multihoming.sql` (`0006` is taken).
 
 Status: design, normative for the M2c hub subtasks (§12). Every contract change (§9) is a proposal that needs L1 / gim-core sign-off before the
 subtask that implements it starts. Implemented: §2.2, §3.2, §4.2-§4.5, §5, §7.3 and §8 (H4-M1 to
@@ -41,7 +42,8 @@ Fixed decisions (not re-opened here):
 
 Out of scope: device-level hub lists (arch §9.6), owning-hub migration and owner HA (a group
 whose owning hub is down cannot sequence, whichever hubs its members use), replication of blobs
-(blobs stay on the hub they were uploaded to, Q6), open federation.
+(blobs stay on the hub they were uploaded to; other hubs fetch them on demand, Q6), open
+federation.
 
 ### 1.1 Terms
 
@@ -660,6 +662,11 @@ The compose suite (H4-M5b, `GIM_FED_SUITE=mh scripts/fed-test.sh`, override
   served by C, and the refusal of unlisted submitters is covered by `federation_groups.rs`
   (`submits_from_unlisted_or_unknown_hubs_are_refused`).
 
+Blobs (Q6, H5-B1) are covered by the federation suite (fed §11.3 T14) and
+`crates/gim-hub-api/tests/federation_blobs.rs`: a co-host is a reader hub like any other, so it
+fetches and caches the blob the same way, and while the origin is down it serves only copies it
+fetched before (others are 503 `peer_unavailable`).
+
 MH1-MH6, MH8 cover the plan's M2c acceptance: messaging continues with one hub stopped (MH3),
 no duplicate messages (MH2, MH4), no KeyPackage claimed twice (MH5), migration without loss
 (MH8). The in-process suite (fed §11.1) gets MH1, MH4 and MH5 with a dropped and restarted hub.
@@ -688,7 +695,7 @@ Order: M1 → {M2, M4} in parallel → M3 → M5. M5's ping/down state can start
 | Q3 | Should a forwarding hub or owner accept an Add whose `kp_ref` is not in its ledger when the committer is multi-homed (failover between claim and commit)? | No for M2c: the client re-claims through the hub it commits through (§5.4). Relaxing would let an Add use a package that is still claimable on its hub. Revisit with a cross-hub ledger query if re-claims waste too many packages. |
 | Q4 | Replicas seeded on an added hub serve no history before the seed (§4.3). | Accept: devices already hold that history from their other hubs; a device restored from backup reads it from the owner's log via another hub or uses `FetchLog`-backed reads if fed Q4 is ever implemented. |
 | Q5 | Migrating away from a hub that will be shut down loses the groups it owns (owning-hub migration out of scope, plan D8). | Document in the client: a hub that owns groups should stay up (as owner only) after removal; decommissioning needs owning-hub migration (a later milestone). gim-core SHOULD warn when the removed hub owns groups the user is in. |
-| Q6 | Blobs live only on the hub they were uploaded to; while that hub is down, attachments are unavailable. | Out of M2c scope. Recommend a later blob federation step (fetch by `blob_id` from the uploader's hubs) rather than replicating blobs to every co-host. |
+| Q6 | Blobs live only on the hub they were uploaded to; while that hub is down, attachments are unavailable. | Closed by H5-B1 (fed §5.6): blob ids name their origin hub and every other hub, co-hosts included, fetches a blob from the origin with `FetchBlob` on first download and caches it. While the origin is down a co-host that already cached a copy keeps serving it; a hub that never fetched it answers 503 `peer_unavailable`. No replication to co-hosts at upload time. |
 | Q7 | Push failover can miss notifications for messages in the first `GIM_HUB_PUSH_FAILOVER_SECONDS` after the primary stops (§8). | Accept for M2c: the delay prevents double pushes during short blips, and the messages are on the stream. An S2S "pushed" receipt between co-hosts (oneof range 30-39) can close the gap later if needed. |
 | Q8 | Pending Welcome acknowledgements are not propagated between co-hosts (§4.4). | Accept: the device acknowledges on every hub where it sees the Welcome; unacknowledged copies on removed hubs are purged with the user's data. A propagation op adds traffic and a new trust question for little gain. |
 | Q9 | `NotifyHostingRecord` admits a removed hub as sender (it is listed in the superseded record). A malicious removed hub could only resend the genuine signed record. | Accept: the record is self-certifying and the seq rules make resends no-ops. |

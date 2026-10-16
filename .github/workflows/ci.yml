@@ -58,6 +58,100 @@ jobs:
             exit 1
           fi
 
+  # gim-hub is private: its read-only deploy key is a secret that fork PRs do
+  # not get, so the integration job is skipped there instead of failing.
+  integration-gate:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - id: check
+        env:
+          GIM_HUB_DEPLOY_KEY: ${{ secrets.GIM_HUB_DEPLOY_KEY }}
+        run: |
+          if [ -n "$GIM_HUB_DEPLOY_KEY" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::GIM_HUB_DEPLOY_KEY is not available; skipping the integration job"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  integration:
+    needs: integration-gate
+    if: needs.integration-gate.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: gim-core
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      GIM_CARGO_CACHE: ${{ github.workspace }}/cargo-home
+      GIM_HUB_CHECKOUT: ${{ github.workspace }}/gim-hub
+      GIM_HUB_NETWORK: gim-ci
+      # The image is built once by the "Build gim-hub image" step.
+      GIM_HUB_BUILD: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: gim-core
+      - name: Pinned gim-hub revision
+        id: hub
+        run: echo "rev=$(scripts/gim-hub-dev.sh rev)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: gimhq/gim-hub
+          ref: ${{ steps.hub.outputs.rev }}
+          ssh-key: ${{ secrets.GIM_HUB_DEPLOY_KEY }}
+          persist-credentials: false
+          path: gim-hub
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          docker image prune --all --force > /dev/null || true
+          df -h /
+      - uses: actions/cache@v4
+        with:
+          path: |
+            cargo-home/registry
+            cargo-home/git
+            gim-core/target
+          key: integration-${{ runner.os }}-${{ hashFiles('gim-core/Cargo.lock') }}
+          restore-keys: integration-${{ runner.os }}-
+      - name: Docker network
+        run: docker network create gim-ci
+      - name: Build gim-hub image
+        id: build
+        run: scripts/gim-hub-dev.sh build
+      - name: Single-hub suite
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: scripts/integration-test.sh
+      - name: Federation suite
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: scripts/integration-test.sh
+        env:
+          GIM_FEDERATION: 1
+      - name: CLI interop
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: testing/gim-cli-interop.sh
+      - name: CLI interop across hubs
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: testing/gim-cli-interop.sh
+        env:
+          GIM_FEDERATION: 1
+      - name: Disk usage after tests
+        if: always()
+        run: df -h /
+      # The tests run as root in rust:1 containers; hand the cached
+      # directories back to the runner user so the cache can be saved.
+      - name: Fix cache ownership
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: sudo chown -R "$(id -u):$(id -g)" cargo-home gim-core/target 2>/dev/null || true
+
   xcframework:
     needs: rust
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
