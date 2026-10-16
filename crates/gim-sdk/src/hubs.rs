@@ -240,7 +240,7 @@ impl<S: StateStore + 'static> Client<S> {
     /// The hubs of the own hosting record known to this device, in
     /// `(priority, hub_id)` order, including removed ones.
     pub async fn hubs(&self) -> Result<Vec<HubStatus>> {
-        let mut hubs = self.run(|store, _| Ok(store.hubs()?)).await?;
+        let mut hubs = self.read(|store, _| Ok(store.hubs()?)).await?;
         sort(&mut hubs);
         let home = self.home_hub();
         let signed_in = self.session().is_some();
@@ -281,7 +281,7 @@ impl<S: StateStore + 'static> Client<S> {
         let guard = self.inner.hub_lock.lock().await;
         let id = hub_id.to_string();
         let stored = self
-            .run(move |store, _| Ok(store.hubs()?.into_iter().find(|h| h.hub_id == id)))
+            .read(move |store, _| Ok(store.hubs()?.into_iter().find(|h| h.hub_id == id)))
             .await?;
         let Some(mut hub) = stored.filter(|h| h.state != HubState::Removed) else {
             return Err(ClientError::InvalidInput(format!(
@@ -333,7 +333,11 @@ impl<S: StateStore + 'static> Client<S> {
     /// in this run yet and signs in where this device has no session.
     /// Failures of single hubs are logged and leave them unverified or
     /// signed out until the next refresh.
+    /// No-op in [`crate::ClientMode::Extension`].
     pub(crate) async fn refresh_hubs_from(&self, listed: Listed<'_>) -> Result<()> {
+        if self.is_extension() {
+            return Ok(());
+        }
         let session = self.require_session()?;
         let guard = self.inner.hub_lock.lock().await;
         let shared = self.bootstrap_home_hub(&session).await?;
@@ -346,7 +350,7 @@ impl<S: StateStore + 'static> Client<S> {
             self.apply_listed(&record).await?;
         }
         let home = self.home_hub();
-        let hubs = self.run(|store, _| Ok(store.hubs()?)).await?;
+        let hubs = self.read(|store, _| Ok(store.hubs()?)).await?;
         for hub in hubs {
             if hub.state == HubState::Removed || Some(&hub.hub_id) == home.as_ref() {
                 continue;
@@ -614,6 +618,7 @@ impl<S: StateStore + 'static> Client<S> {
         if let Some(Err(err)) = persisted {
             tracing::warn!(error = %err, "cannot persist the hub session");
         }
+        self.push_hub_changed(Some(hub_id), true);
         Ok(token.token)
     }
 
@@ -637,7 +642,7 @@ impl<S: StateStore + 'static> Client<S> {
     /// Sends the URLs of the listed hubs to the own other devices. Best
     /// effort.
     pub(crate) async fn share_hub_locations(&self) {
-        let hubs = match self.run(|store, _| Ok(store.hubs()?)).await {
+        let hubs = match self.read(|store, _| Ok(store.hubs()?)).await {
             Ok(hubs) => hubs,
             Err(err) => {
                 tracing::warn!(error = %err, "cannot read the hub registry");

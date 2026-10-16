@@ -173,6 +173,10 @@ impl<S: StateStore + 'static> Client<S> {
     /// again) and returns the error.
     pub(crate) async fn end_enrollment(&self, enrolled: Result<()>) -> Result<()> {
         let ended = enrolled.and_then(|()| Ok(self.inner.secrets.delete(ENROLLMENT_SECRET_KEY)?));
+        if ended.is_ok() {
+            // A registration stored before onboarding goes to the hub.
+            self.push_hub_changed(None, true);
+        }
         if let Err(err) = &ended {
             tracing::warn!(error = %err, "enrollment failed; discarding it");
             if let Err(err) = self.discard_enrollment().await {
@@ -328,7 +332,7 @@ impl<S: StateStore + 'static> Client<S> {
 
     pub(crate) async fn own_user(&self) -> Result<Option<UserInfo>> {
         let user_id = self.require_session()?.device.user_id;
-        self.run(move |store, _| Ok(store.user(&user_id)?)).await
+        self.read(move |store, _| Ok(store.user(&user_id)?)).await
     }
 
     /// Looks a user up by handle in the hub directory, caches the profile
@@ -438,6 +442,25 @@ impl<S: StateStore + 'static> Client<S> {
     /// it newly revokes. Unknown users and lists that do not verify are
     /// skipped; network and auth errors are returned.
     pub(crate) async fn refresh_device_list(&self, user_id: &UserId) -> Result<Vec<DeviceRef>> {
+        self.refresh_device_list_with(user_id, false).await
+    }
+
+    /// [`Client::refresh_device_list`] for a caller that cannot go on
+    /// without the list: a read whose outcome is unknown (5xx, 429, the
+    /// user's hub down) is returned as an error too, so the caller retries
+    /// later instead of deciding on the cached list.
+    pub(crate) async fn refresh_device_list_strict(
+        &self,
+        user_id: &UserId,
+    ) -> Result<Vec<DeviceRef>> {
+        self.refresh_device_list_with(user_id, true).await
+    }
+
+    async fn refresh_device_list_with(
+        &self,
+        user_id: &UserId,
+        strict: bool,
+    ) -> Result<Vec<DeviceRef>> {
         let fetched = self
             .read_routed(
                 |transport, t| async move { transport.device_list(Some(&t), user_id).await },
@@ -449,6 +472,7 @@ impl<S: StateStore + 'static> Client<S> {
             Err(err @ (TransportError::Network(_) | TransportError::Unauthorized)) => {
                 return Err(err.into())
             }
+            Err(err) if strict && err.outcome_unknown() => return Err(err.into()),
             Err(err) => {
                 tracing::debug!(%user_id, error = %err, "cannot fetch a device list");
                 return Ok(vec![]);

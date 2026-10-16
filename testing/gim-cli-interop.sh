@@ -10,8 +10,8 @@
 # (`gim-hub-dev.sh fed-start`, removed on exit) and runs the cross-hub
 # variant (cli_to_cli_interop_across_hubs): profiles on hub a and hub b.
 #
-# Env: GIM_HUB_SRC, GIM_HUB_REV (default
-# 18afc7bdde8cd643e4f4e21a35758fdb3a0bc155), GIM_HUB_CHECKOUT,
+# Env: GIM_HUB_SRC, GIM_HUB_REV (default: the pinned commit, see
+# `scripts/gim-hub-dev.sh rev`), GIM_HUB_CHECKOUT,
 # GIM_HUB_BUILD, GIM_HUB_IMAGE, GIM_HUB_NETWORK (see scripts/gim-hub-dev.sh);
 # GIM_FEDERATION=1; GIM_CARGO_CACHE and the passed-through cargo variables
 # as in scripts/integration-test.sh.
