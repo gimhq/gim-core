@@ -97,7 +97,7 @@ impl<S: StateStore + 'static> Client<S> {
     /// others with a verified URL in this run). The home hub is always
     /// among them, last if the registry does not list it as verified.
     pub(crate) async fn submission_hubs(&self) -> Vec<HubTarget> {
-        let mut hubs = match self.run(|store, _| Ok(store.hubs()?)).await {
+        let mut hubs = match self.read(|store, _| Ok(store.hubs()?)).await {
             Ok(hubs) => hubs,
             Err(err) => {
                 tracing::warn!(error = %err, "cannot read the hub registry; using the home hub");
@@ -495,7 +495,11 @@ impl<S: StateStore + 'static> Client<S> {
 
     /// Generates and uploads [`KEY_PACKAGE_BATCH`] one-time KeyPackages to
     /// `hub` (its `keypackages.low`).
+    /// No-op in [`crate::ClientMode::Extension`]: the app generates them.
     pub(crate) async fn replenish_hub(&self, hub: &HubTarget) -> Result<()> {
+        if self.is_extension() {
+            return Ok(());
+        }
         let (key_packages, _) = self
             .generate_key_packages_for(&hub.hub_id, KEY_PACKAGE_BATCH, false)
             .await?;
@@ -519,7 +523,11 @@ impl<S: StateStore + 'static> Client<S> {
     /// Tops `hub`'s one-time KeyPackages up to [`KEY_PACKAGE_BATCH`], plus
     /// a last-resort one if it has none. Uploads a batch if the hub cannot
     /// count them; network and auth errors are returned.
+    /// No-op in [`crate::ClientMode::Extension`].
     pub(crate) async fn top_up_hub(&self, hub: &HubTarget) -> Result<()> {
+        if self.is_extension() {
+            return Ok(());
+        }
         let counted = self
             .authed_on(hub, |transport, t| async move {
                 transport.key_package_count(&t).await

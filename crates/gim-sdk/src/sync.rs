@@ -177,7 +177,15 @@ impl<S: StateStore + 'static> Client<S> {
     /// [`Client::stop_sync`]. Alongside, the user's hosting record is
     /// renewed when due: at start, daily and on `hosting_record.expiring`,
     /// and pending invites are retried (see [`Client::pending_invites`]).
+    ///
+    /// Fails with [`ClientError::InvalidInput`] in
+    /// [`crate::ClientMode::Extension`].
     pub fn start_sync(&self) -> Result<()> {
+        if self.is_extension() {
+            return Err(ClientError::InvalidInput(
+                "no sync loop in extension mode".into(),
+            ));
+        }
         let session = self.require_session()?;
         let mut task = self
             .inner
@@ -639,6 +647,10 @@ impl<S: StateStore + 'static> Client<S> {
         let guard = self.inner.group_lock.lock().await;
         let urls = self.hub_urls().await?;
         let changes = self.apply_fetched_locked(session, link, fetched).await?;
+        // The app does the rest when it runs.
+        if self.is_extension() {
+            return Ok(changes);
+        }
         let committed = match self.remove_departed(session).await {
             Ok(()) => self.commit_pending_proposals(session).await,
             err => err,
@@ -762,7 +774,7 @@ impl<S: StateStore + 'static> Client<S> {
     pub(crate) async fn apply_parked(&self, session: &Session, group_id: &GroupId) -> Result<()> {
         let gid = group_id.clone();
         let parked = self
-            .run(move |store, _| Ok(store.parked_messages(&gid)?))
+            .read(move |store, _| Ok(store.parked_messages(&gid)?))
             .await?;
         if parked.is_empty() {
             return Ok(());
@@ -814,7 +826,7 @@ impl<S: StateStore + 'static> Client<S> {
             joined.insert(chat.group_id.clone());
             let gid = chat.group_id.clone();
             let after = self
-                .run(move |store, _| Ok(store.group_cursor(&gid)?.contiguous_seq))
+                .read(move |store, _| Ok(store.group_cursor(&gid)?.contiguous_seq))
                 .await?;
             if let Some(history) = self
                 .group_history_from(link, &chat.group_id, after, None)
@@ -1149,10 +1161,11 @@ impl<S: StateStore + 'static> Client<S> {
         while !events.is_empty() {
             let (strict, lenient) = (strict.clone(), lenient.clone());
             let (applied, rest, unknown) = self
+                // One event per store lock hold.
                 .run(move |store, engine| {
                     let mut changes = Vec::new();
-                    let mut base = if retry { &lenient } else { &strict };
-                    while let Some(event) = events.pop_front() {
+                    let base = if retry { &lenient } else { &strict };
+                    if let Some(event) = events.pop_front() {
                         match base.apply(store, engine, event.clone()) {
                             Ok(applied) => changes.extend(applied),
                             Err(BaseError::Crypto(CryptoError::DeviceListUnknown { user_id })) => {
@@ -1161,7 +1174,6 @@ impl<S: StateStore + 'static> Client<S> {
                             }
                             Err(err) => return Err(err),
                         }
-                        base = &strict;
                     }
                     Ok((changes, events, None))
                 })
@@ -1171,7 +1183,10 @@ impl<S: StateStore + 'static> Client<S> {
             retry = false;
             if let Some(user_id) = unknown {
                 tracing::info!(%user_id, "unknown device list; fetching it and retrying once");
-                let revoked = self.refresh_device_list(&user_id).await?;
+                // Without the list the retry would skip the event for good
+                // (a Welcome is never joined): a list that cannot be read
+                // now fails the batch, which is fetched again later.
+                let revoked = self.refresh_device_list_strict(&user_id).await?;
                 self.record_revoked(session, revoked).await?;
                 retry = true;
             }

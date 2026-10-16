@@ -85,7 +85,7 @@ impl<S: StateStore + 'static> Client<S> {
             display_name: display_name.to_string(),
         })
         .await?;
-        let chats = self.run(|store, _| Ok(store.chats()?)).await?;
+        let chats = self.read(|store, _| Ok(store.chats()?)).await?;
         for chat in chats {
             if chat.membership == Membership::Joined {
                 self.announce_profile(&chat.group_id).await;
@@ -183,7 +183,7 @@ impl<S: StateStore + 'static> Client<S> {
 
     /// The current self group, if any.
     pub(crate) async fn self_group(&self) -> Result<Option<GroupId>> {
-        self.run(|store, _| Ok(store.self_groups()?.pop())).await
+        self.read(|store, _| Ok(store.self_groups()?.pop())).await
     }
 
     /// Sends `content` to the current self group, if another own device is
@@ -194,7 +194,7 @@ impl<S: StateStore + 'static> Client<S> {
             return Ok(());
         };
         let gid = group_id.clone();
-        let chat = self.run(move |store, _| Ok(store.chat(&gid)?)).await?;
+        let chat = self.read(move |store, _| Ok(store.chat(&gid)?)).await?;
         let shared = chat.is_some_and(|c| {
             c.membership == Membership::Joined
                 && c.members.iter().any(|m| m.device != session.device)
@@ -290,7 +290,7 @@ impl<S: StateStore + 'static> Client<S> {
                 .await?;
         }
         self.share_hub_locations().await;
-        let chats = self.run(|store, _| Ok(store.chats()?)).await?;
+        let chats = self.read(|store, _| Ok(store.chats()?)).await?;
         for chat in chats {
             if chat.membership != Membership::Joined
                 || chat.members.iter().any(|m| &m.device == device)

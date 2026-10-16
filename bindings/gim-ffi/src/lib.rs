@@ -17,7 +17,7 @@ pub use chat_list::{ChatListDiff, ChatListListener};
 #[cfg(feature = "testing")]
 pub use client::create_client_with_fake_transport;
 pub use client::{
-    create_client, ClientConfig, ConnectionStateListener, GimClient, HubListListener,
+    create_client, ClientConfig, ClientMode, ConnectionStateListener, GimClient, HubListListener,
     TypingListener,
 };
 pub use error::GimError;
@@ -76,6 +76,7 @@ mod tests {
     fn config(url: &str) -> ClientConfig {
         ClientConfig {
             server_url: url.to_string(),
+            mode: None,
         }
     }
 
