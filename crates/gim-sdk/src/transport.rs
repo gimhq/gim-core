@@ -17,6 +17,8 @@ use gim_base::model::{ChatKind, GroupMessage, IncomingEvent};
 use gim_common::{ClientId, DeviceRef, GroupId, UserId};
 use serde::{Deserialize, Serialize};
 
+use crate::push::PushRegistration;
+
 /// Bearer token of a signed-in device.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -576,6 +578,23 @@ pub trait Transport: Send + Sync {
         _user_id: &UserId,
     ) -> TransportResult<Option<StoredHostingRecord>> {
         Ok(None)
+    }
+
+    /// Stores the calling device's push registration, replacing any
+    /// previous one (`PUT /v2/push/registration`). Transports without push
+    /// answer [`TransportError::NotFound`].
+    async fn put_push_registration(
+        &self,
+        _token: &AccessToken,
+        _registration: &PushRegistration,
+    ) -> TransportResult<()> {
+        Err(TransportError::NotFound("push is not supported".into()))
+    }
+
+    /// Removes the calling device's push registration, if any (`DELETE
+    /// /v2/push/registration`).
+    async fn delete_push_registration(&self, _token: &AccessToken) -> TransportResult<()> {
+        Err(TransportError::NotFound("push is not supported".into()))
     }
 
     /// Uploads the already-encrypted blob in `file`; returns its id.

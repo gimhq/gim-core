@@ -17,7 +17,7 @@ pub use chat_list::{ChatListDiff, ChatListListener};
 #[cfg(feature = "testing")]
 pub use client::create_client_with_fake_transport;
 pub use client::{
-    create_client, ClientConfig, ConnectionStateListener, GimClient, HubListListener,
+    create_client, ClientConfig, ClientMode, ConnectionStateListener, GimClient, HubListListener,
     TypingListener,
 };
 pub use error::GimError;
@@ -27,8 +27,9 @@ pub use task_handle::TaskHandle;
 pub use timeline::{LocalTimeZone, Timeline, TimelineDiff, TimelineListener};
 pub use types::{
     ChatKind, ChatState, ChatSummary, ConnectionState, DeviceInfo, HubInfo, HubState, MediaRef,
-    MembershipChangeKind, MessageContent, MessageItem, MessagePreview, ReactionGroup, ReplyPreview,
-    SendState, Session, TimelineItem, UserProfile,
+    MembershipChangeKind, MessageContent, MessageItem, MessagePreview, NotificationContent,
+    NotificationKind, PushRegistration, ReactionGroup, ReplyPreview, SendState, Session,
+    TimelineItem, UserProfile,
 };
 
 uniffi::setup_scaffolding!();
@@ -76,6 +77,7 @@ mod tests {
     fn config(url: &str) -> ClientConfig {
         ClientConfig {
             server_url: url.to_string(),
+            mode: None,
         }
     }
 

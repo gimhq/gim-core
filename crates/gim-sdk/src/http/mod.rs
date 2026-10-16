@@ -21,6 +21,7 @@ use reqwest::{Body, Method, RequestBuilder, Response, StatusCode};
 use serde::de::DeserializeOwned;
 use tokio_util::io::ReaderStream;
 
+use crate::push::PushRegistration;
 use crate::stream::ws;
 use crate::transport::{
     AccessToken, Challenge, ClaimedKeyPackage, CommitAccepted, EventBatch, EventStream, GroupInfo,
@@ -675,6 +676,32 @@ impl Transport for HttpTransport {
             .into_iter()
             .map(|pending| convert::welcome(pending.welcome))
             .collect()
+    }
+
+    async fn put_push_registration(
+        &self,
+        token: &AccessToken,
+        registration: &PushRegistration,
+    ) -> TransportResult<()> {
+        let request = v2::PushRegistration {
+            provider: registration.provider.clone(),
+            token: registration.token.clone(),
+            app_id: registration.app_id.clone(),
+            sandbox: registration.sandbox,
+            p256dh: registration.p256dh.clone(),
+            auth: registration.auth.clone(),
+        };
+        Self::send_ok(
+            self.api(Method::PUT, paths::PUSH_REGISTRATION, Some(token))
+                .json(&request),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn delete_push_registration(&self, token: &AccessToken) -> TransportResult<()> {
+        Self::send_ok(self.api(Method::DELETE, paths::PUSH_REGISTRATION, Some(token))).await?;
+        Ok(())
     }
 
     async fn ack_welcome(&self, token: &AccessToken, group_id: &GroupId) -> TransportResult<()> {
