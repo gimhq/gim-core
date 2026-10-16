@@ -450,9 +450,17 @@ KeyPackages or download media. What it does depends on the payload type:
   device, so the invitation's push may have been replaced by a later message's) it joins through
   the pending invitations first and shows the invitation unless the message itself is shown.
 - a chat invitation: joins the chat through the pending invitations, as sync does.
-- a member change: catches the chat up; silent.
-- a wake-up (minimal mode) or an unknown type: reads the pending events once, without moving the
-  sync position (the app's stream reads them again), and shows the newest unread message.
+- a member change: catches the chat up.
+- a wake-up (minimal mode) or an unknown type: joins pending invitations and reads the pending
+  events once, without moving the sync position (the app's stream reads them again).
+
+The hub keeps one pending push per device: a later push replaces an earlier one, keeps the
+higher priority and carries the newest payload, so an alert may arrive for a read receipt or a
+display name announcement that followed a text. Whenever the pushed item itself shows nothing (and
+for member changes and wake-ups), `processPush` catches the chat up to the pushed position and
+shows the newest unread text or media from someone else it obtained, else the invitation of a chat
+it joined, else nothing (`shouldDisplay = false`). Unread is the stored read state: a message read
+on this or another own device is not shown again.
 
 `NotificationContent` is `chatId?`, `chatTitle?` (the group name, or the other user's name in a
 direct chat), `senderUserId?`, `senderDisplayName?`, `body` (text, caption, `Photo`,

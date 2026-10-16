@@ -370,3 +370,59 @@ async fn registration_lifecycle_controls_pushes() {
     alice.client.sign_out().await.unwrap();
     assert_eq!(pushes("four").await, 0, "signed out");
 }
+
+/// With priority-aware coalescing (hub H8) a text and the read receipt
+/// right after it reach alice as one alert push carrying the receipt's
+/// payload: the extension catches the chat up and shows the text.
+/// `scripts/integration-test.sh` runs ignored tests too, so this one also
+/// needs `GIM_HUB_PRIORITY_COALESCING=1` until the pinned hub has H8.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs hub H8 priority-aware coalescing"]
+async fn coalesced_receipt_push_shows_the_text_before_it() {
+    let Some(url) = server_url("coalesced_receipt_push_shows_the_text_before_it") else {
+        return;
+    };
+    if std::env::var("GIM_HUB_PRIORITY_COALESCING").as_deref() != Ok("1") {
+        eprintln!(
+            "skipping coalesced_receipt_push_shows_the_text_before_it: GIM_HUB_PRIORITY_COALESCING is not 1"
+        );
+        return;
+    }
+    let alice = TestUser::register(&url, "alice", "Alice").await;
+    let bob = TestUser::register(&url, "bob", "Bob").await;
+    register_log_push(&alice).await;
+    let chat = direct_chat(&alice, &bob).await;
+    let (bob_timeline, _handle) = bob.timeline(&chat).await;
+    let ahoy = alice
+        .client
+        .send_text(chat.clone(), "Ahoy".into(), None)
+        .await
+        .unwrap();
+    bob_timeline
+        .wait("ahoy at bob", |items| {
+            messages(items).iter().any(|m| m.message_id == ahoy)
+        })
+        .await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    alice.client.stop_sync().await.unwrap();
+    let before = push_log(&url, &alice.device_id).len();
+    let text = bob
+        .client
+        .send_text(chat.clone(), "Anchored off Hvar".into(), None)
+        .await
+        .unwrap();
+    bob.client.mark_read(chat.clone(), text).await.unwrap();
+    let pushed = new_pushes(&url, &alice.device_id, before, PUSH_WAIT, for_chat(&chat)).await;
+    assert_eq!(pushed.len(), 1, "one coalesced push: {pushed:?}");
+
+    let shown = process_all(&url, &alice.hooks, &pushed).await;
+    assert_eq!(shown[0].kind, NotificationKind::Message, "{shown:?}");
+    assert!(shown[0].should_display, "{shown:?}");
+    assert_eq!(shown[0].body, "Anchored off Hvar");
+    assert_eq!(shown[0].sender_display_name.as_deref(), Some("Bob"));
+
+    alice.client.start_sync().await.unwrap();
+    let texts = texts_once_synced(&alice, &chat, "Anchored off Hvar").await;
+    assert_eq!(texts, ["Ahoy", "Anchored off Hvar"]);
+}
