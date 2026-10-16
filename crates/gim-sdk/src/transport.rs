@@ -137,13 +137,19 @@ pub struct HostingEntryGrant {
 }
 
 /// A hub's identity: result of [`Transport::hub_info`]. Unverified; the
-/// client checks that `hub_id` derives from `hub_root_public_key`.
+/// client checks that `hub_id` derives from `hub_root_public_key` and the
+/// proof of possession for the URL it contacted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HubIdentity {
     pub hub_id: String,
     /// The hub's 32-byte Ed25519 root public key.
     pub hub_root_public_key: Vec<u8>,
     pub version: String,
+    /// The hub's normalized public client API URL, if it has one.
+    pub public_url: Option<String>,
+    /// Only for a request with a nonce: the root key's signature over the
+    /// nonce, `hub_id` and `public_url` (gim-identity hub proof).
+    pub proof: Option<Vec<u8>>,
 }
 
 /// A user's hosting record as a hub stores it. Unverified.
@@ -227,6 +233,12 @@ pub enum TransportError {
     /// or its keys are broken.
     #[error("device not active: {0}")]
     DeviceNotActive(String),
+    /// The hub at the contacted URL did not prove that it is the expected
+    /// hub at that URL (`GET /v2/hub` proof of possession, or the URL of
+    /// its sign-in challenge): a wrong URL or a relay. Nothing that needs a
+    /// session is sent there.
+    #[error("hub not verified: {0}")]
+    HubNotVerified(String),
     /// 429 `rate_limited` or 503 `peer_unavailable` of a public read or a
     /// blob download that kept failing within its retry budget; try again
     /// after `retry_after_secs`.
@@ -332,9 +344,11 @@ pub trait Transport: Send + Sync {
 
     /// The hub's identity (no token), so the client can check that the
     /// hub behind this transport is the `hub_id` it expects before
-    /// signing in. Transports without it answer
-    /// [`TransportError::NotFound`].
-    async fn hub_info(&self) -> TransportResult<HubIdentity> {
+    /// signing in. With a `nonce`, the hub proves possession of its root
+    /// key for its public URL; a hub without one answers 400
+    /// ([`TransportError::Rejected`]). Transports without a hub identity
+    /// answer [`TransportError::NotFound`].
+    async fn hub_info(&self, _nonce: Option<&[u8; 32]>) -> TransportResult<HubIdentity> {
         Err(TransportError::NotFound(
             "hub identity is not supported".into(),
         ))

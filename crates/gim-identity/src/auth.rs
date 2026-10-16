@@ -15,12 +15,22 @@ pub const AUTH_RESPONSE_CONTEXT: &[u8] = b"gim/auth-response/v1";
 /// Maximum `expires_at - issued_at` of an [`AuthChallenge`]: 5 minutes.
 pub const AUTH_CHALLENGE_MAX_LIFETIME_MS: u64 = 300_000;
 
+/// Version of an [`AuthChallenge`] bound to the hub's public URL.
+pub const AUTH_CHALLENGE_V2: u64 = 2;
+
 /// An unsigned login challenge issued by the hub `audience`. The hub keeps
 /// track of what it issued; nonce single-use is enforced hub-side.
+///
+/// A hub with a public URL issues version 2, which also carries
+/// `audience_url`; a hub without one (single-hub development) issues
+/// version 1.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthChallenge {
     /// `hub_id` of the issuing hub.
     pub audience: String,
+    /// The issuing hub's normalized public URL ([`crate::normalize_hub_url`]);
+    /// `Some` exactly for version 2.
+    pub audience_url: Option<String>,
     pub nonce: [u8; 32],
     /// Unix time in milliseconds.
     pub issued_at: u64,
@@ -29,27 +39,79 @@ pub struct AuthChallenge {
 }
 
 impl AuthChallenge {
-    /// `[1, audience, nonce, issued_at, expires_at]`.
+    /// v1 `[1, audience, nonce, issued_at, expires_at]`, or with an
+    /// `audience_url` v2 `[2, audience, audience_url, nonce, issued_at,
+    /// expires_at]`.
     pub fn to_bytes(&self) -> Vec<u8> {
-        cbor::encode(&Value::Array(vec![
-            Value::Integer(FORMAT_VERSION.into()),
+        let mut items = vec![
+            Value::Integer(self.version().into()),
             Value::Text(self.audience.clone()),
+        ];
+        if let Some(url) = &self.audience_url {
+            items.push(Value::Text(url.clone()));
+        }
+        items.extend([
             Value::Bytes(self.nonce.to_vec()),
             Value::Integer(self.issued_at.into()),
             Value::Integer(self.expires_at.into()),
-        ]))
+        ]);
+        cbor::encode(&Value::Array(items))
     }
 
+    /// Decodes v1 (exactly 5 items) or v2 (exactly 6 items).
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, IdentityError> {
-        let [_, audience, nonce, issued_at, expires_at] = cbor::decode_body(bytes)?;
+        let value = cbor::decode(bytes)?;
+        let version = cbor::uint(cbor::item(&value, 0)?)?;
+        let (audience, audience_url, nonce, issued_at, expires_at) = match version {
+            FORMAT_VERSION => {
+                let [_, audience, nonce, issued_at, expires_at] = cbor::array(value)?;
+                (audience, None, nonce, issued_at, expires_at)
+            }
+            AUTH_CHALLENGE_V2 => {
+                let [_, audience, url, nonce, issued_at, expires_at] = cbor::array(value)?;
+                (
+                    audience,
+                    Some(cbor::text(url)?),
+                    nonce,
+                    issued_at,
+                    expires_at,
+                )
+            }
+            version => return Err(IdentityError::UnsupportedVersion(version)),
+        };
         Ok(Self {
             audience: cbor::text(audience)?,
+            audience_url,
             nonce: cbor::bytes_value(nonce)?
                 .try_into()
                 .map_err(|_| IdentityError::Decode("nonce is not 32 bytes".into()))?,
             issued_at: cbor::uint(issued_at)?,
             expires_at: cbor::uint(expires_at)?,
         })
+    }
+
+    /// 1, or 2 with an `audience_url`.
+    pub fn version(&self) -> u64 {
+        match self.audience_url {
+            Some(_) => AUTH_CHALLENGE_V2,
+            None => FORMAT_VERSION,
+        }
+    }
+
+    /// Checks the addressee, as the device does before signing and the hub
+    /// before accepting: `audience` is `hub_id` ([`IdentityError::AudienceMismatch`]),
+    /// and the challenge is v2 with `audience_url == hub_url` for a hub
+    /// with a public URL, or v1 for a hub without one
+    /// ([`IdentityError::AudienceUrlMismatch`]). `hub_url` must be
+    /// normalized.
+    pub fn check_audience(&self, hub_id: &str, hub_url: Option<&str>) -> Result<(), IdentityError> {
+        if self.audience != hub_id {
+            return Err(IdentityError::AudienceMismatch);
+        }
+        if self.audience_url.as_deref() != hub_url {
+            return Err(IdentityError::AudienceUrlMismatch);
+        }
+        Ok(())
     }
 }
 
@@ -121,13 +183,15 @@ impl AuthResponse {
     /// the response's user and the device is certified in it and not
     /// revoked (this yields the verifying key); `sig` verifies under the
     /// certified device key; only then the challenge decodes, is addressed
-    /// to `expected_audience`, has a valid window (`issued_at < expires_at`,
+    /// to `expected_audience` and `expected_audience_url`
+    /// ([`AuthChallenge::check_audience`]), has a valid window (`issued_at < expires_at`,
     /// lifetime at most [`AUTH_CHALLENGE_MAX_LIFETIME_MS`]) and is valid at
     /// `now` (`issued_at <= now < expires_at`). The hub must
     /// also check that it issued the challenge and that its nonce is unused.
     pub fn verify(
         &self,
         expected_audience: &str,
+        expected_audience_url: Option<&str>,
         now: u64,
         device_list: &SignedDeviceList,
     ) -> Result<DeviceRef, IdentityError> {
@@ -146,9 +210,7 @@ impl AuthResponse {
             &self.sig,
         )?;
         let challenge = AuthChallenge::from_bytes(&self.challenge)?;
-        if challenge.audience != expected_audience {
-            return Err(IdentityError::AudienceMismatch);
-        }
+        challenge.check_audience(expected_audience, expected_audience_url)?;
         if challenge.issued_at >= challenge.expires_at {
             return Err(IdentityError::InvalidValidityWindow);
         }

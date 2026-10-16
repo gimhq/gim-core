@@ -116,7 +116,11 @@ fn cases() -> Vec<Case> {
         ),
         case::<HubInfo>(
             "HubInfo",
-            json!({"hub_id": HUB, "hub_root_pubkey": b(), "version": "0.1.0"}),
+            json!({
+                "hub_id": HUB, "hub_root_pubkey": b(), "version": "0.1.0",
+                "public_url": "https://hub.example.eu",
+                "proof": "xDC4XeBqNVag459Oc3cA_DcSOAoJcOCtoe6CXOiFVP-ShX1tVjImuvh1fp6lEcVMbWSdfAVypyQsRolceTlIBQ",
+            }),
             json!({"hub_id": HUB, "hub_root_pubkey": b(), "version": "0.1.0"}),
         ),
         case::<AuthChallengeRequest>(
@@ -439,15 +443,6 @@ fn enums() -> Vec<(&'static str, Vec<Value>)> {
                 MessageKind::Proposal,
             ]),
         ),
-        (
-            "PushProvider",
-            values(&[
-                PushProvider::Apns,
-                PushProvider::Fcm,
-                PushProvider::UnifiedPush,
-                PushProvider::Log,
-            ]),
-        ),
     ]
 }
 
@@ -692,6 +687,12 @@ fn blob_path_encodes_origin_prefixed_ids() {
 fn query_parameters_match() {
     let spec = spec();
     let cases = [
+        (
+            "/v2/hub",
+            serde_json::to_value(HubQuery {
+                nonce: Some(vec![7; 32]),
+            }),
+        ),
         (
             "/v2/events",
             serde_json::to_value(EventsQuery {

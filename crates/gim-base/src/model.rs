@@ -317,9 +317,9 @@ pub struct HubRecord {
     /// Client API base URL, once known.
     pub url: Option<String>,
     /// `url` came from another own device (the self group), not from this
-    /// device: it is never contacted, so the hub stays unverified, until a
-    /// URL is set on this device. A relay at a wrong URL could otherwise
-    /// obtain this device's session there.
+    /// device. Like any URL, it is used only once the hub proof there
+    /// (`GET /v2/hub?nonce=`) proved the hub at that URL; before that, the
+    /// proof is the only request sent to it.
     pub url_shared: bool,
     /// Priority in the hosting record; lower is preferred.
     pub priority: u8,

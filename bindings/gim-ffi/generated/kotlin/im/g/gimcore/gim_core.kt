@@ -8137,6 +8137,19 @@ sealed class GimException: kotlin.Exception() {
             get() = "chatId=${ `chatId` }, state=${ `state` }"
     }
     
+    /**
+     * The server at the configured URL did not prove that it is the
+     * expected hub at that URL (a wrong URL, or a relay in between); the
+     * device did not sign in there. Check the hub URL.
+     */
+    class HubNotVerified(
+        
+        val `reason`: kotlin.String
+        ) : GimException() {
+        override val message
+            get() = "reason=${ `reason` }"
+    }
+    
 
     
 
@@ -8189,6 +8202,9 @@ public object FfiConverterTypeGimError : FfiConverterRustBuffer<GimException> {
             12 -> GimException.ChatNotActive(
                 FfiConverterString.read(buf),
                 FfiConverterTypeChatState.read(buf),
+                )
+            13 -> GimException.HubNotVerified(
+                FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
@@ -8257,6 +8273,11 @@ public object FfiConverterTypeGimError : FfiConverterRustBuffer<GimException> {
                 + FfiConverterString.allocationSize(value.`chatId`)
                 + FfiConverterTypeChatState.allocationSize(value.`state`)
             )
+            is GimException.HubNotVerified -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`reason`)
+            )
         }
     }
 
@@ -8321,6 +8342,11 @@ public object FfiConverterTypeGimError : FfiConverterRustBuffer<GimException> {
                 buf.putInt(12)
                 FfiConverterString.write(value.`chatId`, buf)
                 FfiConverterTypeChatState.write(value.`state`, buf)
+                Unit
+            }
+            is GimException.HubNotVerified -> {
+                buf.putInt(13)
+                FfiConverterString.write(value.`reason`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }

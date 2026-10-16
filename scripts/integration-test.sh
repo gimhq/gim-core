@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Runs testing/gim-integration-testing against a real gim-hub container.
 #
-# Builds gim-hub (GIM_HUB_SRC at GIM_HUB_REV, default
-# 18afc7bdde8cd643e4f4e21a35758fdb3a0bc155, see
-# scripts/gim-hub-dev.sh), starts it on GIM_HUB_NETWORK (default traefik),
+# Builds gim-hub (GIM_HUB_SRC at GIM_HUB_REV, pinned in
+# scripts/gim-hub-dev.sh), starts it on GIM_HUB_NETWORK (default traefik)
+# with GIM_HUB_PUBLIC_URL http://<container>:8080, the URL the tests use,
 # waits for /healthz and runs the tests in a rust:1 container on the same
 # network. The hub container is always stopped on exit; its logs are printed
 # on failure. The hub commit is printed before the tests run.

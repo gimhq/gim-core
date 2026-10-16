@@ -181,9 +181,13 @@ impl Hub {
 
 #[async_trait]
 impl Transport for Hub {
-    async fn hub_info(&self) -> TransportResult<HubIdentity> {
+    fn base_url(&self) -> Option<String> {
+        self.own.base_url()
+    }
+
+    async fn hub_info(&self, nonce: Option<&[u8; 32]>) -> TransportResult<HubIdentity> {
         self.up()?;
-        self.own.hub_info().await
+        self.own.hub_info(nonce).await
     }
 
     async fn put_device_list(&self, u: &UserId, list: Vec<u8>) -> TransportResult<()> {
@@ -515,7 +519,7 @@ struct Setup {
 impl Setup {
     async fn new() -> Self {
         let fake_a = FakeTransport::new();
-        let fake_b = FakeTransport::with_hub_seed(SEED_B);
+        let fake_b = FakeTransport::with_hub_seed(SEED_B).with_public_url(HUB_B_URL);
         let hub_a = Hub::new(&fake_a, &fake_a);
         let hub_b = Hub::new(&fake_b, &fake_a);
         let connected = hub_b.clone();

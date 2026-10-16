@@ -1,41 +1,132 @@
 # Push gateway
 
-The hub wakes devices through a push provider when events are addressed to them. A push is only a
+The hub wakes devices when events are addressed to them. It does not talk to any push platform
+itself: every push leaves the hub as one signed HTTP webhook to an external **push server**, which
+owns platform delivery (APNs, FCM, Web Push or anything else) and its credentials. A push is only a
 wake-up hint: the client always syncs its event stream (`GET /v2/events` from its cursor)
 afterwards. Pushes may be coalesced, dropped or duplicated; correctness never depends on them.
 
-This document is normative for the payload (section 2) and the provider mapping (section 3); gim-core
-`process_push(payload)` parses it.
+This document is normative for the webhook a push server implements (section 2) and for the
+payload (section 3), which gim-core `process_push(payload)` parses.
 
 ## 1. Registration
 
 `PUT /v2/push/registration` (bearer auth) stores the calling device's registration, replacing any
 previous one (one per device); `DELETE` removes it. Both return 204. The body is
-`{provider, token, app_id?, sandbox?, p256dh?, auth?}` (see `openapi.json`):
+`{provider, token, app_id?, sandbox?, p256dh?, auth?}` (see `openapi.json`). Every field is opaque
+to the hub: it checks the shape only and passes the values to the push server.
 
-| `provider` | `token` | `app_id` | `sandbox` | `p256dh`, `auth` |
-|---|---|---|---|---|
-| `apns` | APNs device token: 64-200 hex digits (even), stored lowercase | APNs topic (bundle ID); defaults to `GIM_HUB_PUSH_APNS_TOPIC` | use the APNs sandbox | ignored |
-| `fcm` | FCM registration token: at least 32 chars of `A-Z a-z 0-9 - _ : .` | ignored | ignored | ignored |
-| `unifiedpush` | endpoint URL: `https`, no credentials, not `localhost` or a non-public IP (loopback, private, link-local, CGNAT, NAT64, 6to4, ...) | ignored | ignored | required (section 3) |
-| `log` | any string without control characters | ignored | ignored | ignored |
+| Field | Rule |
+|---|---|
+| `provider` | 1-64 chars of `a-z 0-9 . _ -`, e.g. `apns`, `fcm`, `unifiedpush`. `log` is the hub's test provider (section 5); every other value goes to the webhook. |
+| `token` | 1-4096 bytes, no control characters. |
+| `app_id` | optional, 1-255 chars of `A-Z a-z 0-9 . - _ :` (e.g. a bundle ID). |
+| `sandbox` | optional bool; absent unless set. |
+| `p256dh`, `auth` | optional, each 1-256 chars of base64url (padding optional), e.g. Web Push keys. Not required by any provider. |
 
-For `unifiedpush`, `p256dh` is the device's Web Push public key (base64url, padding optional, of
-the 65-byte uncompressed P-256 point; it must be a valid curve point) and `auth` its
-authentication secret (base64url of 16 bytes), as defined by RFC 8291. Both are required; a
-missing or malformed value is 400 `validation_failed`. Other providers ignore both fields and do
-not store them.
+Invalid input is 400 `validation_failed`. Registrations are accepted for every provider even when
+no push server is configured; their pushes are then skipped (logged and counted).
 
-Every token is 1-4096 bytes; `app_id` is 1-255 chars of `A-Z a-z 0-9 . - _ :`. Invalid input is
-400 `validation_failed`. Registrations are accepted for every provider even when the hub has no
-credentials for it; sends to an unconfigured provider are logged as skipped.
+A registration is removed when the push server answers 404 or 410 for it (section 2.4), unless the
+device registered a different provider or token meanwhile. It is also removed with the device.
 
-A registration is removed when the provider reports the token as invalid (APNs 410 or
-`BadDeviceToken`/`DeviceTokenNotForTopic`, FCM 404 or `UNREGISTERED`/`SENDER_ID_MISMATCH`,
-UnifiedPush 404/410), unless the device registered a different token meanwhile. It is also
-removed with the device.
+## 2. Webhook
 
-## 2. Payload
+Configured with `GIM_HUB_PUSH_WEBHOOK_URL`, `GIM_HUB_PUSH_WEBHOOK_SECRET` and
+`GIM_HUB_PUSH_WEBHOOK_TIMEOUT_SECONDS` ([`operations.md`](operations.md)).
+
+### 2.1 Request
+
+```
+POST <GIM_HUB_PUSH_WEBHOOK_URL>
+content-type: application/json
+X-Gim-Signature: t=<unix seconds>,v1=<lowercase hex HMAC-SHA256>
+X-Gim-Delivery: <delivery_id>
+```
+
+`X-Gim-Delivery` equals the body's `delivery_id`. The hub does not follow redirects.
+
+### 2.2 Signature
+
+`v1 = hex(HMAC-SHA256(GIM_HUB_PUSH_WEBHOOK_SECRET, "<t>." || raw body bytes))`, where `<t>` is the
+decimal timestamp of the `t=` field. The timestamp is bound into the MAC, so a receiver can reject
+replays outside a window. To verify:
+
+1. Split the header on `,` into `key=value` pairs; take `t` and `v1`.
+2. Reject if `|now - t| > 300` seconds (recommended window).
+3. Compute the HMAC over the ASCII bytes of `t`, a `.` and the **raw** request body (before any
+   JSON parsing or re-serialization), hex-encode it in lowercase and compare it with `v1` in
+   constant time.
+
+Example: secret `example-secret-0123456789abcdef0123`, `t = 1760600000` and the raw body
+
+```
+{"v":1,"hub_id":"hubexample","delivery_id":"3f1c0d9a8b7e6f5a4b3c2d1e0f9a8b7c"}
+```
+
+give
+
+```
+X-Gim-Signature: t=1760600000,v1=41f7f7c39db767f966e6c1cd60c6a460266194f33b271d1244ac9bb7b38e544e
+```
+
+In Python: `hmac.new(secret, f"{t}.".encode() + body, hashlib.sha256).hexdigest()` and
+`hmac.compare_digest`.
+
+### 2.3 Body
+
+```json
+{
+  "v": 1,
+  "hub_id": "<hub_id>",
+  "delivery_id": "<32 lowercase hex chars>",
+  "sent_at": 1760600000123,
+  "registration": {
+    "provider": "apns",
+    "token": "<token>",
+    "app_id": "im.g.apps",
+    "sandbox": false,
+    "p256dh": "<base64url>",
+    "auth": "<base64url>"
+  },
+  "priority": "high",
+  "collapse_id": "<collapse_id>",
+  "ttl": 86400,
+  "payload": { ...payload v1 or the wake object, section 3... }
+}
+```
+
+- `v`: webhook version, `1`. Receivers ignore unknown fields.
+- `hub_id`: the sending hub.
+- `delivery_id`: unique per push and identical across retries of that push: the idempotency key
+  (section 2.5).
+- `sent_at`: unix milliseconds of the first attempt (unchanged on retries).
+- `registration`: the stored registration (section 1). `app_id`, `sandbox`, `p256dh` and `auth`
+  are absent when not set; `p256dh` and `auth` are re-encoded as unpadded base64url.
+- `priority`: `high` for `message` and `welcome`, `normal` for membership events (silent).
+- `collapse_id`: equal to the payload's `collapse_id` (section 4).
+- `ttl`: seconds the push server may keep trying to deliver, `86400`.
+- `payload`: what the device receives (section 3).
+
+The body carries no `user_id` or `device_id`: the push server only needs the registration.
+
+### 2.4 Responses and retries
+
+| Response | Hub action |
+|---|---|
+| 2xx | Delivered. |
+| 404, 410 | The registration is invalid: deleted, unless the device registered a different provider or token meanwhile. |
+| 429, 5xx, timeout, transport error | Retried after 1, 2, 4, 8 s (5 attempts in total), but not before `Retry-After` (delay seconds, honoured up to 60 s); dropped once a newer push for the device is queued (section 4). |
+| Any other status, including 3xx and other 4xx | Permanent failure: the push is dropped and logged, the registration kept. |
+
+### 2.5 Idempotency
+
+A retry may reach the push server although an earlier attempt was delivered (e.g. the response
+was lost). Push servers deduplicate on `delivery_id` (keep the ids seen within `ttl`). Pushes for
+the same message from several hubs of a multi-homed user carry different `delivery_id`s but the
+same `collapse_id` (section 4).
+
+## 3. Payload
 
 ```json
 {
@@ -58,111 +149,31 @@ removed with the device.
 - `message_id`: the hub's ID of the stored message at `(gid, seq)`. If the hub does not store that
   message, a stand-in: the first 16 bytes of `SHA-256(gid || 0x00 || seq as u64 big-endian)`,
   lowercase hex.
-- `collapse_id`: always equal to `message_id`, so a device collapses duplicate pushes for the same
-  message (e.g. from several hubs of a multi-homed user, arch §9.5).
+- `collapse_id`: always equal to `message_id` (section 4).
 - `mls_message` (optional): standard base64 of the MLS message (`message`) or of the TLS-encoded
   MLSMessage (wire_format = mls_welcome) carrying the Welcome (`welcome`, the same bytes as the
   event's `welcome` field; only when the Welcome has no separate ratchet tree). Present only if
-  the encoded provider payload stays within the provider limit (section 3); otherwise omitted and
-  the client fetches `GET /v2/groups/{gid}/messages?from_seq={seq}` (or
-  `GET /v2/welcomes/pending`). Never present for membership events.
+  the payload JSON stays within 3072 bytes, leaving room for the push server's platform envelope;
+  otherwise omitted and the client fetches `GET /v2/groups/{gid}/messages?from_seq={seq}` (or
+  `GET /v2/welcomes/pending`). Never present for membership events. A push server whose platform
+  limit is still exceeded drops `mls_message` and keeps the rest.
 
 The payload never names the sender: it is inside the MLS ciphertext. The hub never sees
-plaintext; `mls_message` is the same ciphertext the event stream carries. For APNs and FCM the
-metadata fields (`gid`, `seq`, `message_id`) are visible to the push provider; UnifiedPush bodies
-are end-to-end encrypted to the device (section 3).
+plaintext; `mls_message` is the same ciphertext the event stream carries. The metadata fields
+(`gid`, `seq`, `message_id`) are visible to the push server and to the platform it uses; minimal
+mode hides them.
 
 ### Minimal mode
 
-With `GIM_HUB_PUSH_MINIMAL=true` (default `false`) every push carries exactly
+With `GIM_HUB_PUSH_MINIMAL=true` (default `false`) every payload is exactly
 
 ```json
 {"v": 1, "type": "wake", "collapse_id": "<message_id>"}
 ```
 
-with no `gid`, `seq`, `message_id` or `mls_message`; the client syncs `GET /v2/events`. Provider
-envelopes are unchanged: APNs alert vs. background push type and priority, FCM priority and
-UnifiedPush urgency are still chosen from the underlying event type, and collapse ids
-(`apns-collapse-id`, `collapse_key`, `topic`) are the same.
-
-## 3. Provider mapping
-
-### APNs
-
-`POST https://api.push.apple.com/3/device/<token>` (`api.sandbox.push.apple.com` if the
-registration has `sandbox: true` or `GIM_HUB_PUSH_APNS_SANDBOX=true`), HTTP/2, token-based auth.
-
-| Header | Value |
-|---|---|
-| `authorization` | `bearer <ES256 JWT {alg: ES256, kid: KEY_ID} {iss: TEAM_ID, iat}>`, reused for 50 minutes |
-| `apns-topic` | registration `app_id`, else `GIM_HUB_PUSH_APNS_TOPIC` |
-| `apns-push-type` | `alert` (`message`, `welcome`); `background` (membership) |
-| `apns-priority` | `10` (alert); `5` (background) |
-| `apns-collapse-id` | `collapse_id` |
-| `content-type` | `application/json` |
-
-Body (`message`; `welcome` uses the body `New conversation`):
-
-```json
-{
-  "aps": {"alert": {"title": "gim", "body": "New message"}, "mutable-content": 1},
-  "gim": { ...payload... }
-}
-```
-
-Membership events use `"aps": {"content-available": 1}`. The Notification Service Extension
-passes `gim` (re-serialized as JSON) to `process_push` and replaces the generic alert. The whole
-body is at most 4096 bytes: `mls_message` is inlined only if the body fits.
-
-### FCM
-
-`POST https://fcm.googleapis.com/v1/projects/<project_id>/messages:send` with
-`authorization: Bearer <OAuth access token>`. The token comes from the service account's
-`token_uri` with a JWT bearer grant (RS256 JWT `{iss: client_email, scope:
-https://www.googleapis.com/auth/firebase.messaging, aud: token_uri, iat, exp: iat + 3600}`) and is
-reused until a minute before it expires. Data-only message:
-
-```json
-{
-  "message": {
-    "token": "<token>",
-    "data": {"gim": "<payload as a JSON string>"},
-    "android": {"priority": "HIGH", "collapse_key": "<collapse_id>"}
-  }
-}
-```
-
-`priority` is `NORMAL` for membership events. `data` (key `gim` plus the JSON string) is at most
-4000 bytes: `mls_message` is inlined only if it fits.
-
-### UnifiedPush
-
-`POST <token>` (the endpoint URL). The body is the payload JSON encrypted with Web Push message
-encryption (RFC 8291) in the `aes128gcm` content coding (RFC 8188), for the registration's
-`p256dh` and `auth`:
-
-- A fresh P-256 key pair (`as_public`) and a random 16-byte `salt` per push.
-- `ecdh_secret = ECDH(as_private, p256dh)`; `IKM = HKDF-SHA-256(salt = auth, IKM = ecdh_secret,
-  info = "WebPush: info" || 0x00 || p256dh || as_public, L = 32)`.
-- `PRK = HKDF-Extract(salt, IKM)`; `CEK = HKDF-Expand(PRK, "Content-Encoding: aes128gcm" || 0x00,
-  16)`; `NONCE = HKDF-Expand(PRK, "Content-Encoding: nonce" || 0x00, 12)`.
-- One record: `AES-128-GCM(CEK, NONCE, payload || 0x02)` (no further padding).
-- Body: `salt (16) || rs = 4096 (u32 big-endian) || idlen = 65 || as_public (65) || ciphertext`.
-
-The encrypted body is at most 4096 bytes. Encryption adds 103 bytes (86-byte header, padding
-delimiter, 16-byte tag), so `mls_message` is inlined only if the payload JSON is at most 3993
-bytes. Headers: `content-encoding: aes128gcm`, `content-type: application/octet-stream`,
-`ttl: 86400`, `urgency: high` (`normal` for membership events) and `topic: <collapse_id>` when it
-is a valid Web Push topic (at most 32 base64url characters). A registration without `p256dh`/`auth`
-(stored before they were required) gets no push (permanent failure) until the device registers
-again. The hub refuses to connect if the endpoint's host resolves to any non-public address (checked on
-every send, so DNS rebinding cannot reach internal hosts) and does not follow redirects (a 3xx is a
-permanent failure).
-
-### log
-
-Writes a structured log line (target `gim_hub_push::log`) and records the payload (plain JSON,
-4096-byte limit) in an in-memory ring of the last 256 pushes.
+with no `gid`, `seq`, `message_id` or `mls_message`; the client syncs `GET /v2/events`. The
+webhook body is unchanged otherwise: `priority` still follows the underlying event type and
+`collapse_id` is the same.
 
 ## 4. Dispatch
 
@@ -172,23 +183,30 @@ Writes a structured log line (target `gim_hub_push::log`) and records the payloa
   queues a push. The sender's own device never gets a `message` event, so it gets no push.
 - MLS Proposals are not pushed: a `message` event of kind `proposal` changes nothing until a Commit
   covers it, and that Commit (and its membership events) is pushed as usual.
-- Queue: at most one pending push per device; a newer one replaces it. At most
+- Queue: at most one pending push per device; a newer one replaces it (coalescing). At most
   `GIM_HUB_PUSH_QUEUE_CAPACITY` devices are queued; further pushes are dropped (counted and
   logged). Four workers send concurrently.
-- Errors: `InvalidToken` deletes the registration; `Retryable` (transport errors, throttling, 5xx,
-  expired provider credentials) retries after 1, 2, 4, 8 s (5 attempts in total) unless a newer
-  push for the device is queued; `Permanent` drops the push.
+- Registrations with provider `log` go to the log provider (section 5); every other registration
+  goes to the webhook, or is skipped when `GIM_HUB_PUSH_WEBHOOK_URL` is unset.
+- Collapse and dedup: `collapse_id` is always the message ID, so a device (or the push server)
+  collapses duplicate pushes for the same message, e.g. from several hubs of a multi-homed user
+  (arch §9.5). Push servers map it to the platform's collapse key.
 - The API request that produced the event is never affected by push failures.
-- Multi-homing hook: `Dispatcher::set_gate` installs a filter deciding whether this hub pushes to a
-  device (e.g. only if it is the user's primary hub). Without a gate every hub pushes and devices
-  collapse duplicates on `collapse_id`.
+- Multi-homing: `Dispatcher::set_gate` installs a filter deciding whether this hub pushes to a
+  device. With multi-homing only the user's primary hub pushes, a fallback hub only while every
+  hub before it is down ([`multihoming.md`](multihoming.md) §8). Without a gate every hub pushes
+  and duplicates collapse on `collapse_id`.
 - Counters (`enqueued`, `coalesced`, `dropped`, `sent`, `skipped`, `invalid_token`, `retried`,
   `failed`) are available from `Dispatcher::metrics`.
 
-## 5. Test-only push log endpoint
+## 5. Log provider and test-only push log endpoint
+
+Registrations with provider `log` never reach the webhook. The hub writes a structured log line
+(target `gim_hub_push::log`) and records the payload (plain JSON, `mls_message` inlined within
+4096 bytes) in an in-memory ring of the last 256 pushes.
 
 `GET /v2/debug/push-log?device_id=<device_id>` returns
-`{"notifications": [{user_id, device_id, token, payload, sent_at}]}`, oldest first, from the `log`
-provider's ring (all devices if `device_id` is omitted). It is unauthenticated, not part of the
-API contract (`openapi.json`), and answers 404 `not_found` unless `GIM_HUB_PUSH_LOG_ENDPOINT=true`.
-Enable it only in test deployments (CI flows register devices with provider `log`).
+`{"notifications": [{user_id, device_id, token, payload, sent_at}]}`, oldest first, from that ring
+(all devices if `device_id` is omitted). It is unauthenticated, not part of the API contract
+(`openapi.json`), and answers 404 `not_found` unless `GIM_HUB_PUSH_LOG_ENDPOINT=true`. Enable it
+only in test deployments (CI flows register devices with provider `log`).

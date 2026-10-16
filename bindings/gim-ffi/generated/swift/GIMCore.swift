@@ -5196,6 +5196,13 @@ enum GimError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
      */
     case ChatNotActive(chatId: String, state: ChatState
     )
+    /**
+     * The server at the configured URL did not prove that it is the
+     * expected hub at that URL (a wrong URL, or a relay in between); the
+     * device did not sign in there. Check the hub URL.
+     */
+    case HubNotVerified(reason: String
+    )
 
     
 
@@ -5258,6 +5265,9 @@ public struct FfiConverterTypeGimError: FfiConverterRustBuffer {
         case 12: return .ChatNotActive(
             chatId: try FfiConverterString.read(from: &buf), 
             state: try FfiConverterTypeChatState.read(from: &buf)
+            )
+        case 13: return .HubNotVerified(
+            reason: try FfiConverterString.read(from: &buf)
             )
 
          default: throw UniffiInternalError.unexpectedEnumCase
@@ -5330,6 +5340,11 @@ public struct FfiConverterTypeGimError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(12))
             FfiConverterString.write(chatId, into: &buf)
             FfiConverterTypeChatState.write(state, into: &buf)
+            
+        
+        case let .HubNotVerified(reason):
+            writeInt(&buf, Int32(13))
+            FfiConverterString.write(reason, into: &buf)
             
         }
     }

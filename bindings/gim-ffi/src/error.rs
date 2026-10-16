@@ -50,6 +50,11 @@ pub enum GimError {
     /// left. `state` is `Leaving` or `Left`; see `ChatState`.
     #[error("chat {chat_id} is not active: {state:?}")]
     ChatNotActive { chat_id: String, state: ChatState },
+    /// The server at the configured URL did not prove that it is the
+    /// expected hub at that URL (a wrong URL, or a relay in between); the
+    /// device did not sign in there. Check the hub URL.
+    #[error("hub not verified: {reason}")]
+    HubNotVerified { reason: String },
 }
 
 impl From<uniffi::UnexpectedUniFFICallbackError> for GimError {
@@ -114,6 +119,7 @@ impl From<gim_sdk::TransportError> for GimError {
             E::Rejected { status, .. } => Self::Server { status, reason },
             E::TooLarge(_) => Self::InvalidInput { reason },
             E::DeviceNotActive(_) => Self::NotRegistered,
+            E::HubNotVerified(_) => Self::HubNotVerified { reason },
             E::HostingRecordRequired(_) => Self::Server {
                 status: 403,
                 reason,
@@ -263,6 +269,11 @@ mod tests {
         assert!(matches!(
             rejected(403),
             GimError::Server { status: 403, .. }
+        ));
+        let relay = TransportError::HubNotVerified("relay".into());
+        assert!(matches!(
+            GimError::from(ClientError::Transport(relay)),
+            GimError::HubNotVerified { .. }
         ));
     }
 }

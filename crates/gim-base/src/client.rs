@@ -1317,8 +1317,8 @@ fn mark_applied<T: StoreTxn>(txn: &mut T, group_id: &GroupId, seq: u64) -> Resul
 }
 
 /// Records the URLs another own device shared for the hubs of the hosting
-/// record. A new or changed URL is marked shared and stays unverified: the
-/// client does not contact it; a hub no longer listed stays removed. Rows for hubs the
+/// record. A new or changed URL is marked shared and stays unverified until
+/// the hub proof there passes; a hub no longer listed stays removed. Rows for hubs the
 /// stored record does not list yet are added; the client uses only listed
 /// hubs.
 fn apply_hub_locations<T: StoreTxn>(txn: &mut T, hubs: Vec<HubLocation>) -> Result<()> {
