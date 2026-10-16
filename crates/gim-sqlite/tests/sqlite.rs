@@ -8,9 +8,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use common::{group, key, setup, text, Device, NOW};
 use gim_base::model::{
     Chat, ChatKind, ChatMember, DepartedMember, GroupCursor, GroupMessage, HubRecord, HubState,
-    KeyPackageRecord, MediaCacheEntry, Membership, MembershipChangeKind, MembershipEvent, Message, MessageContent,
-    MessageKind, OutboxEntry, OutboxKind, OutboxState, PendingCommit, PendingInvite, PendingLeave,
-    PendingMedia, PendingWelcome, PreparedPayload, SendState, UserInfo,
+    KeyPackageRecord, MediaCacheEntry, Membership, MembershipChangeKind, MembershipEvent, Message,
+    MessageContent, MessageKind, OutboxEntry, OutboxKind, OutboxState, PendingCommit,
+    PendingInvite, PendingLeave, PendingMedia, PendingWelcome, PreparedPayload, SendState,
+    UserInfo,
 };
 use gim_base::{
     BaseError, MemoryStore, StateReader, StateStore, StoreError, StoreTxn, WriteTarget,

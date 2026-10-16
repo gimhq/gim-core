@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 
 use gim_base::model::{
     Chat, DepartedMember, GroupCursor, GroupMessage, HubRecord, HubState, KeyPackageRecord,
-    MediaCacheEntry, MembershipChangeKind, MembershipEvent, Message, OutboxEntry, OutboxState, PendingCommit,
-    PendingInvite, PendingLeave, UserInfo,
+    MediaCacheEntry, MembershipChangeKind, MembershipEvent, Message, OutboxEntry, OutboxState,
+    PendingCommit, PendingInvite, PendingLeave, UserInfo,
 };
 use gim_base::{StateReader, StoreError};
 use gim_common::{DeviceRef, GroupId, MessageId, UserId};

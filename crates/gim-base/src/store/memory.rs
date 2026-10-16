@@ -16,8 +16,9 @@ use openmls_memory_storage::MemoryStorage;
 
 use super::{StateReader, StateStore, StoreResult, StoreTxn};
 use crate::model::{
-    Chat, DepartedMember, GroupCursor, GroupMessage, HubRecord, KeyPackageRecord, MediaCacheEntry, MembershipEvent,
-    Message, OutboxEntry, OutboxState, PendingCommit, PendingInvite, PendingLeave, UserInfo,
+    Chat, DepartedMember, GroupCursor, GroupMessage, HubRecord, KeyPackageRecord, MediaCacheEntry,
+    MembershipEvent, Message, OutboxEntry, OutboxState, PendingCommit, PendingInvite, PendingLeave,
+    UserInfo,
 };
 use crate::{BaseError, StoreError};
 

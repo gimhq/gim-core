@@ -710,7 +710,11 @@ impl<S: StateStore + 'static> Client<S> {
                 welcome: None,
                 welcome_recipients: vec![],
             };
-            match self.submit_until_known(group_id, proposal, None).await.result {
+            match self
+                .submit_until_known(group_id, proposal, None)
+                .await
+                .result
+            {
                 Ok(_) => {
                     let (gid, b) = (group_id.clone(), base.clone());
                     let client_id = leave.client_id;

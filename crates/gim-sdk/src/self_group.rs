@@ -326,12 +326,15 @@ impl<S: StateStore + 'static> Client<S> {
         device: &DeviceRef,
     ) -> Result<bool> {
         let claim = self.claim_key_packages(session, &[], &[]).await?;
-        let Some(key_package) = claim.key_packages.into_iter().find(|k| &k.device == device)
-        else {
+        let Some(key_package) = claim.key_packages.into_iter().find(|k| &k.device == device) else {
             return Ok(false);
         };
-        self.commit(session, group_id, CommitOp::Add(vec![key_package], claim.hub))
-            .await?;
+        self.commit(
+            session,
+            group_id,
+            CommitOp::Add(vec![key_package], claim.hub),
+        )
+        .await?;
         Ok(true)
     }
 

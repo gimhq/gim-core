@@ -247,7 +247,11 @@ impl Transport for Hub {
         self.owner.device_list(t, u).await
     }
 
-    async fn user(&self, t: Option<&AccessToken>, u: &UserId) -> TransportResult<Option<UserRecord>> {
+    async fn user(
+        &self,
+        t: Option<&AccessToken>,
+        u: &UserId,
+    ) -> TransportResult<Option<UserRecord>> {
         self.up()?;
         self.owner.user(t, u).await
     }
@@ -298,7 +302,10 @@ impl Transport for Hub {
         t: &AccessToken,
         users: &[UserId],
     ) -> TransportResult<Vec<ClaimedKeyPackage>> {
-        Ok(self.claim_key_packages_federated(t, users).await?.key_packages)
+        Ok(self
+            .claim_key_packages_federated(t, users)
+            .await?
+            .key_packages)
     }
 
     /// Claims from this hub's users first, then from the owning hub for
@@ -548,7 +555,7 @@ impl Setup {
         fake_a.set_hosting_record(&user_id, Some(record));
         alice.refresh_hubs().await.unwrap();
         alice
-            .set_hub_url(&fake_b.service().hub_id().to_string(), HUB_B_URL)
+            .set_hub_url(fake_b.service().hub_id(), HUB_B_URL)
             .await
             .unwrap();
         let bob = Device::register(&FlakyTransport::over(fake_a.clone()), "bob").await;
@@ -806,7 +813,10 @@ async fn definite_rejection_on_primary_never_fails_over() {
     assert!(
         matches!(
             removed,
-            Err(ClientError::Transport(TransportError::Rejected { status: 403, .. }))
+            Err(ClientError::Transport(TransportError::Rejected {
+                status: 403,
+                ..
+            }))
         ),
         "{removed:?}"
     );

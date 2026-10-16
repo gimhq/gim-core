@@ -198,9 +198,9 @@ impl<S: StateStore + 'static> Client<S> {
         // No hub took it. An unreachable hub may have: the outcome stays
         // unknown.
         let (hub, rejected) = not_claimed.unzip();
-        let err = unknown.or(rejected).unwrap_or_else(|| {
-            TransportError::Network("no hub to submit to".into())
-        });
+        let err = unknown
+            .or(rejected)
+            .unwrap_or_else(|| TransportError::Network("no hub to submit to".into()));
         Submission {
             result: Err(err.into()),
             not_claimed: hub,
@@ -399,7 +399,8 @@ impl<S: StateStore + 'static> Client<S> {
                 .await;
             match uploaded {
                 Err(err)
-                    if duplicate_key_package(&err) && regenerated < DUPLICATE_KEY_PACKAGE_RETRIES =>
+                    if duplicate_key_package(&err)
+                        && regenerated < DUPLICATE_KEY_PACKAGE_RETRIES =>
                 {
                     regenerated += 1;
                     tracing::warn!(hub_id = %hub.hub_id, error = %err, "hub refused KeyPackages as duplicates; uploading fresh ones");
