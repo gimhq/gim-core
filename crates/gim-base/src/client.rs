@@ -1317,8 +1317,8 @@ fn mark_applied<T: StoreTxn>(txn: &mut T, group_id: &GroupId, seq: u64) -> Resul
 }
 
 /// Records the URLs another own device shared for the hubs of the hosting
-/// record. A new or changed URL is unverified until the client checked it
-/// with the hub; a hub no longer listed stays removed. Rows for hubs the
+/// record. A new or changed URL is marked shared and stays unverified until
+/// the hub proof there passes; a hub no longer listed stays removed. Rows for hubs the
 /// stored record does not list yet are added; the client uses only listed
 /// hubs.
 fn apply_hub_locations<T: StoreTxn>(txn: &mut T, hubs: Vec<HubLocation>) -> Result<()> {
@@ -1328,6 +1328,7 @@ fn apply_hub_locations<T: StoreTxn>(txn: &mut T, hubs: Vec<HubLocation>) -> Resu
             Some(hub) if hub.url.as_ref() == Some(&location.url) => continue,
             Some(hub) => HubRecord {
                 url: Some(location.url),
+                url_shared: true,
                 verified_root_pubkey: None,
                 state: match hub.state {
                     HubState::Removed => HubState::Removed,
@@ -1338,6 +1339,7 @@ fn apply_hub_locations<T: StoreTxn>(txn: &mut T, hubs: Vec<HubLocation>) -> Resu
             None => HubRecord {
                 hub_id: location.hub_id,
                 url: Some(location.url),
+                url_shared: true,
                 priority: location.priority,
                 verified_root_pubkey: None,
                 last_seen_ms: None,

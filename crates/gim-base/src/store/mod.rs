@@ -22,8 +22,8 @@ use gim_crypto::CryptoStore;
 pub use memory::{MemoryStore, MemoryTxn, WriteTarget};
 
 use crate::model::{
-    Chat, DepartedMember, GroupCursor, GroupMessage, HubRecord, MediaCacheEntry, MembershipEvent,
-    Message, OutboxEntry, PendingCommit, PendingInvite, PendingLeave, UserInfo,
+    Chat, DepartedMember, GroupCursor, GroupMessage, HubRecord, KeyPackageRecord, MediaCacheEntry,
+    MembershipEvent, Message, OutboxEntry, PendingCommit, PendingInvite, PendingLeave, UserInfo,
 };
 use crate::{BaseError, StoreError};
 
@@ -57,8 +57,10 @@ pub trait StateReader {
     /// order, at most `limit`.
     fn outbox_due(&self, now_ms: u64, limit: usize) -> StoreResult<Vec<OutboxEntry>>;
 
-    /// Global event-stream cursor.
+    /// Global event-stream cursor (the home hub's).
     fn global_cursor(&self) -> StoreResult<Option<u64>>;
+    /// Event-stream cursor on a listed hub other than the home hub.
+    fn hub_cursor(&self, hub_id: &str) -> StoreResult<Option<u64>>;
     /// Applied seqs of the group (default if none).
     fn group_cursor(&self, group_id: &GroupId) -> StoreResult<GroupCursor>;
     /// Messages kept for retry (wrong epoch, Welcome not yet applied),
@@ -100,6 +102,10 @@ pub trait StateReader {
     /// The hubs of the own user's hosting record known to this device, by
     /// hub id.
     fn hubs(&self) -> StoreResult<Vec<HubRecord>>;
+
+    /// The KeyPackage ledger: every KeyPackage generated for a hub, by
+    /// `kp_ref`.
+    fn key_package_records(&self) -> StoreResult<Vec<KeyPackageRecord>>;
 }
 
 /// A write transaction over state rows and MLS state. Dropping it without
@@ -119,6 +125,7 @@ pub trait StoreTxn: StateReader + CryptoStore {
     fn remove_outbox(&mut self, message_id: &MessageId) -> StoreResult<()>;
 
     fn set_global_cursor(&mut self, cursor: u64) -> StoreResult<()>;
+    fn set_hub_cursor(&mut self, hub_id: &str, cursor: u64) -> StoreResult<()>;
     fn set_group_cursor(&mut self, group_id: &GroupId, cursor: &GroupCursor) -> StoreResult<()>;
     /// Keeps a message for retry; replaces any parked message with the same
     /// (group, seq).
@@ -159,6 +166,10 @@ pub trait StoreTxn: StateReader + CryptoStore {
     /// Replaces the hub with the same id, if any.
     fn upsert_hub(&mut self, hub: &HubRecord) -> StoreResult<()>;
     fn remove_hub(&mut self, hub_id: &str) -> StoreResult<()>;
+
+    /// Records a KeyPackage in the ledger. Fails if its `kp_ref` is
+    /// recorded already: a KeyPackage belongs to one hub, ever.
+    fn add_key_package_record(&mut self, record: &KeyPackageRecord) -> StoreResult<()>;
 
     /// Deletes every row and all MLS state, the device identity included
     /// (an unfinished enrollment is discarded this way).

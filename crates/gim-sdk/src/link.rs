@@ -36,6 +36,7 @@ use zeroize::Zeroizing;
 
 use crate::client::{DEVICE_KEY_SECRET_KEY, ROOT_KEY_SECRET_KEY};
 use crate::hosting::Publish;
+use crate::hubs::Listed;
 use crate::identity::{random_seed, Enrollment};
 use crate::transport::TransportError;
 use crate::{Client, ClientError, Result};
@@ -385,6 +386,10 @@ impl<S: StateStore + 'static> Client<S> {
             .await?;
             self.publish_hosting_record_logged(Publish::Now).await;
             self.create_self_group().await?;
+            // The hub map goes to the new self group, for the devices
+            // linked from here on.
+            self.refresh_hubs_logged(Listed::Fetch).await;
+            self.share_hub_locations().await;
             Ok(())
         }
         .await;

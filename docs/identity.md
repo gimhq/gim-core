@@ -2,8 +2,8 @@
 
 Normative specification of the identity wire formats implemented by
 `crates/gim-identity`. Test vectors: `crates/gim-identity/tests/vectors/identity.json`,
-`hosting.json` and `auth.json` in the same directory; negative vectors in
-`negative.json` (see *Negative vectors*).
+`hosting.json`, `auth.json`, `auth-v2.json`, `hub-proof.json` and `public-url.json`
+in the same directory; negative vectors in `negative.json` (see *Negative vectors*).
 
 The key words MUST, MUST NOT and SHOULD are to be interpreted as in RFC 2119.
 
@@ -307,14 +307,74 @@ record, verifies it and rebuilds once.
 - The primary hub is the entry with the lowest `priority`; ties are broken
   by the lexicographically smallest `hub_id`.
 
-## Device authentication
+## Hub URLs
 
-A device logs in to a hub with a signature challenge.
+A hub with a public client API URL (`GIM_HUB_PUBLIC_URL`) binds its proof
+of possession and its sign-in challenges to that URL in this normalized
+form, and a client compares it with the normalized URL it contacted:
+
+1. Inputs longer than 65535 bytes are rejected; surrounding ASCII
+   whitespace is trimmed. Non-ASCII input and percent-encoding (`%`) are
+   rejected.
+2. The scheme, before `://`, is `http` or `https` in any case and is
+   lowercased.
+3. The authority ends at the first `/`, `?` or `#`. What follows it MUST be
+   empty or a single `/` (removed): other paths, a query (even a bare `?`)
+   and a fragment are rejected. Userinfo (`@`) is rejected.
+4. The host is a bracketed IPv6 address (`[...]`, valid as an IPv6
+   address, lowercased; only `:port` may follow the `]`), or else a DNS
+   name or IPv4 address: lowercased, non-empty labels of `[a-z0-9-]`
+   separated by `.`, without a trailing dot.
+5. An optional `:port` is decimal digits only (leading zeros allowed), in
+   1..65535; it is dropped when it is 80 for `http` or 443 for `https`.
+
+The result is `scheme://host[:port]`. Vectors: `public-url.json` (40 cases;
+the `error` strings are not normative).
+
+## Hub proof of possession
+
+`GET /v2/hub?nonce=<n>` (hub API v2) proves that the hub at the contacted
+URL holds the root key of its `hub_id` and serves that URL. The client
+picks `n`, 32 fresh random bytes, per check and never reuses it. The hub
+answers its `hub_id`, `hub_root_pubkey`, normalized `public_url` and
 
 ```
-AuthChallenge = [
+proof = Ed25519(hub root key, "gim-hub-proof-v1" || 0x00 || HubProofTbs)
+HubProofTbs = nonce (32 bytes)
+  || u16be(len(hub_id)) || hub_id
+  || u16be(len(public_url)) || public_url
+```
+
+with `hub_id` and `public_url` in UTF-8 and each length a big-endian byte
+count. The client accepts the URL `U` for the hub `H` only if `hub_id ==
+H`, `hub_id` derives from `hub_root_pubkey` (*Identifiers*), `public_url`
+equals the normalization of `U` and `proof` verifies (strict Ed25519) under
+`hub_root_pubkey` over the message built from its own nonce, `H` and
+`public_url`. A hub that reports no `public_url` cannot prove: gim-core
+accepts that only for the home hub it was configured with in single-hub
+development (AuthChallenge v1); any other hub stays unverified. A relay at
+another URL fails the URL check, a replayed answer the signature check.
+Vectors: `hub-proof.json` (`message` is the exact signed input).
+
+## Device authentication
+
+A device logs in to a hub with a signature challenge. A hub with a public
+URL issues version 2, bound to that URL; a hub without one (single-hub
+development, no federation) issues version 1.
+
+```
+AuthChallenge = AuthChallengeV1 / AuthChallengeV2
+AuthChallengeV1 = [
   1,                            ; version
   audience: tstr,               ; hub_id of the issuing hub
+  nonce: bstr .size 32,
+  issued_at: uint,              ; Unix time, milliseconds
+  expires_at: uint,             ; Unix time, milliseconds, exclusive
+]
+AuthChallengeV2 = [
+  2,                            ; version
+  audience: tstr,               ; hub_id of the issuing hub
+  audience_url: tstr,           ; its normalized public URL (*Hub URLs*)
   nonce: bstr .size 32,
   issued_at: uint,              ; Unix time, milliseconds
   expires_at: uint,             ; Unix time, milliseconds, exclusive
@@ -333,12 +393,24 @@ AuthResponse = [
 ]
 ```
 
+A version 1 challenge decodes as exactly five elements, a version 2
+challenge as exactly six (`decode_error` otherwise); other versions are
+`unsupported_version`. The `AuthResponse` framing is the same for both
+versions.
+
 The challenge is unsigned: the hub remembers the challenges it issued and
 MUST accept each nonce at most once. The device signs the challenge bytes as
-received, without re-encoding them.
+received, without re-encoding them. Before signing, the device checks the
+challenge against the hub proof of the URL it contacted: `audience` is
+that `hub_id` (`audience_mismatch`) and, if the proof reported a
+`public_url`, the challenge is version 2 with `audience_url` equal to it,
+or else version 1 (`audience_url_mismatch`). So a device never answers a
+version 1 challenge of a hub that reported a public URL, nor a challenge
+for another URL.
 
-Verification of an `AuthResponse` by the hub `expected_audience` at time
-`now`, given the user's `SignedDeviceList`:
+Verification of an `AuthResponse` by the hub `expected_audience` with the
+public URL `expected_audience_url` (if any) at time `now`, given the user's
+`SignedDeviceList`:
 
 1. The response decodes with version `1` and exactly five elements;
    `user_id` and `device_id` are syntactically valid ids.
@@ -346,8 +418,10 @@ Verification of an `AuthResponse` by the hub `expected_audience` at time
 3. `device_id` is not revoked and is certified in the list.
 4. `sig` is a valid signature by the certified `device_sig_pubkey` over
    `"gim/auth-response/v1" || 0x00 || AuthResponseTbs`.
-5. `challenge` decodes as an `AuthChallenge` with version `1`; its
-   `audience` equals `expected_audience`.
+5. `challenge` decodes as an `AuthChallenge`; its `audience` equals
+   `expected_audience` (`audience_mismatch`). With an
+   `expected_audience_url` it is version 2 with that `audience_url`;
+   without one it is version 1 (`audience_url_mismatch` otherwise).
 6. `issued_at < expires_at` (`invalid_validity_window`), then
    `expires_at - issued_at <= 300000` (`AUTH_CHALLENGE_MAX_LIFETIME_MS`,
    5 minutes; `lifetime_too_long`), then `issued_at <= now`

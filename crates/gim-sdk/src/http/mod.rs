@@ -294,12 +294,18 @@ impl Transport for HttpTransport {
         Some(self.base_url.clone())
     }
 
-    async fn hub_info(&self) -> TransportResult<HubIdentity> {
-        let info: v2::HubInfo = Self::json(self.api(Method::GET, paths::HUB, None)).await?;
+    async fn hub_info(&self, nonce: Option<&[u8; 32]>) -> TransportResult<HubIdentity> {
+        let query = v2::HubQuery {
+            nonce: nonce.map(|nonce| nonce.to_vec()),
+        };
+        let info: v2::HubInfo =
+            Self::json(self.api(Method::GET, paths::HUB, None).query(&query)).await?;
         Ok(HubIdentity {
             hub_id: info.hub_id,
             hub_root_public_key: info.hub_root_pubkey,
             version: info.version,
+            public_url: info.public_url,
+            proof: info.proof,
         })
     }
 

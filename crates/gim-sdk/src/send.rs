@@ -265,17 +265,7 @@ impl<S: StateStore + 'static> Client<S> {
             })
             .await?;
         let client_id = new_client_id()?;
-        let seq = self
-            .authed(|t| {
-                let (client_id, payload) = (client_id.clone(), payload.clone());
-                async move {
-                    self.inner
-                        .transport
-                        .post_message(&t, group_id, client_id, payload)
-                        .await
-                }
-            })
-            .await?;
+        let seq = self.post_routed(group_id, &client_id, &payload).await?;
         self.mark_applied(group_id, seq).await
     }
 }

@@ -7,6 +7,7 @@
 //! retried from the sync loop.
 
 use std::convert::Infallible;
+use std::sync::Arc;
 use std::time::Duration;
 
 use gim_base::StateStore;
@@ -14,8 +15,9 @@ use gim_common::{now_ms, UserId};
 use gim_identity::{HostingEntry, RootKey, SignedHostingRecord, UserHostingRecord};
 
 use crate::hubs::Listed;
+use crate::routing::HubTarget;
 use crate::stream::Backoff;
-use crate::transport::{HostingEntryGrant, TransportError};
+use crate::transport::{HostingEntryGrant, Transport, TransportError};
 use crate::{Client, ClientError, Result};
 
 /// Lifetime of a published hosting record.
@@ -77,10 +79,25 @@ fn build_record(
         hubs.retain(|e| e.hub_root_public_key() != own.hub_root_public_key());
         hubs.push(own.clone());
     }
+    sign_record(root, seq, hubs)
+}
+
+/// A record listing `hubs`, valid for [`HOSTING_RECORD_LIFETIME`].
+fn sign_record(root: &RootKey, seq: u64, hubs: Vec<HostingEntry>) -> Result<SignedHostingRecord> {
     let expires_at = now_ms().saturating_add(millis(HOSTING_RECORD_LIFETIME));
     UserHostingRecord::new(root.public(), seq, expires_at, hubs)
         .and_then(|record| record.sign(root))
         .map_err(ClientError::identity)
+}
+
+/// `entries` with `entry` in place of the entry of the same hub, if any.
+pub(crate) fn with_entry(
+    mut entries: Vec<HostingEntry>,
+    entry: &HostingEntry,
+) -> Vec<HostingEntry> {
+    entries.retain(|e| e.hub_root_public_key() != entry.hub_root_public_key());
+    entries.push(entry.clone());
+    entries
 }
 
 fn next_seq(current: &UserHostingRecord) -> Result<u64> {
@@ -126,7 +143,15 @@ impl<S: StateStore + 'static> Client<S> {
         let root = self.root_key()?;
         let own = match (mode, &current) {
             (Publish::IfDue, Some(_)) => None,
-            _ => Some(self.own_hosting_entry(&user_id).await?),
+            _ => {
+                // The home hub keeps its place (set_primary_hub).
+                let home = self.home_hub();
+                let priority = current
+                    .as_ref()
+                    .and_then(|r| r.hubs().iter().find(|e| Some(e.hub_id()) == home))
+                    .map_or(OWN_HUB_PRIORITY, HostingEntry::priority);
+                Some(self.own_hosting_entry(&user_id, priority).await?)
+            }
         };
         let mut seq = current.as_ref().map_or(Ok(1), next_seq)?;
         let mut rebuilt = false;
@@ -171,7 +196,10 @@ impl<S: StateStore + 'static> Client<S> {
         &self,
         user_id: &UserId,
     ) -> Result<Option<UserHostingRecord>> {
-        let Some(stored) = self.inner.transport.hosting_record(user_id).await? else {
+        let stored = self
+            .public_read_routed(|transport| async move { transport.hosting_record(user_id).await })
+            .await?;
+        let Some(stored) = stored else {
             return Ok(None);
         };
         match SignedHostingRecord::from_bytes(&stored.record).and_then(|s| s.verify(now_ms())) {
@@ -188,16 +216,100 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// The own hub's entry for the user, checked against the response.
-    async fn own_hosting_entry(&self, user_id: &UserId) -> Result<HostingEntry> {
+    async fn own_hosting_entry(&self, user_id: &UserId, priority: u8) -> Result<HostingEntry> {
         let grant = self
             .authed_session(|t| async move {
                 self.inner
                     .transport
-                    .create_hosting_entry(&t, user_id, OWN_HUB_PRIORITY)
+                    .create_hosting_entry(&t, user_id, priority)
                     .await
             })
             .await?;
-        verify_grant(&grant, OWN_HUB_PRIORITY)
+        verify_grant(&grant, priority)
+    }
+
+    /// The entry of `hub` for the user with `priority`, co-signed there and
+    /// checked against the response and the hub's id.
+    pub(crate) async fn hosting_entry_on(
+        &self,
+        hub: &HubTarget,
+        priority: u8,
+    ) -> Result<HostingEntry> {
+        let user_id = &self.require_session()?.device.user_id;
+        let grant = self
+            .authed_on(hub, |transport, t| async move {
+                transport.create_hosting_entry(&t, user_id, priority).await
+            })
+            .await?;
+        let entry = verify_grant(&grant, priority)?;
+        if !hub.home && entry.hub_id() != hub.hub_id {
+            return Err(ClientError::Identity(format!(
+                "invalid hosting entry: hub {} signed for {}",
+                hub.hub_id,
+                entry.hub_id()
+            )));
+        }
+        Ok(entry)
+    }
+
+    /// Publishes the next record of the user, listing `edit` applied to the
+    /// entries of the current one (or to the home hub's own entry if there
+    /// is none): uploads it to the home hub, rebuilding it once if a newer
+    /// one landed meanwhile, then to the hubs of `also` (best effort: the
+    /// hubs pass it on to each other). Returns the published record.
+    pub(crate) async fn publish_hub_list(
+        &self,
+        edit: impl Fn(Vec<HostingEntry>) -> Vec<HostingEntry>,
+        also: &[Arc<dyn Transport>],
+    ) -> Result<UserHostingRecord> {
+        let user_id = self.require_session()?.device.user_id;
+        let record = {
+            let _guard = self.inner.hosting_lock.lock().await;
+            let root = self.root_key()?;
+            let mut current = self.hub_hosting_record(&user_id).await?;
+            let mut seq = current.as_ref().map_or(Ok(1), next_seq)?;
+            let mut rebuilt = false;
+            loop {
+                let entries = match &current {
+                    Some(current) => current.hubs().to_vec(),
+                    None => vec![self.own_hosting_entry(&user_id, OWN_HUB_PRIORITY).await?],
+                };
+                let record = sign_record(&root, seq, edit(entries))?;
+                match self
+                    .inner
+                    .transport
+                    .put_hosting_record(&user_id, record.to_bytes())
+                    .await
+                {
+                    Ok(_) => break record,
+                    Err(TransportError::Conflict(reason)) if !rebuilt => {
+                        tracing::info!(%reason, "a newer hosting record landed; rebuilding");
+                        rebuilt = true;
+                        current = self.hub_hosting_record(&user_id).await?;
+                        seq = match &current {
+                            Some(current) => next_seq(current)?,
+                            // See publish_hosting_record_locked.
+                            None => seq.saturating_add(1).max(now_ms()),
+                        };
+                    }
+                    Err(err) => return Err(err.into()),
+                }
+            }
+        };
+        let published = record.verify(now_ms()).map_err(ClientError::identity)?;
+        tracing::info!(
+            seq = published.seq(),
+            "published the hosting record with a new hub list"
+        );
+        for transport in also {
+            if let Err(err) = transport
+                .put_hosting_record(&user_id, record.to_bytes())
+                .await
+            {
+                tracing::warn!(error = %err, "cannot upload the hosting record to a listed hub");
+            }
+        }
+        Ok(published)
     }
 
     /// Renews the hosting record when due: at once, then every

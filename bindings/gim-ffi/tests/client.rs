@@ -10,8 +10,9 @@ use std::time::Duration;
 use gim_core::{
     create_client_with_fake_transport, ChatKind, ChatListDiff, ChatListListener, ChatState,
     ChatSummary, ClientConfig, ConnectionState, ConnectionStateListener, GimClient, GimError,
-    LocalTimeZone, MembershipChangeKind, MessageContent, MessageItem, PlatformHooks, SendState,
-    TaskHandle, TimelineDiff, TimelineItem, TimelineListener, TypingListener,
+    HubInfo, HubListListener, HubState, LocalTimeZone, MembershipChangeKind, MessageContent,
+    MessageItem, PlatformHooks, SendState, TaskHandle, TimelineDiff, TimelineItem,
+    TimelineListener, TypingListener,
 };
 use gim_sdk::testing::FakeTransport;
 use tempfile::TempDir;
@@ -155,6 +156,12 @@ impl ConnectionStateListener for Recorder<ConnectionState> {
 impl TypingListener for Recorder<Vec<String>> {
     fn on_update(&self, user_ids: Vec<String>) {
         self.0.lock().unwrap().push(user_ids);
+    }
+}
+
+impl HubListListener for Recorder<Vec<HubInfo>> {
+    fn on_update(&self, hubs: Vec<HubInfo>) {
+        self.0.lock().unwrap().push(hubs);
     }
 }
 
@@ -1087,4 +1094,65 @@ async fn lost_database_key_reports_a_local_state_reset() {
     let reopened = open(&transport, &hooks).await;
     assert!(reopened.local_state_reset());
     assert_eq!(reopened.session().await.unwrap(), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn single_hub_management() {
+    let transport = FakeTransport::new();
+    let alice = User::register(&transport, "alice", "Alice").await;
+    let home = transport.service().hub_id().to_string();
+    let hubs = alice.client.hubs().await.unwrap();
+    assert_eq!(
+        hubs,
+        [HubInfo {
+            hub_id: home.clone(),
+            url: None,
+            state: HubState::Verified,
+            priority: 0,
+            is_primary: true,
+            is_home: true,
+            signed_in: true,
+        }]
+    );
+
+    let updates = Recorder::new();
+    let _handle = alice.client.hub_list(updates.clone()).await.unwrap();
+    updates.wait("the current hubs", |h| *h == hubs).await;
+    // The sync loop refreshes the registry.
+    alice.client.start_sync().await.unwrap();
+    for _ in 0..500 {
+        if updates.0.lock().unwrap().len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(updates.0.lock().unwrap().len() >= 2);
+    assert_eq!(updates.0.lock().unwrap().last(), Some(&hubs));
+    alice.client.stop_sync().await.unwrap();
+
+    assert_eq!(
+        alice.client.remove_hub(home.clone(), true).await,
+        Err(GimError::HomeHub {
+            hub_id: home.clone()
+        })
+    );
+    assert!(matches!(
+        alice.client.remove_hub("hnotlisted".into(), true).await,
+        Err(GimError::InvalidInput { .. })
+    ));
+    alice.client.set_primary_hub(home).await.unwrap();
+    assert!(matches!(
+        alice.client.set_primary_hub("hnotlisted".into()).await,
+        Err(GimError::InvalidInput { .. })
+    ));
+    assert!(matches!(
+        alice.client.add_hub("ftp://hub.example.org".into()).await,
+        Err(GimError::InvalidInput { .. })
+    ));
+    // Nothing listens on the discard port.
+    assert!(matches!(
+        alice.client.add_hub("http://127.0.0.1:9".into()).await,
+        Err(GimError::Network { .. })
+    ));
+    assert_eq!(alice.client.hubs().await.unwrap(), hubs);
 }

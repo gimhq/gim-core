@@ -37,14 +37,30 @@ DeviceCert in the user's stored DeviceList. There is no handle-only registration
 2. `POST /v2/auth/challenge {user_id, device_id}` returns `{challenge, expires_at, hub_id}`
    (404 `not_found` unless the device is active in the stored DeviceList). `challenge` is a
    gim-core AuthChallenge (CBOR, base64) with `audience` = this hub's `hub_id`, a 32-byte random
-   nonce and a 5-minute lifetime.
+   nonce and a 5-minute lifetime. A hub with `GIM_HUB_PUBLIC_URL` issues version 2, which also
+   binds the URL the device talked to:
+
+   ```
+   AuthChallenge v1 = [1, audience: tstr, nonce: bstr .size 32, issued_at: uint, expires_at: uint]
+   AuthChallenge v2 = [2, audience: tstr, audience_url: tstr, nonce: bstr .size 32,
+                       issued_at: uint, expires_at: uint]
+   ```
+
+   `audience_url` is the hub's normalized `public_url` (as returned by `GET /v2/hub`); times are
+   Unix milliseconds. A hub without a public URL (single-hub development without federation)
+   issues version 1. v2 is hub-proposed until gim-core publishes it; vectors in
+   `testdata/identity/auth-v2.json`. Before signing, a device should decode the challenge and
+   check `audience` and, for v2, `audience_url` against the hub it meant to talk to.
 3. The device signs the exact challenge bytes into a gim-core AuthResponse (gim-core
    docs/identity.md, *Device authentication*) and calls `POST /v2/auth/session {response}`
-   (AuthResponse CBOR, base64). The hub verifies it against the stored DeviceList and its
-   `hub_id`, and accepts each challenge once, for the device it was issued to, before
+   (AuthResponse CBOR, base64; its framing is unchanged, version 1 over the exact challenge
+   bytes). The hub verifies it against the stored DeviceList and its `hub_id` and, with a public
+   URL, accepts only a v2 challenge whose `audience_url` equals it; without one, only v1. It
+   accepts each challenge once, for the device it was issued to, before
    `expires_at`. It returns `{token, expires_at}` (token lifetime `GIM_HUB_SESSION_TTL_DAYS`,
    default 30 days). Errors: 400 `validation_failed` (malformed body or AuthResponse); 401
-   `invalid_challenge` (unknown, used, expired or foreign challenge), `invalid_signature`, or
+   `invalid_challenge` (unknown, used, expired or foreign challenge, another `audience_url`, or
+   the wrong challenge version for this hub), `invalid_signature`, or
    `device_not_active` (device revoked or not in the DeviceList).
 4. Use `Authorization: Bearer <token>` (or `?token=` on `GET /v2/stream`). Sign in again after
    `expires_at` or on 401.
@@ -301,9 +317,53 @@ as on a single hub:
 A user's hosting record may list several hubs ([`multihoming.md`](multihoming.md) §9.2). The
 client keeps one connection and cursor per listed hub and merges by `message_id`.
 
-- `GET /v2/hub` (no token) returns `{hub_id, hub_root_pubkey, version}`: this hub's id, its
-  32-byte Ed25519 root public key (standard base64, as in `hosting-entry`) and the hub version. A
-  client checks that a URL belongs to the `hub_id` in its record before signing in. Live.
+- `GET /v2/hub` (no token) returns `{hub_id, hub_root_pubkey, version, public_url}`: this hub's
+  id, its 32-byte Ed25519 root public key (standard base64, as in `hosting-entry`), the hub
+  version and its normalized `GIM_HUB_PUBLIC_URL` (omitted when not configured). A client checks
+  that a URL belongs to the `hub_id` in its record before signing in, with a proof of
+  possession. Live.
+
+### Hub proof of possession
+
+`GET /v2/hub?nonce=<n>`, where `n` is 32 fresh random bytes in base64url without padding (43
+characters), adds `proof`: the Ed25519 signature by the hub root key over
+
+```
+"gim-hub-proof-v1" || 0x00 || nonce (32 bytes)
+  || u16be(len(hub_id)) || hub_id || u16be(len(public_url)) || public_url
+```
+
+(`hub_id` and `public_url` in UTF-8, each length a big-endian `u16` byte count), in base64url
+without padding. A nonce that is not base64url without padding or does not decode to exactly 32 bytes is
+400 `validation_failed`; so is any nonce at a hub without a public URL (no proof available).
+
+```
+GET /v2/hub
+{"hub_id":"hciqgrcknldyy6lbu2splf5frcdqeftipgfikjxbzeq6x6y55lggapay",
+ "hub_root_pubkey":"F0VTtFbd38aQjsqxwQH+arIeK6oGF3lbfUOmNIKZP9U=",
+ "version":"0.1.0","public_url":"https://hub-a.example.eu"}
+
+GET /v2/hub?nonce=oKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr8
+{"hub_id":"hciqgrcknldyy6lbu2splf5frcdqeftipgfikjxbzeq6x6y55lggapay",
+ "hub_root_pubkey":"F0VTtFbd38aQjsqxwQH+arIeK6oGF3lbfUOmNIKZP9U=",
+ "version":"0.1.0","public_url":"https://hub-a.example.eu",
+ "proof":"xDC4XeBqNVag459Oc3cA_DcSOAoJcOCtoe6CXOiFVP-ShX1tVjImuvh1fp6lEcVMbWSdfAVypyQsRolceTlIBQ"}
+```
+
+(`testdata/identity/hub-proof.json`, first case.) Verification recipe for a client that wants to
+use the URL `U` for the hub `H` from a hosting record:
+
+1. Normalize `U` like the hub does (lowercase scheme and host, drop the default port and a
+   trailing `/`; [`operations.md`](operations.md), vectors in
+   `testdata/identity/public-url.json`).
+2. Pick a fresh 32-byte nonce and call `U/v2/hub?nonce=...`.
+3. Check `hub_id == H`, that `hub_id` derives from `hub_root_pubkey` (gim-core `hub_id`
+   derivation) and, if the record lists the hub root key, that it matches.
+4. Check `public_url == U`.
+5. Verify `proof` (strict Ed25519) with `hub_root_pubkey` over the message above, built from
+   the client's own nonce, `H` and `U` (vectors in `testdata/identity/hub-proof.json`).
+
+Only then sign in at `U`; the v2 challenge then also binds the sign-in to `U`.
 - `POST /v2/keypackages`: a KeyPackage is uploaded to at most one hub, ever. An upload containing
   a KeyPackage this hub already claimed from another hub on a client's behalf is rejected as a
   whole with 409 `duplicate_key_package` (§5.3). Live.
@@ -344,12 +404,15 @@ client keeps one connection and cursor per listed hub and merges by `message_id`
 ## Push
 
 `PUT /v2/push/registration` stores the calling device's push registration (one per device,
-replacing the previous one) and `DELETE` removes it; both return 204. Tokens are validated per
-provider (400 `validation_failed`); `unifiedpush` also requires the RFC 8291 keys `p256dh` and
-`auth`, which encrypt its bodies. The hub then pushes `message` and `welcome` events to the
-device's provider (never to the sender's own device; never for `message` events of kind
-`proposal`). Payload, provider mapping and the test-only
-`GET /v2/debug/push-log` (off by default): [`push.md`](push.md).
+replacing the previous one) and `DELETE` removes it; both return 204. The body is
+`{provider, token, app_id?, sandbox?, p256dh?, auth?}`, all opaque to the hub: `provider` is 1-64
+chars of `a-z 0-9 . _ -`, `token` 1-4096 bytes without control characters, `app_id` 1-255 chars of
+`A-Z a-z 0-9 . - _ :`, `sandbox` a bool, `p256dh` and `auth` base64url strings of at most 256
+chars, none of them required by any provider (400 `validation_failed` otherwise). The hub then
+pushes `message` and `welcome` events for the device (never to the sender's own device; never for
+`message` events of kind `proposal`) as signed webhooks to the external push server, which owns
+platform delivery; provider `log` stays in the hub for tests. Webhook contract, payload and the
+test-only `GET /v2/debug/push-log` (off by default): [`push.md`](push.md).
 
 ## Differences from v1
 
@@ -374,7 +437,7 @@ device's provider (never to the sender's own device; never for `message` events 
 | Welcome | message of kind `welcome` with `recipients` | `welcome` event to each recipient device |
 | Members | `device_id` | `user_id` + `device_id` |
 | Events | `message`, `group.member_added`, `group.member_removed`, `keypackages.low` | same, membership events carry `user_id` and `device_ids`; plus `welcome` and `device_list.updated`; unacknowledged Welcomes via `GET /v2/welcomes/pending` |
-| Health | `{status}` | `{status, version}`; plus `GET /v2/hub` `{hub_id, hub_root_pubkey, version}` |
+| Health | `{status}` | `{status, version}`; plus `GET /v2/hub` `{hub_id, hub_root_pubkey, version, public_url}` (and `proof` with `?nonce=`) |
 
 Unchanged semantics: per-device event cursor, long-poll `GET /v2/events?cursor&wait`, 410
 `cursor_expired` with the head cursor, WebSocket `GET /v2/stream` with the same frames and close
@@ -390,9 +453,9 @@ federation (remote users and KeyPackage claims, groups across hubs), multi-homin
 [`multihoming.md`](multihoming.md): fan-out to every listed hub, record propagation and
 `hosting_record.updated`, replica seeding and Welcome copies for an added hub, claim routing
 across a user's hubs, removal with a grace period, primary-only push with failover) and push
-(registration and delivery for local and federated events; log provider, APNs, FCM and
-UnifiedPush when configured; payload v1 without `sender_user_id`, optional minimal wake-up mode
-`GIM_HUB_PUSH_MINIMAL`, UnifiedPush bodies encrypted per RFC 8291 `aes128gcm`).
+(registration and delivery for local and federated events; log provider and the signed webhook
+to an external push server; payload v1 without `sender_user_id`, optional minimal wake-up mode
+`GIM_HUB_PUSH_MINIMAL`).
 
 Pending:
 
@@ -403,7 +466,7 @@ Pending:
   history before its replica seed; pushes in the failover window after the primary stops are
   not sent late; pending Welcome acknowledgements are per hub; `message` events carry no
   `message_id`, so clients merge the streams of several hubs by `(gid, seq)`.
-- Push: no real APNs/FCM credentials have been exercised yet.
+- Push: tested against a mock push server only; no production push server exists yet.
 - Validation of an added member's MLS credential (type `0xF001`) against their DeviceList is not
   enforced yet: the hub accepts every added member until gim-core identity part 3 defines the
   credential format. The 400 `validation_failed` rejection for credentials in the commit table

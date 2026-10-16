@@ -77,6 +77,8 @@ pub struct Faults {
     pub hosting_puts: AtomicUsize,
     /// `auth_challenge` calls.
     pub challenges: AtomicUsize,
+    /// `hub_info` calls.
+    pub hub_infos: AtomicUsize,
     /// Events appended to the next `fetch_events` result.
     pub injected_events: Mutex<Vec<HubEvent>>,
     pub posts: Mutex<VecDeque<PostFault>>,
@@ -193,8 +195,13 @@ impl Transport for FlakyTransport {
         self.inner.put_device_list(u, list).await
     }
 
-    async fn hub_info(&self) -> TransportResult<HubIdentity> {
-        self.inner.hub_info().await
+    fn base_url(&self) -> Option<String> {
+        self.inner.base_url()
+    }
+
+    async fn hub_info(&self, nonce: Option<&[u8; 32]>) -> TransportResult<HubIdentity> {
+        self.faults.hub_infos.fetch_add(1, Ordering::SeqCst);
+        self.inner.hub_info(nonce).await
     }
 
     async fn auth_challenge(&self, d: &DeviceRef) -> TransportResult<Challenge> {

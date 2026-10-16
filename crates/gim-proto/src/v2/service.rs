@@ -43,6 +43,31 @@ pub struct HubInfo {
     pub hub_root_pubkey: Vec<u8>,
     /// Hub version.
     pub version: String,
+    /// The hub's normalized public client API URL, if configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
+    /// Only with [`HubQuery::nonce`]: the hub root key's proof of
+    /// possession over the nonce, `hub_id` and `public_url` (gim-identity
+    /// `HubRootPublicKey::verify_hub_proof`).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "super::base64::url_option"
+    )]
+    pub proof: Option<Vec<u8>>,
+}
+
+/// Query of `GET /v2/hub`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HubQuery {
+    /// 32 fresh random bytes (base64url without padding) for a proof of
+    /// possession; needs a hub with a public URL.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "super::base64::url_option"
+    )]
+    pub nonce: Option<Vec<u8>>,
 }
 
 /// `HealthStatus`.
@@ -88,36 +113,26 @@ pub struct BlobCreated {
     pub size: u64,
 }
 
-/// `PushProvider`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PushProvider {
-    Apns,
-    Fcm,
-    #[serde(rename = "unifiedpush")]
-    UnifiedPush,
-    Log,
-}
-
-/// `PushRegistration`: `PUT /v2/push/registration`.
+/// `PushRegistration`: `PUT /v2/push/registration`. Everything but the
+/// `log` provider is opaque to the hub and passed to the push server's
+/// webhook.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PushRegistration {
-    pub provider: PushProvider,
-    /// APNs device token (hex), FCM registration token, UnifiedPush endpoint
-    /// URL, or any string for `log`.
+    /// Push platform name for the push server (e.g. `apns`, `fcm`,
+    /// `unifiedpush`); `log` is the hub's test provider.
+    pub provider: String,
+    /// Platform token, opaque to the hub.
     pub token: String,
-    /// APNs topic or FCM app ID; ignored by other providers.
+    /// App identifier for the push server (e.g. a bundle ID).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_id: Option<String>,
-    /// APNs only: deliver through the sandbox environment.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub sandbox: bool,
-    /// UnifiedPush only: RFC 8291 Web Push public key (base64url of the
-    /// 65-byte uncompressed P-256 point).
+    /// Platform sandbox flag for the push server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<bool>,
+    /// Opaque key for the push server (e.g. a Web Push `p256dh`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub p256dh: Option<String>,
-    /// UnifiedPush only: RFC 8291 authentication secret (base64url of 16
-    /// bytes).
+    /// Opaque secret for the push server (e.g. a Web Push `auth`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<String>,
 }

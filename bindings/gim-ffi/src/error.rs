@@ -50,6 +50,28 @@ pub enum GimError {
     /// left. `state` is `Leaving` or `Left`; see `ChatState`.
     #[error("chat {chat_id} is not active: {state:?}")]
     ChatNotActive { chat_id: String, state: ChatState },
+    /// The server at the configured URL did not prove that it is the
+    /// expected hub at that URL (a wrong URL, or a relay in between); the
+    /// device did not sign in there. Check the hub URL.
+    #[error("hub not verified: {reason}")]
+    HubNotVerified { reason: String },
+    /// `remove_hub` without `confirm_owned_groups`: the hub owns
+    /// `group_count` chats of this user. They are not moved; after the
+    /// removal they stay reachable through the other members' hubs. Ask
+    /// the user, then call `remove_hub` again with `confirm_owned_groups`.
+    #[error("hub {hub_id} owns {group_count} chats")]
+    HubOwnsGroups { hub_id: String, group_count: u32 },
+    /// The hub is the only listed hub and cannot be removed.
+    #[error("hub {hub_id} is the only hub")]
+    LastHub { hub_id: String },
+    /// The hub is the one this client was created for (`HubInfo.is_home`)
+    /// and cannot be removed.
+    #[error("hub {hub_id} is the home hub")]
+    HomeHub { hub_id: String },
+    /// Messages or membership changes sent through the hub are not settled
+    /// yet, so it cannot be removed now; try again later.
+    #[error("hub {hub_id} is not drained: {reason}")]
+    HubNotDrained { hub_id: String, reason: String },
 }
 
 impl From<uniffi::UnexpectedUniFFICallbackError> for GimError {
@@ -81,6 +103,16 @@ impl From<gim_sdk::ClientError> for GimError {
             E::Task(_) => Self::Internal {
                 reason: err.to_string(),
             },
+            E::HubOwnsGroups {
+                hub_id,
+                group_count,
+            } => Self::HubOwnsGroups {
+                hub_id,
+                group_count,
+            },
+            E::LastHub(hub_id) => Self::LastHub { hub_id },
+            E::HomeHub(hub_id) => Self::HomeHub { hub_id },
+            E::HubNotDrained { hub_id, reason } => Self::HubNotDrained { hub_id, reason },
         }
     }
 }
@@ -114,6 +146,7 @@ impl From<gim_sdk::TransportError> for GimError {
             E::Rejected { status, .. } => Self::Server { status, reason },
             E::TooLarge(_) => Self::InvalidInput { reason },
             E::DeviceNotActive(_) => Self::NotRegistered,
+            E::HubNotVerified(_) => Self::HubNotVerified { reason },
             E::HostingRecordRequired(_) => Self::Server {
                 status: 403,
                 reason,
@@ -250,6 +283,41 @@ mod tests {
     }
 
     #[test]
+    fn hub_management_errors() {
+        let owns = ClientError::HubOwnsGroups {
+            hub_id: "hb".into(),
+            group_count: 2,
+        };
+        assert_eq!(
+            GimError::from(owns),
+            GimError::HubOwnsGroups {
+                hub_id: "hb".into(),
+                group_count: 2
+            }
+        );
+        assert_eq!(
+            GimError::from(ClientError::LastHub("hb".into())),
+            GimError::LastHub {
+                hub_id: "hb".into()
+            }
+        );
+        assert_eq!(
+            GimError::from(ClientError::HomeHub("ha".into())),
+            GimError::HomeHub {
+                hub_id: "ha".into()
+            }
+        );
+        let drained = ClientError::HubNotDrained {
+            hub_id: "hb".into(),
+            reason: "1 message".into(),
+        };
+        assert!(matches!(
+            GimError::from(drained),
+            GimError::HubNotDrained { .. }
+        ));
+    }
+
+    #[test]
     fn rejections() {
         let rejected = |status: u16| {
             GimError::from(ClientError::Transport(TransportError::Rejected {
@@ -263,6 +331,11 @@ mod tests {
         assert!(matches!(
             rejected(403),
             GimError::Server { status: 403, .. }
+        ));
+        let relay = TransportError::HubNotVerified("relay".into());
+        assert!(matches!(
+            GimError::from(ClientError::Transport(relay)),
+            GimError::HubNotVerified { .. }
         ));
     }
 }

@@ -16,16 +16,19 @@ mod types;
 pub use chat_list::{ChatListDiff, ChatListListener};
 #[cfg(feature = "testing")]
 pub use client::create_client_with_fake_transport;
-pub use client::{create_client, ClientConfig, ConnectionStateListener, GimClient, TypingListener};
+pub use client::{
+    create_client, ClientConfig, ConnectionStateListener, GimClient, HubListListener,
+    TypingListener,
+};
 pub use error::GimError;
 pub use hooks::PlatformHooks;
 pub use link::{LinkSession, PendingApproval};
 pub use task_handle::TaskHandle;
 pub use timeline::{LocalTimeZone, Timeline, TimelineDiff, TimelineListener};
 pub use types::{
-    ChatKind, ChatState, ChatSummary, ConnectionState, DeviceInfo, MediaRef, MembershipChangeKind,
-    MessageContent, MessageItem, MessagePreview, ReactionGroup, ReplyPreview, SendState, Session,
-    TimelineItem, UserProfile,
+    ChatKind, ChatState, ChatSummary, ConnectionState, DeviceInfo, HubInfo, HubState, MediaRef,
+    MembershipChangeKind, MessageContent, MessageItem, MessagePreview, ReactionGroup, ReplyPreview,
+    SendState, Session, TimelineItem, UserProfile,
 };
 
 uniffi::setup_scaffolding!();
