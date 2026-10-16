@@ -99,7 +99,7 @@ impl<S: StateStore + 'static> Client<S> {
             .to_string();
         let blob_id = media.blob_id.clone();
         let cached = self
-            .run(move |store, _| Ok(store.media(&blob_id)?))
+            .read(move |store, _| Ok(store.media(&blob_id)?))
             .await?
             .filter(|entry| Path::new(&entry.local_path).is_file());
         if let Some(entry) = cached {
@@ -274,7 +274,7 @@ impl<S: StateStore + 'static> Client<S> {
     /// Deletes the entries of [`Client::outgoing_dir`] that no queued media
     /// upload refers to (left by a crash or by a removed chat).
     pub(crate) async fn clean_outgoing(&self) -> Result<()> {
-        let entries = self.run(|store, _| Ok(store.outbox_entries()?)).await?;
+        let entries = self.read(|store, _| Ok(store.outbox_entries()?)).await?;
         let outgoing = self.outgoing_dir();
         let keep: Vec<PathBuf> = entries
             .into_iter()
