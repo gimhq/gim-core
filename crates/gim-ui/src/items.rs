@@ -32,6 +32,31 @@ pub struct ChatListItem {
     pub updated_at_ms: u64,
     /// Distinct users in the chat, this user included.
     pub member_count: u32,
+    pub state: ChatState,
+}
+
+/// Where this device stands in a chat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatState {
+    /// A member; messages can be sent.
+    Active,
+    /// Leaving was asked for: still a member until another member commits
+    /// the removal, but nothing can be sent. Back to `Active` if the hub
+    /// refuses the leave for good.
+    Leaving,
+    /// Removed (after leaving, by another member or by the hub); history is
+    /// kept.
+    Left,
+}
+
+impl From<model::Membership> for ChatState {
+    fn from(membership: model::Membership) -> Self {
+        match membership {
+            model::Membership::Joined => Self::Active,
+            model::Membership::Leaving => Self::Leaving,
+            model::Membership::Left => Self::Left,
+        }
+    }
 }
 
 /// Last message shown in a chat list row.
@@ -57,6 +82,11 @@ pub enum TimelineItem {
         user_name: String,
         change: MembershipChangeKind,
         at_ms: u64,
+        /// The user who joined or left.
+        user_id: UserId,
+        /// The user who caused the change (the user themselves for `Left`);
+        /// `None` if unknown.
+        actor_user_id: Option<UserId>,
     },
 }
 
@@ -234,6 +264,7 @@ pub(crate) fn chat_list_item<R: StateReader + ?Sized>(
         unread_count: chat.unread_count,
         updated_at_ms: chat.updated_at_ms,
         member_count: users.len() as u32,
+        state: chat.membership.into(),
     })
 }
 

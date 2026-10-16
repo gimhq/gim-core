@@ -23,7 +23,7 @@ pub use chat_list::ChatListService;
 pub use error::{Result, UiError};
 pub use eyeball_im::{Vector, VectorDiff};
 pub use items::{
-    ChatKind, ChatListItem, MediaRef, MembershipChangeKind, MessageContent, MessageItem,
+    ChatKind, ChatListItem, ChatState, MediaRef, MembershipChangeKind, MessageContent, MessageItem,
     MessagePreview, ReactionGroup, ReplyPreview, SendState, TimelineItem, UserProfile,
 };
 pub use timeline::{FixedOffset, TimeZone, Timeline, TimelineOptions, DEFAULT_PAGE_SIZE};

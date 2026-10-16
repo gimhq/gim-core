@@ -141,3 +141,46 @@ fn sort(items: &mut [ChatListItem]) {
         (Reverse(a.updated_at_ms), &a.chat_id).cmp(&(Reverse(b.updated_at_ms), &b.chat_id))
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use futures_util::FutureExt;
+    use gim_base::model::{Chat, ChatKind, Membership};
+    use gim_base::{MemoryStore, StoreTxn};
+
+    use super::*;
+    use crate::ChatState;
+
+    /// Each membership change of a chat is a `Set` of its row: leaving,
+    /// back to active after a refused leave, leaving again, left.
+    #[test]
+    fn membership_changes_set_the_row_state() {
+        let store = MemoryStore::new();
+        let mut chat = Chat::new(GroupId::new("crew").unwrap(), ChatKind::Group, 1);
+        let upsert = |chat: &Chat| {
+            store.transaction(|txn| Ok(txn.upsert_chat(chat)?)).unwrap();
+            vec![StateChange::ChatUpserted(chat.clone())]
+        };
+        let mut state = State {
+            own: UserId::new("alice").unwrap(),
+            items: ObservableVector::new(),
+        };
+        state.apply(&store, &upsert(&chat)).unwrap();
+        assert_eq!(state.items[0].state, ChatState::Active);
+        let mut stream = state.items.subscribe().into_stream();
+        for (membership, expected) in [
+            (Membership::Leaving, ChatState::Leaving),
+            (Membership::Joined, ChatState::Active),
+            (Membership::Leaving, ChatState::Leaving),
+            (Membership::Left, ChatState::Left),
+        ] {
+            chat.membership = membership;
+            state.apply(&store, &upsert(&chat)).unwrap();
+            let diff = stream.next().now_or_never().flatten();
+            assert!(
+                matches!(&diff, Some(VectorDiff::Set { index: 0, value }) if value.state == expected),
+                "{diff:?}"
+            );
+        }
+    }
+}
