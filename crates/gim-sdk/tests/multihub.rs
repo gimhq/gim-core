@@ -295,12 +295,12 @@ async fn message_only_on_hub_b_is_delivered_while_home_is_down() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn expired_cursor_on_one_hub_recovers_while_the_other_keeps_flowing() {
     let Setup {
+        hub_a,
         hub_b,
         server_a,
         server_b,
         alice,
         bob,
-        ..
     } = setup().await;
     let group_id = bob
         .client
@@ -317,21 +317,32 @@ async fn expired_cursor_on_one_hub_recovers_while_the_other_keeps_flowing() {
     })
     .await;
 
-    // B's cursor expires; B's stream drops and its catch-up gets a 410.
-    let cursor = alice.store.hub_cursor(&b).unwrap().unwrap();
+    // B's stream drops and B stays unreachable meanwhile. Once the serving
+    // task has taken the kick it sends nothing more, so B cannot deliver
+    // the next message before the cursor expires (which would skip the
+    // 410).
+    server_b.controls.down.store(true, Ordering::SeqCst);
+    server_b.controls.kick.store(true, Ordering::SeqCst);
+    wait_until("B's stream dropped", || {
+        !server_b.controls.kick.load(Ordering::SeqCst)
+    })
+    .await;
+    // Everything B served expires; its catch-up gets a 410 with a head
+    // past the next message.
+    let head = hub_a.service().events(&alice.device(), 0, usize::MAX).1;
     server_b
         .controls
         .events_expired_below
-        .store(cursor + 1, Ordering::SeqCst);
+        .store(head + 1, Ordering::SeqCst);
     bob.send_text(&group_id, "during recovery").await;
-    server_b.controls.kick.store(true, Ordering::SeqCst);
     wait_until("the message", || {
         alice.texts(&group_id) == ["during recovery"]
     })
     .await;
+    server_b.controls.down.store(false, Ordering::SeqCst);
     wait_until("B recovered", || {
         server_b.controls.expired_served.load(Ordering::SeqCst) == 1
-            && alice.store.hub_cursor(&b).unwrap().unwrap() > cursor
+            && alice.store.hub_cursor(&b).unwrap().unwrap() > head
     })
     .await;
     server_b.streams_served(2).await;
