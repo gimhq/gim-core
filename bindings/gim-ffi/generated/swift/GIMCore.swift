@@ -471,6 +471,22 @@ private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt8: FfiConverterPrimitive {
+    typealias FfiType = UInt8
+    typealias SwiftType = UInt8
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt8 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: UInt8, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt16: FfiConverterPrimitive {
     typealias FfiType = UInt16
     typealias SwiftType = UInt16
@@ -1056,6 +1072,16 @@ public func FfiConverterTypeConnectionStateListener_lower(_ value: ConnectionSta
  */
 public protocol GimClientProtocol: AnyObject, Sendable {
     
+    /**
+     * Adds the hub at `url` (entered by the user) to the hosting record:
+     * checks that it is a gim hub, signs in there, lists it last
+     * (least preferred), uploads this device's KeyPackages there, follows
+     * its events and shares its URL with the own other devices. Adding a
+     * listed hub again only records `url` for it on this device. Returns
+     * the hub.
+     */
+    func addHub(url: String) async throws  -> HubInfo
+    
     func addMembers(chatId: String, userIds: [String]) async throws 
     
     /**
@@ -1161,6 +1187,19 @@ public protocol GimClientProtocol: AnyObject, Sendable {
     func findUser(handle: String) async throws  -> UserProfile?
     
     /**
+     * Subscribes to the user's hubs; the first callback carries the
+     * current list.
+     */
+    func hubList(listener: HubListListener) async throws  -> TaskHandle
+    
+    /**
+     * The hubs of the user's hosting record known to this device, primary
+     * first (by priority, then hub id), including removed ones. With a
+     * single hub: the home hub.
+     */
+    func hubs() async throws  -> [HubInfo]
+    
+    /**
      * Starts leaving the chat; returns once the hub accepted the request,
      * with the chat `ChatState::Leaving` (see `ChatState`). Calling it again
      * while leaving re-sends the request. `ChatNotActive` once left.
@@ -1188,6 +1227,15 @@ public protocol GimClientProtocol: AnyObject, Sendable {
      * there is none.
      */
     func releaseHandle() async throws 
+    
+    /**
+     * Removes a hub from the hosting record. `HomeHub` for the hub this
+     * client was created for, `LastHub` for the only listed hub,
+     * `HubOwnsGroups` (with the number of chats) unless
+     * `confirm_owned_groups` if the hub owns chats of this user,
+     * `HubNotDrained` while something sent through it is not settled.
+     */
+    func removeHub(hubId: String, confirmOwnedGroups: Bool) async throws 
     
     func removeMember(chatId: String, userId: String) async throws 
     
@@ -1262,6 +1310,13 @@ public protocol GimClientProtocol: AnyObject, Sendable {
      * Reports a reachability change from the platform network monitor.
      */
     func setNetworkReachable(reachable: Bool) 
+    
+    /**
+     * Makes a listed hub the primary hub (priority 0, the others follow
+     * in their order). Every hub whose priority changes must be reachable
+     * from this device (`HubInfo.signed_in`), else `InvalidInput`.
+     */
+    func setPrimaryHub(hubId: String) async throws 
     
     /**
      * Reports whether the user is typing. Call it with `true` on every
@@ -1394,6 +1449,30 @@ open class GimClient: GimClientProtocol, @unchecked Sendable {
 
     
 
+    
+    /**
+     * Adds the hub at `url` (entered by the user) to the hosting record:
+     * checks that it is a gim hub, signs in there, lists it last
+     * (least preferred), uploads this device's KeyPackages there, follows
+     * its events and shares its URL with the own other devices. Adding a
+     * listed hub again only records `url` for it on this device. Returns
+     * the hub.
+     */
+open func addHub(url: String)async throws  -> HubInfo  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_gim_core_fn_method_gimclient_add_hub(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(url)
+                )
+            },
+            pollFunc: ffi_gim_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_gim_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_gim_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeHubInfo_lift,
+            errorHandler: FfiConverterTypeGimError_lift
+        )
+}
     
 open func addMembers(chatId: String, userIds: [String])async throws   {
     return
@@ -1766,6 +1845,47 @@ open func findUser(handle: String)async throws  -> UserProfile?  {
 }
     
     /**
+     * Subscribes to the user's hubs; the first callback carries the
+     * current list.
+     */
+open func hubList(listener: HubListListener)async throws  -> TaskHandle  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_gim_core_fn_method_gimclient_hub_list(
+                        self.uniffiCloneHandle(),FfiConverterTypeHubListListener_lower(listener)
+                )
+            },
+            pollFunc: ffi_gim_core_rust_future_poll_u64,
+            completeFunc: ffi_gim_core_rust_future_complete_u64,
+            freeFunc: ffi_gim_core_rust_future_free_u64,
+            liftFunc: FfiConverterTypeTaskHandle_lift,
+            errorHandler: FfiConverterTypeGimError_lift
+        )
+}
+    
+    /**
+     * The hubs of the user's hosting record known to this device, primary
+     * first (by priority, then hub id), including removed ones. With a
+     * single hub: the home hub.
+     */
+open func hubs()async throws  -> [HubInfo]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_gim_core_fn_method_gimclient_hubs(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_gim_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_gim_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_gim_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeHubInfo.lift,
+            errorHandler: FfiConverterTypeGimError_lift
+        )
+}
+    
+    /**
      * Starts leaving the chat; returns once the hub accepted the request,
      * with the chat `ChatState::Leaving` (see `ChatState`). Calling it again
      * while leaving re-sends the request. `ChatNotActive` once left.
@@ -1847,6 +1967,29 @@ open func releaseHandle()async throws   {
             rustFutureFunc: {
                 uniffi_gim_core_fn_method_gimclient_release_handle(
                         self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_gim_core_rust_future_poll_void,
+            completeFunc: ffi_gim_core_rust_future_complete_void,
+            freeFunc: ffi_gim_core_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeGimError_lift
+        )
+}
+    
+    /**
+     * Removes a hub from the hosting record. `HomeHub` for the hub this
+     * client was created for, `LastHub` for the only listed hub,
+     * `HubOwnsGroups` (with the number of chats) unless
+     * `confirm_owned_groups` if the hub owns chats of this user,
+     * `HubNotDrained` while something sent through it is not settled.
+     */
+open func removeHub(hubId: String, confirmOwnedGroups: Bool)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_gim_core_fn_method_gimclient_remove_hub(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(hubId),FfiConverterBool.lower(confirmOwnedGroups)
                 )
             },
             pollFunc: ffi_gim_core_rust_future_poll_void,
@@ -2069,6 +2212,27 @@ open func setNetworkReachable(reachable: Bool)  {try! rustCall() {
         FfiConverterBool.lower(reachable),uniffiCallStatus
     )
 }
+}
+    
+    /**
+     * Makes a listed hub the primary hub (priority 0, the others follow
+     * in their order). Every hub whose priority changes must be reachable
+     * from this device (`HubInfo.signed_in`), else `InvalidInput`.
+     */
+open func setPrimaryHub(hubId: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_gim_core_fn_method_gimclient_set_primary_hub(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(hubId)
+                )
+            },
+            pollFunc: ffi_gim_core_rust_future_poll_void,
+            completeFunc: ffi_gim_core_rust_future_complete_void,
+            freeFunc: ffi_gim_core_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeGimError_lift
+        )
 }
     
     /**
@@ -2344,6 +2508,216 @@ public func FfiConverterTypeGimClient_lift(_ handle: UInt64) throws -> GimClient
 #endif
 public func FfiConverterTypeGimClient_lower(_ value: GimClient) -> UInt64 {
     return FfiConverterTypeGimClient.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Receives the user's hubs (see `GimClient::hubs`) whenever they may have
+ * changed: added, removed, verified, reprioritized, or a URL shared by
+ * another own device. The first callback carries the current list. Called
+ * on gim-core's callback thread.
+ */
+public protocol HubListListener: AnyObject, Sendable {
+    
+    func onUpdate(hubs: [HubInfo]) 
+    
+}
+/**
+ * Receives the user's hubs (see `GimClient::hubs`) whenever they may have
+ * changed: added, removed, verified, reprioritized, or a URL shared by
+ * another own device. The first callback carries the current list. Called
+ * on gim-core's callback thread.
+ */
+open class HubListListenerImpl: HubListListener, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_gim_core_fn_clone_hublistlistener(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_gim_core_fn_free_hublistlistener(handle, $0) }
+    }
+
+    
+
+    
+open func onUpdate(hubs: [HubInfo])  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_gim_core_fn_method_hublistlistener_on_update(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceTypeHubInfo.lower(hubs),uniffiCallStatus
+    )
+}
+}
+    
+
+    
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceHubListListener {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceHubListListener = UniffiVTableCallbackInterfaceHubListListener(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeHubListListener.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface HubListListener: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeHubListListener.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface HubListListener: handle missing in uniffiClone")
+            }
+        },
+        onUpdate: { (
+            uniffiHandle: UInt64,
+            hubs: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeHubListListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onUpdate(
+                     hubs: try FfiConverterSequenceTypeHubInfo.lift(hubs)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceHubListListener> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceHubListListener>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitHubListListener() {
+    uniffi_gim_core_fn_init_callback_vtable_hublistlistener(UniffiCallbackInterfaceHubListListener.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHubListListener: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<HubListListener>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = HubListListener
+
+    public static func lift(_ handle: UInt64) throws -> HubListListener {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return HubListListenerImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: HubListListener) -> UInt64 {
+         if let rustImpl = value as? HubListListenerImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HubListListener {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: HubListListener, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHubListListener_lift(_ handle: UInt64) throws -> HubListListener {
+    return try FfiConverterTypeHubListListener.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHubListListener_lower(_ value: HubListListener) -> UInt64 {
+    return FfiConverterTypeHubListListener.lower(value)
 }
 
 
@@ -4230,6 +4604,115 @@ public func FfiConverterTypeDeviceInfo_lower(_ value: DeviceInfo) -> RustBuffer 
 
 
 /**
+ * A hub of the user's hosting record, for the hub settings screen.
+ */
+public struct HubInfo: Equatable, Hashable {
+    public var hubId: String
+    /**
+     * Client API base URL, once known.
+     */
+    public var url: String?
+    public var state: HubState
+    /**
+     * Priority in the hosting record; lower is preferred.
+     */
+    public var priority: UInt8
+    /**
+     * The first listed hub: submissions go there first.
+     */
+    public var isPrimary: Bool
+    /**
+     * The hub this client was created for (`ClientConfig.server_url`);
+     * it cannot be removed.
+     */
+    public var isHome: Bool
+    /**
+     * This device holds a session on the hub.
+     */
+    public var signedIn: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(hubId: String, 
+        /**
+         * Client API base URL, once known.
+         */url: String?, state: HubState, 
+        /**
+         * Priority in the hosting record; lower is preferred.
+         */priority: UInt8, 
+        /**
+         * The first listed hub: submissions go there first.
+         */isPrimary: Bool, 
+        /**
+         * The hub this client was created for (`ClientConfig.server_url`);
+         * it cannot be removed.
+         */isHome: Bool, 
+        /**
+         * This device holds a session on the hub.
+         */signedIn: Bool) {
+        self.hubId = hubId
+        self.url = url
+        self.state = state
+        self.priority = priority
+        self.isPrimary = isPrimary
+        self.isHome = isHome
+        self.signedIn = signedIn
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension HubInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHubInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HubInfo {
+        return
+            try HubInfo(
+                hubId: FfiConverterString.read(from: &buf), 
+                url: FfiConverterOptionString.read(from: &buf), 
+                state: FfiConverterTypeHubState.read(from: &buf), 
+                priority: FfiConverterUInt8.read(from: &buf), 
+                isPrimary: FfiConverterBool.read(from: &buf), 
+                isHome: FfiConverterBool.read(from: &buf), 
+                signedIn: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HubInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.hubId, into: &buf)
+        FfiConverterOptionString.write(value.url, into: &buf)
+        FfiConverterTypeHubState.write(value.state, into: &buf)
+        FfiConverterUInt8.write(value.priority, into: &buf)
+        FfiConverterBool.write(value.isPrimary, into: &buf)
+        FfiConverterBool.write(value.isHome, into: &buf)
+        FfiConverterBool.write(value.signedIn, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHubInfo_lift(_ buf: RustBuffer) throws -> HubInfo {
+    return try FfiConverterTypeHubInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHubInfo_lower(_ value: HubInfo) -> RustBuffer {
+    return FfiConverterTypeHubInfo.lower(value)
+}
+
+
+/**
  * Handle to an encrypted attachment. Pass it back to `fetch_media` /
  * `fetch_thumbnail`; keys and blob ids never leave Rust.
  */
@@ -5196,6 +5679,31 @@ enum GimError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
      */
     case ChatNotActive(chatId: String, state: ChatState
     )
+    /**
+     * `remove_hub` without `confirm_owned_groups`: the hub owns
+     * `group_count` chats of this user. They are not moved; after the
+     * removal they stay reachable through the other members' hubs. Ask
+     * the user, then call `remove_hub` again with `confirm_owned_groups`.
+     */
+    case HubOwnsGroups(hubId: String, groupCount: UInt32
+    )
+    /**
+     * The hub is the only listed hub and cannot be removed.
+     */
+    case LastHub(hubId: String
+    )
+    /**
+     * The hub is the one this client was created for (`HubInfo.is_home`)
+     * and cannot be removed.
+     */
+    case HomeHub(hubId: String
+    )
+    /**
+     * Messages or membership changes sent through the hub are not settled
+     * yet, so it cannot be removed now; try again later.
+     */
+    case HubNotDrained(hubId: String, reason: String
+    )
 
     
 
@@ -5258,6 +5766,20 @@ public struct FfiConverterTypeGimError: FfiConverterRustBuffer {
         case 12: return .ChatNotActive(
             chatId: try FfiConverterString.read(from: &buf), 
             state: try FfiConverterTypeChatState.read(from: &buf)
+            )
+        case 13: return .HubOwnsGroups(
+            hubId: try FfiConverterString.read(from: &buf), 
+            groupCount: try FfiConverterUInt32.read(from: &buf)
+            )
+        case 14: return .LastHub(
+            hubId: try FfiConverterString.read(from: &buf)
+            )
+        case 15: return .HomeHub(
+            hubId: try FfiConverterString.read(from: &buf)
+            )
+        case 16: return .HubNotDrained(
+            hubId: try FfiConverterString.read(from: &buf), 
+            reason: try FfiConverterString.read(from: &buf)
             )
 
          default: throw UniffiInternalError.unexpectedEnumCase
@@ -5331,6 +5853,28 @@ public struct FfiConverterTypeGimError: FfiConverterRustBuffer {
             FfiConverterString.write(chatId, into: &buf)
             FfiConverterTypeChatState.write(state, into: &buf)
             
+        
+        case let .HubOwnsGroups(hubId,groupCount):
+            writeInt(&buf, Int32(13))
+            FfiConverterString.write(hubId, into: &buf)
+            FfiConverterUInt32.write(groupCount, into: &buf)
+            
+        
+        case let .LastHub(hubId):
+            writeInt(&buf, Int32(14))
+            FfiConverterString.write(hubId, into: &buf)
+            
+        
+        case let .HomeHub(hubId):
+            writeInt(&buf, Int32(15))
+            FfiConverterString.write(hubId, into: &buf)
+            
+        
+        case let .HubNotDrained(hubId,reason):
+            writeInt(&buf, Int32(16))
+            FfiConverterString.write(hubId, into: &buf)
+            FfiConverterString.write(reason, into: &buf)
+            
         }
     }
 }
@@ -5349,6 +5893,93 @@ public func FfiConverterTypeGimError_lift(_ buf: RustBuffer) throws -> GimError 
 public func FfiConverterTypeGimError_lower(_ value: GimError) -> RustBuffer {
     return FfiConverterTypeGimError.lower(value)
 }
+
+
+/**
+ * Where a hub of the user's hosting record stands on this device.
+ */
+
+public enum HubState: Equatable, Hashable {
+    
+    /**
+     * Listed, but this device has no URL for it that proved the hub's
+     * identity (none known yet, or only one shared by another own device):
+     * never contacted.
+     */
+    case unverified
+    /**
+     * Listed, and its URL proved the hub's identity.
+     */
+    case verified
+    /**
+     * No longer listed by the hosting record.
+     */
+    case removed
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension HubState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHubState: FfiConverterRustBuffer {
+    typealias SwiftType = HubState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HubState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .unverified
+        
+        case 2: return .verified
+        
+        case 3: return .removed
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: HubState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .unverified:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .verified:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .removed:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHubState_lift(_ buf: RustBuffer) throws -> HubState {
+    return try FfiConverterTypeHubState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHubState_lower(_ value: HubState) -> RustBuffer {
+    return FfiConverterTypeHubState.lower(value)
+}
+
 
 
 
@@ -6236,6 +6867,31 @@ fileprivate struct FfiConverterSequenceTypeDeviceInfo: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeHubInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [HubInfo]
+
+    public static func write(_ value: [HubInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeHubInfo.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [HubInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [HubInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeHubInfo.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeReactionGroup: FfiConverterRustBuffer {
     typealias SwiftType = [ReactionGroup]
 
@@ -6474,6 +7130,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_gim_core_checksum_method_connectionstatelistener_on_change() != 1846) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_gim_core_checksum_method_gimclient_add_hub() != 18081) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_gim_core_checksum_method_gimclient_add_members() != 22623) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6531,6 +7190,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_gim_core_checksum_method_gimclient_find_user() != 25186) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_gim_core_checksum_method_gimclient_hub_list() != 18852) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_gim_core_checksum_method_gimclient_hubs() != 23286) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_gim_core_checksum_method_gimclient_leave_chat() != 60569) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6544,6 +7209,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_gimclient_release_handle() != 61692) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_gim_core_checksum_method_gimclient_remove_hub() != 44259) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_gimclient_remove_member() != 31958) {
@@ -6577,6 +7245,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_gimclient_set_network_reachable() != 23325) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_gim_core_checksum_method_gimclient_set_primary_hub() != 23675) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_gimclient_set_typing() != 10433) {
@@ -6613,6 +7284,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_gimclient_wait_link() != 17553) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_gim_core_checksum_method_hublistlistener_on_update() != 39691) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_typinglistener_on_update() != 51337) {
@@ -6669,6 +7343,7 @@ private let initializationResult: InitializationResult = {
 
     uniffiCallbackInitChatListListener()
     uniffiCallbackInitConnectionStateListener()
+    uniffiCallbackInitHubListListener()
     uniffiCallbackInitLocalTimeZone()
     uniffiCallbackInitPlatformHooks()
     uniffiCallbackInitTimelineListener()

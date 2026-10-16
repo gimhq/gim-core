@@ -257,6 +257,13 @@ typedef void (*UniffiCallbackInterfaceConnectionStateListenerMethod0)(uint64_t, 
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_HUB_LIST_LISTENER_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_HUB_LIST_LISTENER_METHOD0
+typedef void (*UniffiCallbackInterfaceHubListListenerMethod0)(uint64_t, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_TYPING_LISTENER_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_TYPING_LISTENER_METHOD0
 typedef void (*UniffiCallbackInterfaceTypingListenerMethod0)(uint64_t, RustBuffer, void* _Nonnull, 
@@ -329,6 +336,15 @@ typedef struct UniffiVTableCallbackInterfaceConnectionStateListener {
     UniffiCallbackInterfaceClone _Nonnull uniffiClone;
     UniffiCallbackInterfaceConnectionStateListenerMethod0 _Nonnull onChange;
 } UniffiVTableCallbackInterfaceConnectionStateListener;
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_HUB_LIST_LISTENER
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_HUB_LIST_LISTENER
+typedef struct UniffiVTableCallbackInterfaceHubListListener {
+    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
+    UniffiCallbackInterfaceClone _Nonnull uniffiClone;
+    UniffiCallbackInterfaceHubListListenerMethod0 _Nonnull onUpdate;
+} UniffiVTableCallbackInterfaceHubListListener;
 
 #endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_TYPING_LISTENER
@@ -419,6 +435,11 @@ uint64_t uniffi_gim_core_fn_clone_gimclient(uint64_t handle, RustCallStatus *_No
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_FREE_GIMCLIENT
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_FREE_GIMCLIENT
 void uniffi_gim_core_fn_free_gimclient(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_ADD_HUB
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_ADD_HUB
+uint64_t uniffi_gim_core_fn_method_gimclient_add_hub(uint64_t ptr, RustBuffer url
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_ADD_MEMBERS
@@ -516,6 +537,16 @@ uint64_t uniffi_gim_core_fn_method_gimclient_fetch_thumbnail(uint64_t ptr, RustB
 uint64_t uniffi_gim_core_fn_method_gimclient_find_user(uint64_t ptr, RustBuffer handle
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_HUB_LIST
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_HUB_LIST
+uint64_t uniffi_gim_core_fn_method_gimclient_hub_list(uint64_t ptr, uint64_t listener
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_HUBS
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_HUBS
+uint64_t uniffi_gim_core_fn_method_gimclient_hubs(uint64_t ptr
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_LEAVE_CHAT
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_LEAVE_CHAT
 uint64_t uniffi_gim_core_fn_method_gimclient_leave_chat(uint64_t ptr, RustBuffer chat_id
@@ -539,6 +570,11 @@ uint64_t uniffi_gim_core_fn_method_gimclient_react(uint64_t ptr, RustBuffer chat
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_RELEASE_HANDLE
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_RELEASE_HANDLE
 uint64_t uniffi_gim_core_fn_method_gimclient_release_handle(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_REMOVE_HUB
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_REMOVE_HUB
+uint64_t uniffi_gim_core_fn_method_gimclient_remove_hub(uint64_t ptr, RustBuffer hub_id, int8_t confirm_owned_groups
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_REMOVE_MEMBER
@@ -594,6 +630,11 @@ void uniffi_gim_core_fn_method_gimclient_set_local_time_zone(uint64_t ptr, RustB
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_SET_NETWORK_REACHABLE
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_SET_NETWORK_REACHABLE
 void uniffi_gim_core_fn_method_gimclient_set_network_reachable(uint64_t ptr, int8_t reachable, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_SET_PRIMARY_HUB
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_SET_PRIMARY_HUB
+uint64_t uniffi_gim_core_fn_method_gimclient_set_primary_hub(uint64_t ptr, RustBuffer hub_id
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_SET_TYPING
@@ -654,6 +695,26 @@ RustBuffer uniffi_gim_core_fn_method_gimclient_user_id(uint64_t ptr, RustCallSta
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_WAIT_LINK
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_WAIT_LINK
 uint64_t uniffi_gim_core_fn_method_gimclient_wait_link(uint64_t ptr, uint64_t link
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_CLONE_HUBLISTLISTENER
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_CLONE_HUBLISTLISTENER
+uint64_t uniffi_gim_core_fn_clone_hublistlistener(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_FREE_HUBLISTLISTENER
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_FREE_HUBLISTLISTENER
+void uniffi_gim_core_fn_free_hublistlistener(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_INIT_CALLBACK_VTABLE_HUBLISTLISTENER
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_INIT_CALLBACK_VTABLE_HUBLISTLISTENER
+void uniffi_gim_core_fn_init_callback_vtable_hublistlistener(const UniffiVTableCallbackInterfaceHubListListener* _Nonnull vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_HUBLISTLISTENER_ON_UPDATE
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_HUBLISTLISTENER_ON_UPDATE
+void uniffi_gim_core_fn_method_hublistlistener_on_update(uint64_t ptr, RustBuffer hubs, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_CLONE_TYPINGLISTENER
@@ -1148,6 +1209,12 @@ uint16_t uniffi_gim_core_checksum_method_connectionstatelistener_on_change(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_ADD_HUB
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_ADD_HUB
+uint16_t uniffi_gim_core_checksum_method_gimclient_add_hub(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_ADD_MEMBERS
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_ADD_MEMBERS
 uint16_t uniffi_gim_core_checksum_method_gimclient_add_members(void
@@ -1262,6 +1329,18 @@ uint16_t uniffi_gim_core_checksum_method_gimclient_find_user(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_HUB_LIST
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_HUB_LIST
+uint16_t uniffi_gim_core_checksum_method_gimclient_hub_list(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_HUBS
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_HUBS
+uint16_t uniffi_gim_core_checksum_method_gimclient_hubs(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_LEAVE_CHAT
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_LEAVE_CHAT
 uint16_t uniffi_gim_core_checksum_method_gimclient_leave_chat(void
@@ -1289,6 +1368,12 @@ uint16_t uniffi_gim_core_checksum_method_gimclient_react(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_RELEASE_HANDLE
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_RELEASE_HANDLE
 uint16_t uniffi_gim_core_checksum_method_gimclient_release_handle(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_REMOVE_HUB
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_REMOVE_HUB
+uint16_t uniffi_gim_core_checksum_method_gimclient_remove_hub(void
     
 );
 #endif
@@ -1355,6 +1440,12 @@ uint16_t uniffi_gim_core_checksum_method_gimclient_set_local_time_zone(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_SET_NETWORK_REACHABLE
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_SET_NETWORK_REACHABLE
 uint16_t uniffi_gim_core_checksum_method_gimclient_set_network_reachable(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_SET_PRIMARY_HUB
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_SET_PRIMARY_HUB
+uint16_t uniffi_gim_core_checksum_method_gimclient_set_primary_hub(void
     
 );
 #endif
@@ -1427,6 +1518,12 @@ uint16_t uniffi_gim_core_checksum_method_gimclient_user_id(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_WAIT_LINK
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_WAIT_LINK
 uint16_t uniffi_gim_core_checksum_method_gimclient_wait_link(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_HUBLISTLISTENER_ON_UPDATE
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_HUBLISTLISTENER_ON_UPDATE
+uint16_t uniffi_gim_core_checksum_method_hublistlistener_on_update(void
     
 );
 #endif
