@@ -5,8 +5,8 @@ use std::fs;
 use std::time::Duration;
 
 use gim_core::{
-    ChatKind, ChatState, ConnectionState, GimError, MembershipChangeKind, MessageContent, ReactionGroup,
-    SendState, TimelineItem,
+    ChatKind, ChatState, ConnectionState, GimError, MembershipChangeKind, MessageContent,
+    ReactionGroup, SendState, TimelineItem,
 };
 use gim_integration_testing::{
     eventually, member_ids, message, messages, open, server_url, text, timeline, MemoryHooks,
