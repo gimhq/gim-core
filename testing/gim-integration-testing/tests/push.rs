@@ -478,7 +478,10 @@ async fn coalesced_add_and_text_push_shows_the_text_or_the_invite() {
     assert!(texts <= 1 && invites <= 1, "{shown:?}");
     for content in &shown {
         assert_eq!(content.chat_id.as_deref(), Some(group.as_str()));
-        assert_eq!(content.sender_user_id.as_deref(), Some(bob.user_id.as_str()));
+        assert_eq!(
+            content.sender_user_id.as_deref(),
+            Some(bob.user_id.as_str())
+        );
         if content.kind == NotificationKind::Message {
             assert_eq!(content.body, "Lines ashore at Lumbarda", "{content:?}");
         }
