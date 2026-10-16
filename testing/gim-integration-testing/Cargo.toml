@@ -14,6 +14,7 @@ gim-ffi = { path = "../../bindings/gim-ffi" }
 gim-identity.workspace = true
 gim-proto.workspace = true
 gim-sdk = { workspace = true, features = ["testing"] }
+serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 url.workspace = true
