@@ -379,9 +379,10 @@ impl Claim {
 
 /// Whether the hub may have accepted a request that failed this way; such
 /// requests are resent unchanged. Peer hub failures (502/503) count: the
-/// owning hub may have sequenced the request before the failure.
+/// owning hub may have sequenced the request before the failure. Definite
+/// rejections ([`TransportError::Rejected`], ...) do not.
 pub(crate) fn outcome_unknown(err: &TransportError) -> bool {
-    matches!(err, TransportError::Network(_) | TransportError::Server(_)) || err.is_peer_failure()
+    err.outcome_unknown()
 }
 
 /// The hub owning a group: the `<hub_id>` prefix of its id. Commits and

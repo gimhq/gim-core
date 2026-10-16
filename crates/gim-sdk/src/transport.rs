@@ -191,8 +191,20 @@ pub enum TransportError {
     /// continue from the head `cursor`.
     #[error("cursor expired; head is {cursor}")]
     Gone { cursor: u64 },
+    /// 5xx, 408, 429 or an unusable response: the hub may have applied the
+    /// request; resend it unchanged.
     #[error("server error: {0}")]
     Server(String),
+    /// A definite 4xx without a dedicated variant (400 `validation_failed`,
+    /// 403 `forbidden` / `not_member`, 422, ...): the hub did not apply the
+    /// request and resending it unchanged cannot succeed. `code` is the
+    /// hub's error code, empty if the body had none.
+    #[error("rejected ({status} {code}): {message}")]
+    Rejected {
+        status: u16,
+        code: String,
+        message: String,
+    },
     /// 413: the payload exceeds the hub's size limit; resending cannot
     /// succeed.
     #[error("too large: {0}")]
@@ -247,6 +259,17 @@ impl TransportError {
     /// unchanged later.
     pub fn is_peer_failure(&self) -> bool {
         matches!(self, Self::PeerUnavailable { .. } | Self::PeerRefused(_))
+    }
+
+    /// Whether the hub may have applied a request that failed this way
+    /// (network errors, timeouts, 5xx incl. peer hub failures, 429); such
+    /// requests are resent unchanged. Every other error is a definite
+    /// answer: the request was not applied.
+    pub fn outcome_unknown(&self) -> bool {
+        matches!(
+            self,
+            Self::Network(_) | Self::Server(_) | Self::RetryLater { .. }
+        ) || self.is_peer_failure()
     }
 }
 
