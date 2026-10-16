@@ -46,9 +46,9 @@ milliseconds (`u64`). Counts and indices are `u32`.
    and retries pending sends; `false` neither pauses sync nor forces `Offline`.
 4. **Listeners**: subscribe with `chatList(listener)`, `timeline(chatId).addListener(listener)`,
    `connectionState(listener)` and `typing(chatId, listener)`. Each returns a `TaskHandle`.
-5. **Sign out**: `signOut()` stops sync and deletes the session, the local database and the
-   keystore secrets (session, root key, device key, database key). Create a new client
-   afterwards.
+5. **Sign out**: `signOut()` stops sync and the listeners and deletes the session, the local
+   database and the keystore secrets (session, root key, device key, database key). Create a new
+   client afterwards. See *Teardown* for the callback guarantees.
 
 ## Identity and devices
 
@@ -262,6 +262,26 @@ implemented by the app.
   the last reference) or calling `cancel()` ends the subscription. `isFinished()` reports whether it
   has ended.
 - `ConnectionStateListener.onChange` and `TypingListener.onUpdate` first deliver the current value.
+
+### Teardown
+
+- **`signOut()` returns only after every callback in flight returned** (listeners,
+  `LocalTimeZone`, and `PlatformHooks` calls made by background work), waiting at most 5 s for a
+  callback that does not return. Once it returned, no listener, `LocalTimeZone` or
+  `PlatformHooks` method is called for that client any more, and its `TaskHandle`s are finished.
+- **Releasing the client** (Kotlin: `close()` / garbage collection; Swift: releasing the last
+  reference) does the same without deleting anything. Released on a gim-core thread (from inside
+  a callback) it does not wait, so it cannot deadlock on that callback.
+- UniFFI may still release the native objects passed in (listeners, hooks, time zone) later, from
+  a Rust thread; that only drops gim-core's reference.
+- **Never call into gim-core synchronously from inside a callback** (no `GimClient` call, no
+  `close()` / `destroy()` of a gim-core object, no `runBlocking` around a suspend call), and do
+  not resume coroutines on the callback thread (`Dispatchers.Unconfined`,
+  `UnconfinedTestDispatcher`): hop to your own thread first. Callbacks run on Rust threads that
+  JNA attaches to the JVM for the duration of one callback; a second callback nested on the same
+  thread detaches it when it returns, while the outer callback is still running, and ART aborts
+  with `attempting to detach while still running code`. iOS has no attach step, but the same rule
+  keeps callbacks from deadlocking on the client's locks.
 
 ### Diff semantics
 

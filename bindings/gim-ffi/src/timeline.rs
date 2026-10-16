@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use futures_util::StreamExt;
 
+use crate::callbacks::Callbacks;
 use crate::{GimError, TaskHandle, TimelineItem};
 
 /// Incremental change to a timeline, mirroring eyeball-im `VectorDiff`.
@@ -37,12 +38,18 @@ pub trait LocalTimeZone: Send + Sync {
     fn utc_offset_secs(&self, at_ms: i64) -> i32;
 }
 
-/// gim-ui [`gim_ui::TimeZone`] over the platform time zone.
-pub(crate) struct PlatformTimeZone(pub(crate) Arc<dyn LocalTimeZone>);
+/// gim-ui [`gim_ui::TimeZone`] over the platform time zone; UTC once the
+/// client's callbacks are closed.
+pub(crate) struct PlatformTimeZone {
+    pub(crate) zone: Arc<dyn LocalTimeZone>,
+    pub(crate) callbacks: Arc<Callbacks>,
+}
 
 impl gim_ui::TimeZone for PlatformTimeZone {
     fn utc_offset_secs(&self, at_ms: i64) -> i32 {
-        self.0.utc_offset_secs(at_ms)
+        self.callbacks
+            .call(|| self.zone.utc_offset_secs(at_ms))
+            .unwrap_or(0)
     }
 }
 
@@ -50,11 +57,12 @@ impl gim_ui::TimeZone for PlatformTimeZone {
 #[derive(uniffi::Object)]
 pub struct Timeline {
     inner: Arc<gim_ui::Timeline>,
+    callbacks: Arc<Callbacks>,
 }
 
 impl Timeline {
-    pub(crate) fn new(inner: Arc<gim_ui::Timeline>) -> Self {
-        Self { inner }
+    pub(crate) fn new(inner: Arc<gim_ui::Timeline>, callbacks: Arc<Callbacks>) -> Self {
+        Self { inner, callbacks }
     }
 }
 
@@ -69,15 +77,22 @@ impl Timeline {
     pub async fn add_listener(&self, listener: Arc<dyn TimelineListener>) -> Arc<TaskHandle> {
         let inner = self.inner.clone();
         let (values, stream) = inner.items();
-        Arc::new(TaskHandle::spawn(async move {
+        let callbacks = self.callbacks.clone();
+        Arc::new(TaskHandle::spawn(&self.callbacks, async move {
             // Keeps the timeline following the client.
             let _inner = inner;
-            listener.on_update(vec![TimelineDiff::Reset {
+            let reset = vec![TimelineDiff::Reset {
                 values: values.into_iter().map(Into::into).collect(),
-            }]);
+            }];
+            if callbacks.call(|| listener.on_update(reset)).is_none() {
+                return;
+            }
             let mut stream = std::pin::pin!(stream);
             while let Some(diffs) = stream.next().await {
-                listener.on_update(diffs.into_iter().map(Into::into).collect());
+                let diffs = diffs.into_iter().map(Into::into).collect();
+                if callbacks.call(|| listener.on_update(diffs)).is_none() {
+                    return;
+                }
             }
         }))
     }

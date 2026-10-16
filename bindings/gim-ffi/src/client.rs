@@ -17,6 +17,7 @@ use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 use url::Url;
 
+use crate::callbacks::{Callbacks, DRAIN_TIMEOUT};
 use crate::error::parse_id;
 use crate::hooks::HookSecrets;
 use crate::timeline::PlatformTimeZone;
@@ -165,6 +166,7 @@ pub struct GimClient {
     shared: Arc<Shared>,
     sync: Mutex<Option<SyncTasks>>,
     local_time: Mutex<LocalTime>,
+    callbacks: Arc<Callbacks>,
 }
 
 /// The local time zone and the open timelines that follow it.
@@ -197,7 +199,11 @@ impl GimClient {
             });
         }
         let transport = transport(&server_url)?;
-        let secrets = Arc::new(HookSecrets(hooks.clone()));
+        let callbacks = Arc::new(Callbacks::default());
+        let secrets = Arc::new(HookSecrets {
+            hooks: hooks.clone(),
+            callbacks: callbacks.clone(),
+        });
         let dir = data_dir.clone();
         let (builder, local_state_reset) = tokio::task::spawn_blocking(move || {
             let mut reset = false;
@@ -225,6 +231,7 @@ impl GimClient {
             shared,
             sync: Mutex::new(None),
             local_time: Mutex::default(),
+            callbacks,
         })
     }
 
@@ -258,6 +265,20 @@ impl GimClient {
     fn stop_sync_tasks(&self) {
         drop(self.sync.lock().unwrap_or_else(|e| e.into_inner()).take());
         self.shared.set_connection(ConnectionState::Offline);
+    }
+}
+
+impl Drop for GimClient {
+    /// Like `sign_out` without deleting anything: stops the listeners and
+    /// sync and waits (bounded) for the callbacks in flight.
+    fn drop(&mut self) {
+        self.callbacks.close();
+        self.stop_sync_tasks();
+        // Never block a runtime thread (the client may be released from a
+        // task or a callback): a callback in flight may need it.
+        if tokio::runtime::Handle::try_current().is_err() {
+            self.callbacks.drain(DRAIN_TIMEOUT);
+        }
     }
 }
 
@@ -537,22 +558,30 @@ impl GimClient {
         Ok(sdk.release_handle(&handle).await?)
     }
 
-    /// Stops sync and deletes the session, local data and keystore secrets.
+    /// Stops sync and the listeners and deletes the session, local data and
+    /// keystore secrets. No callback runs once it returned.
     pub async fn sign_out(&self) -> Result<(), GimError> {
         self.sdk()?;
+        self.callbacks.close();
         self.stop_sync_tasks();
         self.signed_out.store(true, Ordering::SeqCst);
-        for key in [
-            SESSION_SECRET_KEY,
-            DEVICE_KEY_SECRET_KEY,
-            ROOT_KEY_SECRET_KEY,
-        ] {
-            self.hooks.secure_store_delete(key.to_string());
-        }
-        self.hooks
-            .secure_store_delete(ClientBuilder::<SqliteStore>::DB_KEY_SECRET_KEY.to_string());
+        let callbacks = self.callbacks.clone();
+        let hooks = self.hooks.clone();
         let data_dir = self.data_dir.clone();
+        // On a blocking-pool thread: the wait must not hold a runtime thread
+        // a callback in flight may need, and the keystore hooks below then
+        // never run nested inside a foreign frame on the caller's thread.
         tokio::task::spawn_blocking(move || {
+            // Bounded: a callback that never returns does not hang sign-out.
+            callbacks.drain(DRAIN_TIMEOUT);
+            for key in [
+                SESSION_SECRET_KEY,
+                DEVICE_KEY_SECRET_KEY,
+                ROOT_KEY_SECRET_KEY,
+                ClientBuilder::<SqliteStore>::DB_KEY_SECRET_KEY,
+            ] {
+                hooks.secure_store_delete(key.to_string());
+            }
             for suffix in ["", "-wal", "-shm", "-journal"] {
                 remove_if_exists(&data_dir.join(format!("{DATABASE_FILE_NAME}{suffix}")))?;
             }
@@ -602,7 +631,12 @@ impl GimClient {
     /// separators through their listeners.
     pub fn set_local_time_zone(&self, zone: Option<Arc<dyn LocalTimeZone>>) {
         let mut local = self.local_time.lock().unwrap_or_else(|e| e.into_inner());
-        local.zone = zone.map(|zone| Arc::new(PlatformTimeZone(zone)) as Arc<dyn gim_ui::TimeZone>);
+        local.zone = zone.map(|zone| {
+            Arc::new(PlatformTimeZone {
+                zone,
+                callbacks: self.callbacks.clone(),
+            }) as Arc<dyn gim_ui::TimeZone>
+        });
         let zone = local.zone();
         local.timelines.retain(|timeline| match timeline.upgrade() {
             Some(timeline) => {
@@ -896,15 +930,22 @@ impl GimClient {
     ) -> Result<Arc<TaskHandle>, GimError> {
         let service = gim_ui::ChatListService::new(self.sdk()?).await?;
         let (values, stream) = service.entries();
-        Ok(Arc::new(TaskHandle::spawn(async move {
+        let callbacks = self.callbacks.clone();
+        Ok(Arc::new(TaskHandle::spawn(&self.callbacks, async move {
             // Keeps the list following the client.
             let _service = service;
-            listener.on_update(vec![ChatListDiff::Reset {
+            let reset = vec![ChatListDiff::Reset {
                 values: values.into_iter().map(Into::into).collect(),
-            }]);
+            }];
+            if callbacks.call(|| listener.on_update(reset)).is_none() {
+                return;
+            }
             let mut stream = std::pin::pin!(stream);
             while let Some(diffs) = stream.next().await {
-                listener.on_update(diffs.into_iter().map(Into::into).collect());
+                let diffs = diffs.into_iter().map(Into::into).collect();
+                if callbacks.call(|| listener.on_update(diffs)).is_none() {
+                    return;
+                }
             }
         })))
     }
@@ -936,7 +977,7 @@ impl GimClient {
             .timelines
             .retain(|timeline| timeline.strong_count() > 0);
         local.timelines.push(Arc::downgrade(&inner));
-        Ok(Arc::new(Timeline::new(inner)))
+        Ok(Arc::new(Timeline::new(inner, self.callbacks.clone())))
     }
 
     /// Subscribes to connection state changes.
@@ -945,12 +986,17 @@ impl GimClient {
         listener: Arc<dyn ConnectionStateListener>,
     ) -> Result<Arc<TaskHandle>, GimError> {
         let mut states = self.shared.connection.subscribe();
-        Ok(Arc::new(TaskHandle::spawn(async move {
+        let callbacks = self.callbacks.clone();
+        Ok(Arc::new(TaskHandle::spawn(&self.callbacks, async move {
             let state = *states.borrow_and_update();
-            listener.on_change(state);
+            if callbacks.call(|| listener.on_change(state)).is_none() {
+                return;
+            }
             while states.changed().await.is_ok() {
                 let state = *states.borrow_and_update();
-                listener.on_change(state);
+                if callbacks.call(|| listener.on_change(state)).is_none() {
+                    return;
+                }
             }
         })))
     }
@@ -965,12 +1011,23 @@ impl GimClient {
         let typing = gim_ui::TypingNotifications::new(self.sdk()?, group_id)?;
         let (current, stream) = typing.subscribe();
         let to_strings = |users: Vec<UserId>| users.into_iter().map(String::from).collect();
-        Ok(Arc::new(TaskHandle::spawn(async move {
+        let callbacks = self.callbacks.clone();
+        Ok(Arc::new(TaskHandle::spawn(&self.callbacks, async move {
             let _typing = typing;
-            listener.on_update(to_strings(current));
+            if callbacks
+                .call(|| listener.on_update(to_strings(current)))
+                .is_none()
+            {
+                return;
+            }
             let mut stream = std::pin::pin!(stream);
             while let Some(users) = stream.next().await {
-                listener.on_update(to_strings(users));
+                if callbacks
+                    .call(|| listener.on_update(to_strings(users)))
+                    .is_none()
+                {
+                    return;
+                }
             }
         })))
     }
