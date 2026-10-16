@@ -1,8 +1,12 @@
 gim-hub API v2 contract, vendored verbatim (byte-identical copies).
 
 Repository: gimhq/gim-hub (local checkout: /srv/gimhq/im-client/hub)
-Commit:     50b3401726c99781e30b7c0311f5c63a56bc5657 (hub main at vendoring time, H7)
+Commit:     bd8c9ca29f4dc8804eac2f22a9f771319c00070c (hub main at vendoring time, H8)
 Vendored:   2026-10-16
+
+Only docs/push.md changed between 50b3401 (H7) and bd8c9ca (H8)
+(`git diff --stat 50b3401 bd8c9ca` over the files below); the other files
+are unchanged since 50b3401.
 
 Files (hub path -> this directory):
   openapi.json        -> openapi.json

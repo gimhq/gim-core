@@ -671,7 +671,8 @@ impl<S: StateStore + 'static> Client<S> {
     ///   invite. The inline Welcome is not used: it does not name who
     ///   added this device.
     /// - `group.member_added` / `group.member_removed`: catches the group
-    ///   up to the pushed seq; silent.
+    ///   up to the pushed seq (joining it first through the pending
+    ///   Welcomes if the change added this device); silent by itself.
     /// - `wake` (minimal mode), an unknown type or version: joins the
     ///   pending Welcomes and reads one page of events from every reachable
     ///   hub (without moving the cursors: the app's stream reads them
@@ -679,8 +680,10 @@ impl<S: StateStore + 'static> Client<S> {
     ///
     /// The hub keeps one pending push per device, with the highest
     /// priority and the newest payload, so an alert push may carry a
-    /// receipt or an announcement that followed a text. When the pushed
-    /// message shows nothing (and for member changes and wake-ups), the
+    /// receipt, an announcement or a member change that followed a text.
+    /// The payload carries no priority: every type is handled the same at
+    /// any priority. When the pushed message shows nothing (and for member
+    /// changes and wake-ups), the
     /// group is caught up to the pushed seq and the newest unread text or
     /// media from someone else obtained in this call is shown, else the
     /// invite of a chat joined in this call, else nothing. Only the stored
@@ -1061,8 +1064,9 @@ impl<S: StateStore + 'static> Client<S> {
             .await
     }
 
-    /// A member change: catches the group up to the pushed seq; silent
-    /// unless that brought a message to show.
+    /// A member change: joins the group first if the change added this
+    /// device, then catches the group up to the pushed seq; shows a message
+    /// that brought, else the invite of a group joined now, else nothing.
     async fn push_membership(
         &self,
         session: &Session,
@@ -1071,9 +1075,22 @@ impl<S: StateStore + 'static> Client<S> {
         seq: u64,
     ) -> Result<NotificationContent> {
         let before = self.cursors([group_id.clone()]).await?;
+        // The Commit may have added this device: its Welcome push coalesced
+        // into this one.
+        let mut joined_now = None;
+        if !self.is_joined(group_id).await? {
+            self.join_pending(session, group_id, Some(seq)).await?;
+            joined_now = self.joined_actor(session, group_id, Some(seq)).await?;
+        }
         self.catch_up(session, group_id, seq).await?;
+        if let Some(actor) = &joined_now {
+            self.joined(session, group_id, actor.as_ref()).await;
+        }
         if let Some(newest) = self.newest_obtained(session, push, before).await? {
             return Ok(newest);
+        }
+        if let Some(actor) = joined_now {
+            return self.describe_invite(session, push, group_id, actor).await;
         }
         let gid = group_id.clone();
         self.describe(Some(session), push, move |d| {
