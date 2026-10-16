@@ -18,7 +18,7 @@ use gim_sdk::{
     Client, ClientBuilder, ClientError, ClientMode, NotificationKind, PushRegistration,
     SecretStorage, StoreLock, GENERIC_BODY, LOCK_FILE_NAME,
 };
-use gim_sqlite::{DbKey, SqliteStore};
+use gim_sqlite::{DbKey, SqliteStore, DATABASE_FILE_NAME};
 use tempfile::TempDir;
 
 use common::{Device, FlakyTransport};
@@ -322,6 +322,102 @@ async fn an_outbox_pass_waiting_for_another_process_keeps_the_entry() {
     assert_eq!(app.store().outbox_entry(&id).unwrap(), None);
     bob.sync().await;
     assert_eq!(texts(&*bob.store, &g), vec!["queued".to_string()]);
+}
+
+/// The database files in `dir`.
+fn database_files(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.starts_with(DATABASE_FILE_NAME))
+        .collect()
+}
+
+/// What sign-out deletes (gim-ffi `GimClient::sign_out`), on a blocking
+/// thread.
+fn sign_out(
+    app: &Client<SqliteStore>,
+    device: &SharedDevice,
+) -> tokio::task::JoinHandle<Result<(), ClientError>> {
+    let app = app.clone();
+    let secrets = device.secrets.clone();
+    let dir = device.dir.path().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        app.wipe_store(|| {
+            secrets.delete(Builder::DB_KEY_SECRET_KEY)?;
+            for name in database_files(&dir) {
+                std::fs::remove_file(dir.join(name))?;
+            }
+            Ok(())
+        })
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sign_out_waits_for_another_process_and_fails_the_extension_after() {
+    let transport = FlakyTransport::new();
+    let (alice, app) = SharedDevice::register(&transport, "alice").await;
+    let bob = Device::register(&transport, "bob").await;
+    let g = app.create_group_chat(None, &[bob.user_id()]).await.unwrap();
+    bob.sync().await;
+    let extension = alice.extension().await;
+    extension.sync_once().await.unwrap();
+    let dir = alice.dir.path();
+
+    // Another process is in the middle of a store change.
+    let holder = StoreHolder::start(dir);
+    let wipe = sign_out(&app, &alice);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!wipe.is_finished());
+    assert!(dir.join(DATABASE_FILE_NAME).is_file());
+    holder.release();
+    wipe.await.unwrap().unwrap();
+    assert_eq!(database_files(dir), Vec::<String>::new());
+    assert!(dir.join(LOCK_FILE_NAME).is_file());
+
+    // The extension that had the store open changes nothing any more.
+    bob.client.send_text(&g, "after", None).await.unwrap();
+    assert!(matches!(
+        extension.sync_once().await,
+        Err(ClientError::StoreWiped)
+    ));
+    assert!(matches!(
+        extension.send_text(&g, "from the nse", None).await,
+        Err(ClientError::StoreWiped)
+    ));
+    assert!(matches!(
+        app.sync_once().await,
+        Err(ClientError::StoreWiped)
+    ));
+    // A new one does not open, and nothing was created again.
+    assert!(matches!(
+        alice.open_extension(),
+        Err(ClientError::InvalidInput(_))
+    ));
+    assert_eq!(database_files(dir), Vec::<String>::new());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sign_out_goes_ahead_when_another_process_keeps_the_lock() {
+    let transport = FlakyTransport::new();
+    let (alice, app) = SharedDevice::register(&transport, "alice").await;
+    drop(app);
+    let app = alice.app(Duration::from_millis(200));
+    assert!(app.restore_session().await.unwrap());
+    let dir = alice.dir.path();
+
+    let holder = StoreHolder::start(dir);
+    let started = Instant::now();
+    sign_out(&app, &alice).await.unwrap().unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(200));
+    assert_eq!(database_files(dir), Vec::<String>::new());
+    assert_eq!(alice.secrets.get(Builder::DB_KEY_SECRET_KEY).unwrap(), None);
+    holder.release();
+    assert!(matches!(
+        alice.open_extension(),
+        Err(ClientError::InvalidInput(_))
+    ));
+    assert_eq!(database_files(dir), Vec::<String>::new());
 }
 
 #[tokio::test]

@@ -206,7 +206,8 @@ impl<S: StateStore + 'static> Client<S> {
             // entry stays as it is for the next pass.
             ClientError::Base(BaseError::Store(_))
             | ClientError::Task(_)
-            | ClientError::StoreBusy(_) => return Err(err),
+            | ClientError::StoreBusy(_)
+            | ClientError::StoreWiped => return Err(err),
             _ => false,
         };
         let retry_after = match &err {
