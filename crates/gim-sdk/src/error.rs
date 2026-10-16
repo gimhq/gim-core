@@ -41,6 +41,12 @@ pub enum ClientError {
     Io(#[from] std::io::Error),
     #[error("blocking task failed: {0}")]
     Task(String),
+    /// Another process on the same data directory (the app or an app
+    /// extension) held the store lock longer than the timeout (see
+    /// [`crate::ClientBuilder::store_lock_timeout`]): the store mutation
+    /// did not run. It is retried later; nothing was lost.
+    #[error("store is locked by another process (waited {0:?})")]
+    StoreBusy(std::time::Duration),
     /// [`crate::Client::remove_hub`] without `confirm_owned_groups`: the hub
     /// owns (sequences) `group_count` groups this user is in. They stay
     /// reachable through the other members' hubs after the removal, but

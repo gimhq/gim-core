@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use gim_core::{
     create_client_with_fake_transport, ChatKind, ChatListDiff, ChatListListener, ChatState,
-    ChatSummary, ClientConfig, ConnectionState, ConnectionStateListener, GimClient, GimError,
-    HubInfo, HubListListener, HubState, LocalTimeZone, MembershipChangeKind, MessageContent,
-    MessageItem, PlatformHooks, SendState, TaskHandle, TimelineDiff, TimelineItem,
+    ChatSummary, ClientConfig, ClientMode, ConnectionState, ConnectionStateListener, GimClient,
+    GimError, HubInfo, HubListListener, HubState, LocalTimeZone, MembershipChangeKind,
+    MessageContent, MessageItem, PlatformHooks, SendState, TaskHandle, TimelineDiff, TimelineItem,
     TimelineListener, TypingListener,
 };
 use gim_sdk::testing::FakeTransport;
@@ -168,6 +168,7 @@ impl HubListListener for Recorder<Vec<HubInfo>> {
 async fn open(transport: &FakeTransport, hooks: &Arc<MemoryHooks>) -> Arc<GimClient> {
     let config = ClientConfig {
         server_url: "https://gim.example.org".to_string(),
+        mode: None,
     };
     create_client_with_fake_transport(config, hooks.clone(), transport.clone())
         .await
@@ -1071,6 +1072,7 @@ async fn locked_keystore_fails_without_replacing_the_database_key() {
     hooks.locked.store(true, Ordering::SeqCst);
     let config = ClientConfig {
         server_url: "https://gim.example.org".to_string(),
+        mode: None,
     };
     let result = create_client_with_fake_transport(config, hooks.clone(), transport.clone()).await;
     assert!(matches!(result, Err(GimError::Storage { .. })));
@@ -1155,4 +1157,56 @@ async fn single_hub_management() {
         Err(GimError::Network { .. })
     ));
     assert_eq!(alice.client.hubs().await.unwrap(), hubs);
+}
+
+#[tokio::test]
+async fn extension_mode_opens_the_app_state_and_never_resets_it() {
+    let transport = FakeTransport::new();
+    let hooks = MemoryHooks::new();
+    let extension = |hooks: &Arc<MemoryHooks>| {
+        let config = ClientConfig {
+            server_url: "https://gim.example.org".to_string(),
+            mode: Some(ClientMode::Extension),
+        };
+        create_client_with_fake_transport(config, hooks.clone(), transport.clone())
+    };
+    // Before the app created local state: no database key, none created.
+    assert!(matches!(
+        extension(&hooks).await,
+        Err(GimError::InvalidInput { .. })
+    ));
+    assert!(hooks.secrets.lock().unwrap().is_empty());
+
+    let app = open(&transport, &hooks).await;
+    app.create_identity("Alice".to_string()).await.unwrap();
+    let session = app.session().await.unwrap();
+    assert!(session.is_some());
+
+    let nse = extension(&hooks).await.unwrap();
+    assert!(!nse.local_state_reset());
+    assert_eq!(nse.session().await.unwrap(), session);
+    assert!(matches!(
+        nse.start_sync().await,
+        Err(GimError::InvalidInput { .. })
+    ));
+    drop(nse);
+
+    // A key that cannot decrypt the database fails; nothing is discarded.
+    let key = hooks.secrets.lock().unwrap()["gim.db_key.v1"].clone();
+    hooks
+        .secrets
+        .lock()
+        .unwrap()
+        .insert("gim.db_key.v1".to_string(), vec![9; 32]);
+    assert!(matches!(
+        extension(&hooks).await,
+        Err(GimError::Storage { .. })
+    ));
+    hooks
+        .secrets
+        .lock()
+        .unwrap()
+        .insert("gim.db_key.v1".to_string(), key);
+    assert_eq!(app.session().await.unwrap(), session);
+    app.start_sync().await.unwrap();
 }

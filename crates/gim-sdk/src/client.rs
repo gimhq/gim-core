@@ -26,6 +26,7 @@ use crate::identity::merge_directory_user;
 use crate::invites::{load_pending_invites, PendingInvites};
 use crate::routing::{HubTarget, Submission};
 use crate::send::TypingState;
+use crate::store_lock::{StoreLock, DEFAULT_STORE_LOCK_TIMEOUT};
 use crate::stream::ConnectionState;
 use crate::sync::{HubLink, SyncSettings};
 use crate::transport::{
@@ -96,6 +97,23 @@ pub struct Session {
     pub hub_id: String,
 }
 
+/// What the process running a [`Client`] is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ClientMode {
+    /// The app: everything below is available.
+    #[default]
+    App,
+    /// An app extension (the iOS Notification Service Extension) next to
+    /// the app on the same data directory: a short-lived, memory-bound
+    /// process that only applies what it is given. It starts no sync loop
+    /// ([`Client::start_sync`] fails), generates and uploads no
+    /// KeyPackages, does not refresh the hub registry, does not resume
+    /// unfinished commits, leaves or departed-member removals, schedules no
+    /// Proposal commits and never resets the local database: the app does
+    /// all of that.
+    Extension,
+}
+
 /// Builds a [`Client`].
 pub struct ClientBuilder<S> {
     store: Arc<S>,
@@ -104,6 +122,8 @@ pub struct ClientBuilder<S> {
     data_dir: Option<PathBuf>,
     sync_settings: SyncSettings,
     hub_connector: Option<HubConnector>,
+    mode: ClientMode,
+    store_lock_timeout: Duration,
 }
 
 impl<S: StateStore + 'static> ClientBuilder<S> {
@@ -119,6 +139,8 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
             data_dir: None,
             sync_settings: SyncSettings::default(),
             hub_connector: None,
+            mode: ClientMode::App,
+            store_lock_timeout: DEFAULT_STORE_LOCK_TIMEOUT,
         }
     }
 
@@ -181,6 +203,60 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
         Ok(Self::new(Arc::new(store), transport, secrets))
     }
 
+    /// Like [`Self::open`] for an app extension ([`ClientMode::Extension`]):
+    /// the database key must exist already (the app created it), since a
+    /// new key would make the app's database unreadable. Without one it
+    /// fails with [`ClientError::InvalidInput`]; check that the extension
+    /// shares the app's keychain access group. `open_store` must not reset
+    /// the database.
+    pub fn open_extension<E>(
+        transport: Arc<dyn Transport>,
+        secrets: Arc<dyn SecretStorage>,
+        open_store: impl FnOnce(&[u8; DATABASE_KEY_LEN]) -> std::result::Result<S, E>,
+    ) -> Result<Self>
+    where
+        ClientError: From<E>,
+    {
+        let Some(mut stored) = secrets.get(Self::DB_KEY_SECRET_KEY)? else {
+            return Err(ClientError::InvalidInput(
+                "no database key: the app has not created local state, or the extension cannot read the app's keychain".into(),
+            ));
+        };
+        let mut key = [0u8; DATABASE_KEY_LEN];
+        let len = stored.len();
+        if len == key.len() {
+            key.copy_from_slice(&stored);
+        }
+        stored.fill(0);
+        if len != key.len() {
+            return Err(SecretStorageError::new(format!(
+                "stored database key has {len} bytes, expected {}",
+                Self::DB_KEY_LEN
+            ))
+            .into());
+        }
+        let opened = open_store(&key);
+        key.fill(0);
+        let mut builder = Self::new(Arc::new(opened?), transport, secrets);
+        builder.mode = ClientMode::Extension;
+        Ok(builder)
+    }
+
+    /// The process kind; default [`ClientMode::App`].
+    pub fn mode(mut self, mode: ClientMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// How long a store mutation waits for another process holding the
+    /// store lock (see [`crate::StoreLock`]) before it is deferred with
+    /// [`ClientError::StoreBusy`]; default
+    /// [`crate::DEFAULT_STORE_LOCK_TIMEOUT`].
+    pub fn store_lock_timeout(mut self, timeout: Duration) -> Self {
+        self.store_lock_timeout = timeout;
+        self
+    }
+
     /// Timing of the sync loop; see [`SyncSettings`].
     pub fn sync_settings(mut self, settings: SyncSettings) -> Self {
         self.sync_settings = settings;
@@ -206,14 +282,18 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
     /// pending invites.
     ///
     /// Creates the data directory and its `tmp` subdirectory owner-only
-    /// (0700 on Unix). Fails with [`ClientError::InvalidInput`] if no data
-    /// directory was given or if `tmp` is a symlink, not a directory, or
-    /// writable by group or others.
+    /// (0700 on Unix), and the store lock file (see [`crate::StoreLock`]).
+    /// Fails with [`ClientError::InvalidInput`] if no data directory was
+    /// given or if `tmp` is a symlink, not a directory, or writable by
+    /// group or others.
     pub fn build(self) -> Result<Client<S>> {
         let data_dir = self
             .data_dir
             .ok_or_else(|| ClientError::InvalidInput("data_dir is required".into()))?;
         create_private_dirs(&data_dir)?;
+        let store_lock = StoreLock::open(&data_dir, self.store_lock_timeout)?;
+        // What is loaded below is current as of this generation.
+        drop(store_lock.acquire()?);
         let device_lists = Arc::new(DeviceListCache::new());
         for (user_id, bytes) in self.store.device_lists().map_err(BaseError::from)? {
             let loaded = SignedDeviceList::from_bytes(&bytes)
@@ -223,6 +303,7 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
             }
         }
         let pending_invites = load_pending_invites(&*self.store)?;
+        let shown_seqs = applied_seqs(&*self.store)?;
         Ok(Client {
             inner: Arc::new(Inner {
                 store: self.store,
@@ -262,9 +343,27 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
                 hub_admin_lock: Mutex::new(()),
                 hub_changes: broadcast::channel(HUB_CHANGES_CAPACITY).0,
                 link_states: Default::default(),
+                mode: self.mode,
+                store_lock,
+                shown_seqs: std::sync::Mutex::new(shown_seqs),
             }),
         })
     }
+}
+
+/// The highest seq applied in each chat.
+fn applied_seqs(store: &impl StateReader) -> std::result::Result<HashMap<GroupId, u64>, BaseError> {
+    let mut seqs = HashMap::new();
+    for chat in store.chats()? {
+        let cursor = store.group_cursor(&chat.group_id)?;
+        let top = cursor
+            .ahead
+            .last()
+            .copied()
+            .unwrap_or(cursor.contiguous_seq);
+        seqs.insert(chat.group_id, top);
+    }
+    Ok(seqs)
 }
 
 /// Creates `data_dir` and `data_dir/tmp` owner-only and checks that `tmp`
@@ -382,6 +481,14 @@ pub(crate) struct Inner<S> {
     /// The connection state of each sync loop (home hub: `None`); the
     /// reported state is the best of them.
     pub(crate) link_states: std::sync::Mutex<HashMap<Option<String>, ConnectionState>>,
+    pub(crate) mode: ClientMode,
+    /// Held around every store mutation, against the other processes on
+    /// the data directory; see [`Client::run`].
+    store_lock: StoreLock,
+    /// The highest message seq of each chat broadcast as a change (or
+    /// stored at start): above it, messages written by another process are
+    /// broadcast when this process notices them.
+    shown_seqs: std::sync::Mutex<HashMap<GroupId, u64>>,
 }
 
 #[derive(Clone)]
@@ -510,12 +617,15 @@ impl<S: StateStore + 'static> Client<S> {
                 session.device
             )));
         }
-        let base = BaseClient::new(session.device.clone());
-        let repaired = self
-            .run(move |store, engine| base.reconcile_pending_commits(store, engine))
-            .await?;
-        if !repaired.is_empty() {
-            tracing::warn!(groups = ?repaired, "dropped dangling pending commits");
+        let extension = self.is_extension();
+        if !extension {
+            let base = BaseClient::new(session.device.clone());
+            let repaired = self
+                .run(move |store, engine| base.reconcile_pending_commits(store, engine))
+                .await?;
+            if !repaired.is_empty() {
+                tracing::warn!(groups = ?repaired, "dropped dangling pending commits");
+            }
         }
         self.load_hub_tokens(hubs);
         self.set_session(session.clone());
@@ -526,6 +636,11 @@ impl<S: StateStore + 'static> Client<S> {
             }
             Err(err) => tracing::warn!(error = %err, "cannot sign in; retrying later"),
             Ok(_) => {}
+        }
+        // The app may be queueing an upload from its outgoing directory
+        // right now; it resumes unfinished group changes itself.
+        if extension {
+            return Ok(true);
         }
         self.clean_outgoing().await?;
         // Finish what the previous run left: re-submit its pending commits
@@ -764,7 +879,7 @@ impl<S: StateStore + 'static> Client<S> {
     /// logged and retried on the next sync or start. Caller holds the group
     /// lock.
     pub(crate) async fn resume_leaves(&self, session: &Session) {
-        let leaves = match self.run(|store, _| Ok(store.pending_leaves()?)).await {
+        let leaves = match self.read(|store, _| Ok(store.pending_leaves()?)).await {
             Ok(leaves) => leaves,
             Err(err) => {
                 tracing::warn!(%err, "cannot read the pending leaves");
@@ -868,7 +983,7 @@ impl<S: StateStore + 'static> Client<S> {
     /// message, if it has either. Direct chats have none to share.
     pub(crate) async fn share_group_info(&self, group_id: &GroupId) -> Result<()> {
         let gid = group_id.clone();
-        let chat = self.run(move |store, _| Ok(store.chat(&gid)?)).await?;
+        let chat = self.read(move |store, _| Ok(store.chat(&gid)?)).await?;
         let Some(chat) = chat.filter(|c| c.kind == ChatKind::Group) else {
             return Ok(());
         };
@@ -1151,7 +1266,7 @@ impl<S: StateStore + 'static> Client<S> {
     ) -> Result<Resolved> {
         let gid = group_id.clone();
         let Some(pending) = self
-            .run(move |store, _| Ok(store.pending_commit(&gid)?))
+            .read(move |store, _| Ok(store.pending_commit(&gid)?))
             .await?
         else {
             return Ok(Resolved::None);
@@ -1160,6 +1275,7 @@ impl<S: StateStore + 'static> Client<S> {
             Some(w) => (Some(w.payload), w.recipients),
             None => (None, vec![]),
         };
+        let commit_id = pending.client_id.clone();
         let commit = OutgoingCommit {
             client_id: pending.client_id,
             mls_message: pending.payload,
@@ -1183,14 +1299,21 @@ impl<S: StateStore + 'static> Client<S> {
             (_, hub) => hub,
         };
         if let (Some(hub), Err(PostError::Transport(err))) = (not_claimed, &submitted) {
-            self.drop_pending_commit(session, group_id).await?;
+            self.drop_pending_commit(session, group_id, &commit_id)
+                .await?;
             return Ok(Resolved::NotClaimed(hub, err.clone()));
         }
         match submitted {
             Ok(accepted) => {
                 let (gid, base) = (group_id.clone(), BaseClient::new(session.device.clone()));
+                let client_id = commit_id.clone();
                 let changes = self
                     .run(move |store, engine| {
+                        // Another process (the app or an extension) may
+                        // have settled the same commit meanwhile.
+                        if !is_pending(store, &gid, &client_id)? {
+                            return Ok(vec![]);
+                        }
                         base.merge_own_commit(store, engine, &gid, accepted.seq)
                     })
                     .await?;
@@ -1199,7 +1322,8 @@ impl<S: StateStore + 'static> Client<S> {
             }
             Err(PostError::Transport(err)) if outcome_unknown(&err) => Err(err.into()),
             Err(err) => {
-                self.drop_pending_commit(session, group_id).await?;
+                self.drop_pending_commit(session, group_id, &commit_id)
+                    .await?;
                 match err {
                     PostError::StaleEpoch { .. } => Ok(Resolved::Conflict),
                     PostError::Transport(err) => Err(err.into()),
@@ -1208,12 +1332,21 @@ impl<S: StateStore + 'static> Client<S> {
         }
     }
 
-    /// Drops the group's pending commit, which no hub sequenced, then
-    /// applies the messages held back meanwhile.
-    async fn drop_pending_commit(&self, session: &Session, group_id: &GroupId) -> Result<()> {
-        let gid = group_id.clone();
+    /// Drops the group's pending commit `client_id`, which no hub
+    /// sequenced, then applies the messages held back meanwhile.
+    async fn drop_pending_commit(
+        &self,
+        session: &Session,
+        group_id: &GroupId,
+        client_id: &ClientId,
+    ) -> Result<()> {
+        let (gid, client_id) = (group_id.clone(), client_id.clone());
         self.run(move |store, engine| {
             store.transaction(|txn| {
+                // Settled by another process meanwhile.
+                if !is_pending(&*txn, &gid, &client_id)? {
+                    return Ok(());
+                }
                 engine.clear_pending_commit(&*txn, &gid)?;
                 Ok(txn.remove_pending_commit(&gid)?)
             })
@@ -1257,7 +1390,7 @@ impl<S: StateStore + 'static> Client<S> {
         &self,
         session: &Session,
     ) -> Result<BTreeMap<GroupId, ClientError>> {
-        let pending = self.run(|store, _| Ok(store.pending_commits()?)).await?;
+        let pending = self.read(|store, _| Ok(store.pending_commits()?)).await?;
         let mut deferred = BTreeMap::new();
         for commit in pending {
             let group_id = commit.group_id;
@@ -1290,7 +1423,7 @@ impl<S: StateStore + 'static> Client<S> {
 
     /// Settles every pending commit; stops at the first error.
     pub(crate) async fn resolve_pending_commits(&self, session: &Session) -> Result<()> {
-        let pending = self.run(|store, _| Ok(store.pending_commits()?)).await?;
+        let pending = self.read(|store, _| Ok(store.pending_commits()?)).await?;
         for commit in pending {
             self.resolve_pending_commit(session, &commit.group_id)
                 .await?;
@@ -1417,6 +1550,10 @@ impl<S: StateStore + 'static> Client<S> {
     /// Commits the group's Proposals of `epoch` after a random delay,
     /// unless another member committed them meanwhile.
     fn schedule_proposal_commit(&self, group_id: GroupId, epoch: u64) {
+        // The app commits them when it runs.
+        if self.is_extension() {
+            return;
+        }
         let key = (group_id, epoch);
         let timers = || {
             self.inner
@@ -1586,7 +1723,7 @@ impl<S: StateStore + 'static> Client<S> {
         group_id: GroupId,
     ) -> Result<Vec<StateChange>> {
         let gid = group_id.clone();
-        let chat = self.run(move |store, _| Ok(store.chat(&gid)?)).await?;
+        let chat = self.read(move |store, _| Ok(store.chat(&gid)?)).await?;
         let Some(mut chat) = chat else {
             return Ok(vec![]);
         };
@@ -1708,8 +1845,26 @@ impl<S: StateStore + 'static> Client<S> {
         .await
     }
 
-    /// Runs blocking store and MLS work off the async runtime.
+    /// Runs blocking store and MLS work off the async runtime, as one
+    /// mutation under the store lock (see [`crate::StoreLock`]): after the
+    /// in-process locks the caller holds (the group lock), the lock is
+    /// taken, waiting up to the store lock timeout for another process,
+    /// else the work does not run and [`ClientError::StoreBusy`] is
+    /// returned for the caller to retry later. If another process wrote
+    /// since this one last held the lock, what this process keeps in
+    /// memory is reloaded from the store first (see
+    /// [`Client::reload_from_store`]). Never held across network calls.
     pub(crate) async fn run<R, F>(&self, f: F) -> Result<R>
+    where
+        R: Send + 'static,
+        F: FnOnce(&S, &MlsEngine) -> Result<R, BaseError> + Send + 'static,
+    {
+        self.locked(true, f).await
+    }
+
+    /// Runs blocking store reads off the async runtime, without the store
+    /// lock: SQLite readers see the last committed state.
+    pub(crate) async fn read<R, F>(&self, f: F) -> Result<R>
     where
         R: Send + 'static,
         F: FnOnce(&S, &MlsEngine) -> Result<R, BaseError> + Send + 'static,
@@ -1721,10 +1876,108 @@ impl<S: StateStore + 'static> Client<S> {
             .map_err(Into::into)
     }
 
+    /// Picks up what another process on the same data directory (an app
+    /// extension) wrote to the store: if it did, reloads what this process
+    /// keeps in memory and broadcasts the chats and new messages it finds
+    /// (see [`Client::subscribe_changes`]). Every store mutation does it
+    /// too; call this when the app returns to the foreground.
+    pub async fn reload_external_changes(&self) -> Result<()> {
+        self.locked(false, |_, _| Ok(())).await
+    }
+
+    async fn locked<R, F>(&self, writes: bool, f: F) -> Result<R>
+    where
+        R: Send + 'static,
+        F: FnOnce(&S, &MlsEngine) -> Result<R, BaseError> + Send + 'static,
+    {
+        let client = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let inner = &client.inner;
+            let mut guard = inner.store_lock.acquire()?;
+            if guard.changed_elsewhere() {
+                client.reload_from_store();
+            }
+            let result = f(&inner.store, &inner.engine);
+            // Also after a failure: the work may have committed a part.
+            if writes {
+                guard.mark_written()?;
+            }
+            Ok(result?)
+        })
+        .await
+        .map_err(|e| ClientError::Task(e.to_string()))?
+    }
+
+    /// Another process wrote to the store: reloads the DeviceLists and
+    /// pending invites kept in memory, then broadcasts every chat and the
+    /// messages above the last seq broadcast per chat, so the chat list
+    /// and open timelines show them. MLS state needs no reload: it is read
+    /// from the store by every operation. Called with the store lock held;
+    /// failures are logged.
+    fn reload_from_store(&self) {
+        tracing::debug!("the store changed in another process; reloading");
+        let store = &*self.inner.store;
+        if let Err(err) = self.try_reload_from_store(store) {
+            tracing::warn!(%err, "cannot reload the store changes of another process");
+        }
+    }
+
+    fn try_reload_from_store(&self, store: &S) -> std::result::Result<(), BaseError> {
+        for (user_id, bytes) in store.device_lists()? {
+            // Older or equal lists are refused; the newest one stays.
+            let _ = SignedDeviceList::from_bytes(&bytes)
+                .and_then(|list| self.inner.device_lists.insert(&user_id, &list));
+        }
+        *self
+            .inner
+            .pending_invites
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = load_pending_invites(store)?;
+        let shown = self
+            .inner
+            .shown_seqs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let mut changes = Vec::new();
+        for chat in store.chats()? {
+            let after = shown.get(&chat.group_id).copied().unwrap_or(0);
+            let messages = store.messages_after(&chat.group_id, after)?;
+            changes.push(StateChange::ChatUpserted(chat));
+            changes.extend(messages.into_iter().map(StateChange::MessageUpserted));
+        }
+        self.emit(&changes);
+        Ok(())
+    }
+
+    pub(crate) fn is_extension(&self) -> bool {
+        self.inner.mode == ClientMode::Extension
+    }
+
+    /// The process kind this client was built for.
+    pub fn mode(&self) -> ClientMode {
+        self.inner.mode
+    }
+
     /// Broadcasts `changes`, except those of the self groups.
     pub(crate) fn emit(&self, changes: &[StateChange]) {
         if changes.is_empty() {
             return;
+        }
+        {
+            let mut shown = self
+                .inner
+                .shown_seqs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for change in changes {
+                if let StateChange::MessageUpserted(message) = change {
+                    if let Some(seq) = message.seq {
+                        let top = shown.entry(message.group_id.clone()).or_default();
+                        *top = (*top).max(seq);
+                    }
+                }
+            }
         }
         for change in self.visible(changes.to_vec()) {
             // No subscriber is fine.
@@ -1791,6 +2044,17 @@ fn jittered(min: Duration, max: Duration) -> Duration {
         .fill(&mut bytes);
     let span = max.saturating_sub(min).as_millis() as u64;
     min + Duration::from_millis(u64::from_le_bytes(bytes) % (span + 1))
+}
+
+/// Whether `client_id` is still the group's pending commit.
+fn is_pending(
+    store: &impl StateReader,
+    group_id: &GroupId,
+    client_id: &ClientId,
+) -> std::result::Result<bool, BaseError> {
+    Ok(store
+        .pending_commit(group_id)?
+        .is_some_and(|p| p.client_id == *client_id))
 }
 
 pub(crate) fn new_client_id() -> Result<ClientId, BaseError> {

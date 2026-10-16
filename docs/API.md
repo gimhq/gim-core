@@ -28,7 +28,8 @@ milliseconds (`u64`). Counts and indices are `u32`.
 ## Lifecycle
 
 1. **Create the client** once per process:
-   `createClient(ClientConfig(serverUrl), hooks)`. `serverUrl` must be an `http://` or `https://`
+   `createClient(ClientConfig(serverUrl), hooks)` (an app extension passes `mode: Extension`; see
+   *App extensions*). `serverUrl` must be an `http://` or `https://`
    URL with a host, otherwise `InvalidInput`. `hooks` implements `PlatformHooks` (below). If
    `localStateReset()` is `true`, an existing local database could not be opened (its key was
    lost, or it is incompatible) and was discarded with the session and history: show onboarding
@@ -188,6 +189,60 @@ user's signed DeviceList. Handles are optional directory entries pointing at a u
 | `secureStoreDelete(key)` | Delete a secret; a missing key is not an error. |
 | `dataDir()` | Absolute path of an app-private directory. The SQLite database and media cache live under it. Must be stable across launches. |
 | `isNetworkReachable()` | Current reachability; changes are pushed with `GimClient.setNetworkReachable`. |
+
+## App extensions (iOS Notification Service Extension)
+
+The NSE runs in its own process, with about 24 MB of memory, possibly at the same time as the app,
+and works on the same local state as the app.
+
+**Shared container.** `dataDir()` must return the same directory in the app and the extension:
+a directory inside the App Group container (`group.im.g.apps`), e.g.
+`FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.im.g.apps")!
+.appendingPathComponent("gim")`. Move nothing out of it; the database, its `-wal`/`-shm` files,
+`gim.lock` and the media directories live there.
+
+**Keychain access group.** The `secureStore*` hooks of both targets must read and write the same
+items: store them with the same `kSecAttrAccessGroup` (a keychain access group shared by the app
+and the extension in their entitlements) and an accessibility that allows reads while the device
+is locked after the first unlock (`kSecAttrAccessibleAfterFirstUnlock`). The extension reads the
+database key, session and device key through them; it never creates a database key.
+
+**Extension mode.** The extension creates its client with
+`createClient(ClientConfig(serverUrl, mode: .extension), hooks)` (`mode` defaults to `App`):
+
+- no sync loop and no outbox sender: `startSync()` fails with `InvalidInput`;
+- no KeyPackage generation or upload, no hub registry refresh, no push registration, and none of
+  the app's maintenance (resuming unfinished member changes, leaves, removals of departed members,
+  Proposal commits); the app does all of it when it runs;
+- a small database page cache;
+- the local database is never reset: a missing database key (`InvalidInput`), a database the key
+  cannot decrypt or a schema newer than the extension (`Storage`) fail `createClient`, and
+  `localStateReset()` is always `false`. Only the app may discard local state.
+
+Create the client per notification and release it when done; it holds no background tasks.
+
+**Store lock.** Every change of the local state (applying received messages and member changes,
+joining from a Welcome, creating and sending commits and messages, generating KeyPackages, opening
+and migrating the database) runs under an exclusive advisory lock on `<dataDir>/gim.lock`, one
+change at a time and never across a network call, after gim-core's in-process locks. A process
+waits up to 5 s for the other one; then the change is deferred with
+`Storage("store is locked by another process ...")` and retried later by the sync loop or the
+outbox, or by the caller; it is never forced and nothing is lost. Reads take no lock. The lock is
+released when the process dies, and it is never held while the app is suspended (iOS terminates
+suspended apps that hold file locks in a shared container).
+
+A commit is created and stored (with its pending MLS state) under the lock, submitted without it,
+and merged under it. Meanwhile both processes hold back the group's incoming messages, and either
+may submit the same stored commit again (the hub recognizes it); whichever process merges or drops
+it first wins and the other one finds it settled and does nothing.
+
+**Refreshing the app.** The lock file also counts the changes. MLS state is not cached in memory:
+every operation reads it from the database, so the app never encrypts at a stale epoch after the
+extension applied a commit. When the app takes the lock and sees that the extension changed the
+store, it reloads what it does keep in memory (DeviceLists, pending invites) and the chat list and
+open timelines receive the changed chats and the new messages through their listeners. `startSync()`
+checks for such changes first, so the app needs no extra call: call `startSync()` when it returns
+to the foreground, as usual.
 
 ## GimClient
 
@@ -443,7 +498,7 @@ The chat list is ordered most recently updated first; a timeline oldest first.
 | `InvalidInput(reason)` | Argument rejected locally, the call does not fit the state (e.g. `createIdentity` with a session), the payload is too large for the hub, or the hub rejected the request as invalid (400 `validation_failed`, 422). gim-core does not resend a rejected request. | Bug or validation message. |
 | `NotFound(reason)` | Unknown chat, message, user or media. | Refresh the screen. |
 | `Crypto(reason)` | MLS or media decryption failure. | Report; show placeholder. |
-| `Storage(reason)` | Local database or file system failure. | Report; may need disk space. |
+| `Storage(reason)` | Local database or file system failure; also `store is locked by another process` when the app or an app extension held the store lock longer than the timeout (see *App extensions*): nothing was changed or lost. | Report; may need disk space. Retry later after a lock timeout. |
 | `Server(status, reason)` | Non-success HTTP status from the hub; 502 `peer_refused` or 503 `peer_unavailable` (no `Retry-After`) when a remote hub failed. A 4xx (e.g. 403 `forbidden` / `not_member`) is a definite rejection that gim-core does not resend; a 5xx, 408 or 429 has an unknown outcome and gim-core resends the request unchanged. | Show generic error; peer failures are retried by gim-core. |
 | `RetryLater(status, retryAfterSecs, reason)` | The hub throttles a public read (429 `rate_limited`) or a remote hub is unavailable (503 `peer_unavailable`), and gim-core's bounded retries (2 retries, at most 60 s of waiting for reads; see *Federation* for sends and member changes) are used up. | Retry after `retryAfterSecs`. |
 | `Cancelled` | Cancelled by `stopSync`, `signOut` or `cancelSend`. | Ignore. |
