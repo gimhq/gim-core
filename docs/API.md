@@ -117,8 +117,20 @@ user's signed DeviceList. Handles are optional directory entries pointing at a u
   recorded. URLs of the other hubs come from the user's other devices (shared in the hidden self
   group); a URL is used only after `GET /v2/hub` there proves the listed hub id, then the device
   signs in there too. The registry follows the record on every publication and on the hub's
-  `hosting_record.updated` event. All traffic still goes through the hub the client was created
-  with; no API for the app yet.
+  `hosting_record.updated` event. No API for the app yet.
+  - Sending: messages, member changes and leave Proposals go to the primary hub (lowest priority).
+    If that hub itself cannot be reached (network error, timeout, 5xx), gim-core sends the same
+    request (same `client_id` and bytes) to the next listed hub; the chat's owning hub keeps it
+    once. A 503 `peer_unavailable` (the owning hub is down) is retried on the same hub after its
+    `Retry-After`, never sent elsewhere; a definite rejection (4xx) is never resent. Member
+    additions claim KeyPackages and commit through the same hub; if that hub becomes unreachable
+    or answers `kp_not_claimed`, gim-core claims again through the hub in use and rebuilds the
+    change.
+  - KeyPackages: each listed hub the device is signed in to gets its own one-time KeyPackages and
+    last-resort KeyPackage; a KeyPackage is uploaded to one hub only, ever (also after that hub
+    is removed). A hub's `keypackages.low` replenishes that hub only. Event streams of the other
+    hubs are not read yet; everything else still goes through the hub the client was created
+    with.
 - **Federation**: users are addressed by user id everywhere; a remote user may have no handle and is
   shown by display name, else a short user id. A chat is created on the own hub, which owns it (the
   `<hub_id>/` prefix of its id); in chats owned by another hub, messages and member changes of
