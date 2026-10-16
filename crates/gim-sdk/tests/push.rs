@@ -398,6 +398,73 @@ async fn welcome_push_joins_through_the_pending_welcomes() {
         .contains(&"Welcome aboard".to_string()));
 }
 
+/// The hub keeps one pending push per device: the Welcome and the
+/// creator's display name announcement right after it reach Alice as one
+/// push for the announcement, in a chat she has not joined. The push joins
+/// through the pending Welcomes and shows the invite.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn coalesced_welcome_push_joins_and_shows_the_invite() {
+    let hub = FakeTransport::new();
+    let alice = Peer::fake(&hub, "alice").await;
+    let bob = Peer::fake(&hub, "bob").await;
+    let group_id = bob
+        .client
+        .create_direct_chat(&alice.user_id())
+        .await
+        .unwrap();
+    let announcement = latest(&hub, &group_id, MessageKind::Application);
+    assert!(!alice.has_chat(&group_id));
+
+    let payload = message_payload(&announcement, false);
+    let content = alice.client.process_push(&payload).await.unwrap();
+    assert_eq!(content.kind, NotificationKind::Invite, "{content:?}");
+    assert!(content.should_display);
+    assert_eq!(content.chat_id.as_ref(), Some(&group_id));
+    assert_eq!(content.sender_user_id, Some(bob.user_id()));
+    assert!(alice.has_chat(&group_id));
+    assert!(hub
+        .service()
+        .pending_welcomes(&alice.device(), 10)
+        .is_empty());
+
+    // The same push again describes the stored announcement: silent.
+    let again = alice.client.process_push(&payload).await.unwrap();
+    assert!(!again.should_display, "{again:?}");
+    alice.client.sync_once().await.unwrap();
+    bob.send_text(&group_id, "Welcome aboard").await;
+    alice.client.sync_once().await.unwrap();
+    assert_eq!(alice.texts(&group_id), ["Welcome aboard"]);
+}
+
+/// A text pushed in a chat not joined yet (its Welcome push coalesced into
+/// it) joins the chat and shows the text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn text_push_in_a_chat_not_joined_yet_joins_and_shows_it() {
+    let hub = FakeTransport::new();
+    let alice = Peer::fake(&hub, "alice").await;
+    let bob = Peer::fake(&hub, "bob").await;
+    let group_id = bob
+        .client
+        .create_direct_chat(&alice.user_id())
+        .await
+        .unwrap();
+    bob.send_text(&group_id, "Anchored off Hvar").await;
+    let text = latest(&hub, &group_id, MessageKind::Application);
+
+    let content = alice
+        .client
+        .process_push(&message_payload(&text, false))
+        .await
+        .unwrap();
+    assert_eq!(content.kind, NotificationKind::Message, "{content:?}");
+    assert!(content.should_display);
+    assert_eq!(content.body, "Anchored off Hvar");
+    assert_eq!(content.sender_user_id, Some(bob.user_id()));
+    assert!(alice.has_chat(&group_id));
+    alice.client.sync_once().await.unwrap();
+    assert_eq!(alice.texts(&group_id), ["Anchored off Hvar"]);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wake_up_reads_the_events_without_moving_the_cursor() {
     let hub = FakeTransport::new();

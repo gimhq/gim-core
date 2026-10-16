@@ -663,7 +663,10 @@ impl<S: StateStore + 'static> Client<S> {
     ///   applied again. New text and media are shown (not own ones, nor
     ///   read ones), a new reaction as `reacted <emoji>`; edits, deletes,
     ///   receipts and other content are silent. A pushed Proposal is
-    ///   applied like any message.
+    ///   applied like any message. In a chat not joined yet (the hub
+    ///   replaced the Welcome's push with this one) it joins through the
+    ///   pending Welcomes first and shows the invite unless the message
+    ///   itself is shown.
     /// - `welcome`: joins through the pending Welcomes (`GET
     ///   /v2/welcomes/pending`, then the acknowledgement) and shows the
     ///   invite. The inline Welcome is not used: it does not name who
@@ -772,7 +775,36 @@ impl<S: StateStore + 'static> Client<S> {
         .await
     }
 
+    /// A message push for a chat this device has not joined: the hub keeps
+    /// one pending push per device, so the Welcome's push may have been
+    /// replaced by this one (e.g. the creator's display name announcement
+    /// right after it). Joins through the pending Welcomes first; if that
+    /// joined the chat, a silent or unreadable message shows the invite.
     async fn push_message(
+        &self,
+        session: &Session,
+        push: &Push,
+        group_id: &GroupId,
+        seq: u64,
+    ) -> Result<NotificationContent> {
+        if self.is_joined(group_id).await? {
+            return self.push_joined_message(session, push, group_id, seq).await;
+        }
+        self.join_pending(session, group_id, None).await?;
+        let Some(actor) = self.joined_actor(session, group_id, None).await? else {
+            return self.push_joined_message(session, push, group_id, seq).await;
+        };
+        let content = self
+            .push_joined_message(session, push, group_id, seq)
+            .await?;
+        if content.should_display && content.kind != NotificationKind::Generic {
+            self.joined(session, group_id, actor.as_ref()).await;
+            return Ok(content);
+        }
+        self.invite(session, push, group_id, actor).await
+    }
+
+    async fn push_joined_message(
         &self,
         session: &Session,
         push: &Push,
@@ -902,42 +934,99 @@ impl<S: StateStore + 'static> Client<S> {
         seq: u64,
     ) -> Result<NotificationContent> {
         if !self.applied_seq(group_id, seq).await?.0 {
-            let _guard = self.inner.group_lock.lock().await;
-            for link in std::iter::once(self.home_link()).chain(self.hub_links()) {
-                match self.join_pending_welcomes(session, &link).await {
-                    Ok(_) if self.applied_seq(group_id, seq).await?.0 => break,
-                    Ok(_) => {}
-                    Err(err) => {
-                        tracing::info!(%group_id, error = %err, "cannot read the pending Welcomes")
+            self.join_pending(session, group_id, Some(seq)).await?;
+        }
+        let Some(actor) = self.joined_actor(session, group_id, Some(seq)).await? else {
+            return Ok(self.generic(push, true).await);
+        };
+        self.invite(session, push, group_id, actor).await
+    }
+
+    /// Joins the pending Welcomes of every reachable hub, the home hub
+    /// first, until `group_id` is joined (at `seq`, the Welcome's Commit,
+    /// if given).
+    async fn join_pending(
+        &self,
+        session: &Session,
+        group_id: &GroupId,
+        seq: Option<u64>,
+    ) -> Result<()> {
+        let _guard = self.inner.group_lock.lock().await;
+        for link in std::iter::once(self.home_link()).chain(self.hub_links()) {
+            match self.join_pending_welcomes(session, &link).await {
+                Ok(_) => {
+                    let done = match seq {
+                        Some(seq) => self.applied_seq(group_id, seq).await?.0,
+                        None => self.is_joined(group_id).await?,
+                    };
+                    if done {
+                        break;
                     }
+                }
+                Err(err) => {
+                    tracing::info!(%group_id, error = %err, "cannot read the pending Welcomes")
                 }
             }
         }
+        Ok(())
+    }
+
+    async fn is_joined(&self, group_id: &GroupId) -> Result<bool> {
+        let gid = group_id.clone();
+        self.read(move |store, _| {
+            Ok(store
+                .chat(&gid)?
+                .is_some_and(|c| c.membership == Membership::Joined))
+        })
+        .await
+    }
+
+    /// `None` unless `group_id` is joined; else who added this device (at
+    /// `seq` if given, else the latest addition), if known.
+    async fn joined_actor(
+        &self,
+        session: &Session,
+        group_id: &GroupId,
+        seq: Option<u64>,
+    ) -> Result<Option<Option<UserId>>> {
         let (gid, own) = (group_id.clone(), session.device.user_id.clone());
-        let joined = self
-            .run(move |store, _| {
-                let joined = store
-                    .chat(&gid)?
-                    .is_some_and(|c| c.membership == Membership::Joined);
-                let actor = store
-                    .membership_events(&gid)?
-                    .into_iter()
-                    .find(|e| {
-                        e.seq == seq && e.user_id == own && e.kind == MembershipChangeKind::Added
-                    })
-                    .map(|e| e.actor);
-                Ok(joined.then_some(actor))
-            })
-            .await?;
-        let Some(actor) = joined else {
-            return Ok(self.generic(push, true).await);
-        };
-        // What the sync loop does for a chat it joined.
-        if let Some(actor) = &actor {
+        self.run(move |store, _| {
+            let joined = store
+                .chat(&gid)?
+                .is_some_and(|c| c.membership == Membership::Joined);
+            let actor = store
+                .membership_events(&gid)?
+                .into_iter()
+                .filter(|e| {
+                    seq.is_none_or(|seq| e.seq == seq)
+                        && e.user_id == own
+                        && e.kind == MembershipChangeKind::Added
+                })
+                .max_by_key(|e| e.seq)
+                .map(|e| e.actor);
+            Ok(joined.then_some(actor))
+        })
+        .await
+    }
+
+    /// What the sync loop does for a chat it joined.
+    async fn joined(&self, session: &Session, group_id: &GroupId, actor: Option<&UserId>) {
+        if let Some(actor) = actor {
             self.resolve_users(session, BTreeSet::from([actor.clone()]))
                 .await;
         }
         self.announce_profile(group_id).await;
+    }
+
+    /// The invite to the joined `group_id` by `actor`.
+    async fn invite(
+        &self,
+        session: &Session,
+        push: &Push,
+        group_id: &GroupId,
+        actor: Option<UserId>,
+    ) -> Result<NotificationContent> {
+        self.joined(session, group_id, actor.as_ref()).await;
         let gid = group_id.clone();
         self.describe(Some(session), push, move |d| d.invite(&gid, actor.as_ref()))
             .await

@@ -437,7 +437,9 @@ KeyPackages or download media. What it does depends on the payload type:
   not bound to the seq, so a relay could otherwise suppress or replay messages. A message the
   stream (or another hub's push) already applied is not applied again; the stored message is
   described instead. If the fetch fails, the content is generic and the stream applies the
-  message later.
+  message later. In a chat this device has not joined yet (the hub keeps one pending push per
+  device, so the invitation's push may have been replaced by a later message's) it joins through
+  the pending invitations first and shows the invitation unless the message itself is shown.
 - a chat invitation: joins the chat through the pending invitations, as sync does.
 - a member change: catches the chat up; silent.
 - a wake-up (minimal mode) or an unknown type: reads the pending events once, without moving the
@@ -463,6 +465,18 @@ in time (also when the other process holds the store lock too long), the call st
 chat is known locally. An iOS Notification Service Extension can therefore always display the
 result. Use `collapseId` as the platform collapse key
 (`apns-collapse-id`, FCM `tag`): every hub of the user may push the same message.
+
+#### Testing push
+
+A test hub records pushes instead of sending them: register with provider `log` (any token), and
+start the hub with `GIM_HUB_PUSH_LOG_ENDPOINT=true` (test deployments only;
+`scripts/gim-hub-dev.sh` does). `GET <hub>/v2/debug/push-log?device_id=<device id>` (no auth)
+then lists the last pushes as `{"notifications": [{user_id, device_id, token, payload,
+sent_at}]}`, oldest first; pass each `payload` as JSON to `processPush`. The hub keeps one pending
+push per device, so a later event's push may replace an earlier one (e.g. an invitation's by the
+inviter's next message); process every push the device got. `GIM_HUB_PUSH_MEMBER_EVENTS=true`
+adds pushes for member changes, `GIM_HUB_PUSH_MINIMAL=true` sends wake-up payloads only. See
+`testing/gim-integration-testing/tests/push.rs` and contract `push.md` §5.
 
 ## Listeners and threading
 
