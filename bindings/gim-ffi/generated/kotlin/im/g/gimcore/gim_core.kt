@@ -7708,6 +7708,11 @@ data class ClientConfig (
      * Base URL of the hub, `http://` or `https://`.
      */
     var `serverUrl`: kotlin.String
+    , 
+    /**
+     * The process kind; `None` is `ClientMode::App`.
+     */
+    var `mode`: ClientMode? = null 
     
 ){
     
@@ -7725,15 +7730,18 @@ public object FfiConverterTypeClientConfig: FfiConverterRustBuffer<ClientConfig>
     override fun read(buf: ByteBuffer): ClientConfig {
         return ClientConfig(
             FfiConverterString.read(buf),
+            FfiConverterOptionalTypeClientMode.read(buf),
         )
     }
 
     override fun allocationSize(value: ClientConfig) = (
-            FfiConverterString.allocationSize(value.`serverUrl`)
+            FfiConverterString.allocationSize(value.`serverUrl`) +
+            FfiConverterOptionalTypeClientMode.allocationSize(value.`mode`)
     )
 
     override fun write(value: ClientConfig, buf: ByteBuffer) {
             FfiConverterString.write(value.`serverUrl`, buf)
+            FfiConverterOptionalTypeClientMode.write(value.`mode`, buf)
     }
 }
 
@@ -8625,6 +8633,55 @@ public object FfiConverterTypeChatState: FfiConverterRustBuffer<ChatState> {
     override fun allocationSize(value: ChatState) = 4UL
 
     override fun write(value: ChatState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
+ * What the process creating the client is. See `docs/API.md`, *App
+ * extensions*.
+ */
+
+enum class ClientMode {
+    
+    /**
+     * The app.
+     */
+    APP,
+    /**
+     * An app extension (the iOS Notification Service Extension) on the
+     * app's data directory: no sync loop (`start_sync` fails), no
+     * KeyPackage uploads, hub refreshes or other maintenance, a small
+     * database cache, and a local database that cannot be opened (missing
+     * key, incompatible schema) fails `create_client` instead of being
+     * reset.
+     */
+    EXTENSION;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeClientMode: FfiConverterRustBuffer<ClientMode> {
+    override fun read(buf: ByteBuffer) = try {
+        ClientMode.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: ClientMode) = 4UL
+
+    override fun write(value: ClientMode, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -10257,6 +10314,38 @@ public object FfiConverterOptionalTypeChatState: FfiConverterRustBuffer<ChatStat
         } else {
             buf.put(1)
             FfiConverterTypeChatState.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeClientMode: FfiConverterRustBuffer<ClientMode?> {
+    override fun read(buf: ByteBuffer): ClientMode? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeClientMode.read(buf)
+    }
+
+    override fun allocationSize(value: ClientMode?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeClientMode.allocationSize(value)
+        }
+    }
+
+    override fun write(value: ClientMode?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeClientMode.write(value, buf)
         }
     }
 }

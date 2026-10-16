@@ -4475,14 +4475,22 @@ public struct ClientConfig: Equatable, Hashable {
      * Base URL of the hub, `http://` or `https://`.
      */
     public var serverUrl: String
+    /**
+     * The process kind; `None` is `ClientMode::App`.
+     */
+    public var mode: ClientMode?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(
         /**
          * Base URL of the hub, `http://` or `https://`.
-         */serverUrl: String) {
+         */serverUrl: String, 
+        /**
+         * The process kind; `None` is `ClientMode::App`.
+         */mode: ClientMode? = nil) {
         self.serverUrl = serverUrl
+        self.mode = mode
     }
 
     
@@ -4501,12 +4509,14 @@ public struct FfiConverterTypeClientConfig: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ClientConfig {
         return
             try ClientConfig(
-                serverUrl: FfiConverterString.read(from: &buf)
+                serverUrl: FfiConverterString.read(from: &buf), 
+                mode: FfiConverterOptionTypeClientMode.read(from: &buf)
         )
     }
 
     public static func write(_ value: ClientConfig, into buf: inout [UInt8]) {
         FfiConverterString.write(value.serverUrl, into: &buf)
+        FfiConverterOptionTypeClientMode.write(value.mode, into: &buf)
     }
 }
 
@@ -5520,6 +5530,87 @@ public func FfiConverterTypeChatState_lift(_ buf: RustBuffer) throws -> ChatStat
 #endif
 public func FfiConverterTypeChatState_lower(_ value: ChatState) -> RustBuffer {
     return FfiConverterTypeChatState.lower(value)
+}
+
+
+
+/**
+ * What the process creating the client is. See `docs/API.md`, *App
+ * extensions*.
+ */
+
+public enum ClientMode: Equatable, Hashable {
+    
+    /**
+     * The app.
+     */
+    case app
+    /**
+     * An app extension (the iOS Notification Service Extension) on the
+     * app's data directory: no sync loop (`start_sync` fails), no
+     * KeyPackage uploads, hub refreshes or other maintenance, a small
+     * database cache, and a local database that cannot be opened (missing
+     * key, incompatible schema) fails `create_client` instead of being
+     * reset.
+     */
+    case `extension`
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ClientMode: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeClientMode: FfiConverterRustBuffer {
+    typealias SwiftType = ClientMode
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ClientMode {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .app
+        
+        case 2: return .`extension`
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ClientMode, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .app:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .`extension`:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeClientMode_lift(_ buf: RustBuffer) throws -> ClientMode {
+    return try FfiConverterTypeClientMode.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeClientMode_lower(_ value: ClientMode) -> RustBuffer {
+    return FfiConverterTypeClientMode.lower(value)
 }
 
 
@@ -6775,6 +6866,30 @@ fileprivate struct FfiConverterOptionTypeChatState: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeChatState.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeClientMode: FfiConverterRustBuffer {
+    typealias SwiftType = ClientMode?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeClientMode.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeClientMode.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
