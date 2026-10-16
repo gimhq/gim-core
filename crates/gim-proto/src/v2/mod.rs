@@ -15,20 +15,20 @@
 //!
 //! | Schema | Type |
 //! |---|---|
-//! | `Health`, `HealthStatus` | [`Health`], [`HealthStatus`] |
+//! | `Health`, `HealthStatus`, `HubInfo` | [`Health`], [`HealthStatus`], [`HubInfo`] |
 //! | `AuthChallengeRequest`, `AuthChallenge`, `CreateSessionRequest`, `Session` | [`AuthChallengeRequest`], [`AuthChallenge`], [`CreateSessionRequest`], [`Session`] |
 //! | `Me`, `User`, `DeviceList`, `PutDeviceListRequest`, `Handle` | [`Me`], [`User`], [`DeviceList`], [`PutDeviceListRequest`], [`Handle`] |
 //! | `PutRecoveryBackupRequest`, `RecoveryBackup` | [`PutRecoveryBackupRequest`], [`RecoveryBackup`] |
 //! | `CreateLinkBundleRequest`, `LinkBundleCreated`, `LinkBundle` | [`CreateLinkBundleRequest`], [`LinkBundleCreated`], [`LinkBundle`] |
-//! | `CreateHostingEntryRequest`, `HostingEntry`, `PutHostingRecordRequest`, `HostingRecord` | [`CreateHostingEntryRequest`], [`HostingEntry`], [`PutHostingRecordRequest`], [`HostingRecord`] |
+//! | `CreateHostingEntryRequest`, `HostingEntry`, `PutHostingRecordRequest`, `HostingRecord`, `HostingRecordHub` | [`CreateHostingEntryRequest`], [`HostingEntry`], [`PutHostingRecordRequest`], [`HostingRecord`], [`HostingRecordHub`] |
 //! | `UploadKeyPackagesRequest`, `KeyPackageCount` | [`UploadKeyPackagesRequest`], [`KeyPackageCount`] |
 //! | `ClaimKeyPackagesRequest`, `ClaimTarget`, `ClaimKeyPackagesResponse`, `ClaimedKeyPackage` | [`ClaimKeyPackagesRequest`], [`ClaimTarget`], [`ClaimKeyPackagesResponse`], [`ClaimedKeyPackage`] |
 //! | `Group`, `GroupKind`, `GroupMember`, `GroupList`, `CreateGroupRequest` | [`Group`], [`GroupKind`], [`GroupMember`], [`GroupList`], [`CreateGroupRequest`] |
 //! | `SubmitCommitRequest`, `CommitResult` | [`SubmitCommitRequest`], [`CommitResult`] |
 //! | `Message`, `MessageKind`, `MessageList`, `SendMessageRequest` | [`Message`], [`MessageKind`], [`MessageList`], [`SendMessageRequest`] |
 //! | `Event`, `EventList` | [`Event`], [`EventList`] |
-//! | `MessageEvent`, `MemberAddedEvent`, `MemberRemovedEvent`, `WelcomeEvent`, `KeyPackagesLowEvent`, `DeviceListUpdatedEvent`, `HostingRecordExpiringEvent` | [`EventData`] variants |
-//! | `MembershipChange`, `Welcome`, `KeyPackagesLow`, `HostingRecordExpiring` | [`MembershipChange`], [`Welcome`], [`KeyPackagesLow`], [`HostingRecordExpiring`] |
+//! | `MessageEvent`, `MemberAddedEvent`, `MemberRemovedEvent`, `WelcomeEvent`, `KeyPackagesLowEvent`, `DeviceListUpdatedEvent`, `HostingRecordExpiringEvent`, `HostingRecordUpdatedEvent` | [`EventData`] variants |
+//! | `MembershipChange`, `Welcome`, `KeyPackagesLow`, `HostingRecordExpiring`, `HostingRecordUpdated` | [`MembershipChange`], [`Welcome`], [`KeyPackagesLow`], [`HostingRecordExpiring`], [`HostingRecordUpdated`] |
 //! | `PendingWelcome`, `PendingWelcomeList` | [`PendingWelcome`], [`PendingWelcomeList`] |
 //! | `PushProvider`, `PushRegistration` | [`PushProvider`], [`PushRegistration`] |
 //! | `BlobCreated` | [`BlobCreated`] |
@@ -66,16 +66,17 @@ pub use groups::{
 };
 pub use hosting::{
     CreateHostingEntryRequest, HostingEntry, HostingRecord, HostingRecordExpiring,
-    PutHostingRecordRequest,
+    HostingRecordHub, HostingRecordUpdated, PutHostingRecordRequest,
 };
 pub use keypackages::{
     ClaimKeyPackagesRequest, ClaimKeyPackagesResponse, ClaimTarget, ClaimedKeyPackage,
     KeyPackageCount, UploadKeyPackagesRequest,
 };
 pub use service::{
-    BlobCreated, CursorExpiredError, ErrorBody, ErrorResponse, Health, HealthStatus, PushProvider,
-    PushRegistration, StaleEpochError, CURSOR_EXPIRED, HOSTING_RECORD_REQUIRED,
-    INVALID_HOSTING_RECORD, PEER_REFUSED, PEER_UNAVAILABLE, STALE_EPOCH, STALE_HOSTING_RECORD,
+    BlobCreated, CursorExpiredError, ErrorBody, ErrorResponse, Health, HealthStatus, HubInfo,
+    PushProvider, PushRegistration, StaleEpochError, CURSOR_EXPIRED, DUPLICATE_KEY_PACKAGE,
+    HOSTING_RECORD_REQUIRED, INVALID_HOSTING_RECORD, KP_NOT_CLAIMED, PEER_REFUSED,
+    PEER_UNAVAILABLE, STALE_EPOCH, STALE_HOSTING_RECORD,
 };
 pub use users::{
     CreateLinkBundleRequest, DeviceList, Handle, LinkBundle, LinkBundleCreated, LinkBundleQuery,

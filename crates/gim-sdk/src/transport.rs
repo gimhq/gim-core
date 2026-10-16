@@ -136,6 +136,16 @@ pub struct HostingEntryGrant {
     pub entry: Vec<u8>,
 }
 
+/// A hub's identity: result of [`Transport::hub_info`]. Unverified; the
+/// client checks that `hub_id` derives from `hub_root_public_key`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HubIdentity {
+    pub hub_id: String,
+    /// The hub's 32-byte Ed25519 root public key.
+    pub hub_root_public_key: Vec<u8>,
+    pub version: String,
+}
+
 /// A user's hosting record as a hub stores it. Unverified.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredHostingRecord {
@@ -167,6 +177,9 @@ pub enum HubEvent {
         expires_at_ms: u64,
         seq: u64,
     },
+    /// The hubs listed by the user's hosting record, or their priorities,
+    /// changed: read the record again.
+    HostingRecordUpdated { user_id: UserId, seq: u64 },
 }
 
 /// Result of [`Transport::fetch_events`].
@@ -312,6 +325,21 @@ pub trait EventStream: Send {
 
 #[async_trait]
 pub trait Transport: Send + Sync {
+    /// The client API base URL of the hub, where the transport has one.
+    fn base_url(&self) -> Option<String> {
+        None
+    }
+
+    /// The hub's identity (no token), so the client can check that the
+    /// hub behind this transport is the `hub_id` it expects before
+    /// signing in. Transports without it answer
+    /// [`TransportError::NotFound`].
+    async fn hub_info(&self) -> TransportResult<HubIdentity> {
+        Err(TransportError::NotFound(
+            "hub identity is not supported".into(),
+        ))
+    }
+
     /// Stores the user's signed DeviceList (no token: it bootstraps the
     /// user). `Conflict` if it does not supersede the stored one.
     async fn put_device_list(&self, user_id: &UserId, device_list: Vec<u8>) -> TransportResult<()>;
