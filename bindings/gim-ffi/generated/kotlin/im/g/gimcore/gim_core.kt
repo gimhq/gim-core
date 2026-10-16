@@ -1524,7 +1524,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_gim_core_checksum_method_gimclient_set_typing() and 0xFFFF) != 10433) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_gim_core_checksum_method_gimclient_sign_out() and 0xFFFF) != 25532) {
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_sign_out() and 0xFFFF) != 25542) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_start_link() and 0xFFFF) != 4052) {
@@ -3106,7 +3106,11 @@ public interface GimClientInterface {
     
     /**
      * Stops sync and the listeners and deletes the session, local data and
-     * keystore secrets. No callback runs once it returned.
+     * keystore secrets. No callback runs once it returned. The deletion
+     * waits (up to 5 s, then goes ahead) for a change of the local state
+     * in an app extension; the extension's client then fails with
+     * `Storage`. `InvalidInput` in `ClientMode::Extension`: only the app
+     * signs out.
      */
     suspend fun `signOut`()
     
@@ -4445,7 +4449,11 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
     
     /**
      * Stops sync and the listeners and deletes the session, local data and
-     * keystore secrets. No callback runs once it returned.
+     * keystore secrets. No callback runs once it returned. The deletion
+     * waits (up to 5 s, then goes ahead) for a change of the local state
+     * in an app extension; the extension's client then fails with
+     * `Storage`. `InvalidInput` in `ClientMode::Extension`: only the app
+     * signs out.
      */
     @Throws(GimException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
