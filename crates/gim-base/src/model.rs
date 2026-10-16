@@ -326,6 +326,19 @@ pub struct HubRecord {
     pub state: HubState,
 }
 
+/// A KeyPackage this device generated for one hub (multi-homing): a
+/// KeyPackage is uploaded to at most one hub, ever, so its `kp_ref` is
+/// recorded with that hub before the upload and never removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyPackageRecord {
+    /// The MLS KeyPackageRef.
+    pub kp_ref: Vec<u8>,
+    pub hub_id: String,
+    pub last_resort: bool,
+    /// Unix milliseconds.
+    pub created_at_ms: u64,
+}
+
 /// A device that left a group (a self-remove proposal, or a hub-side
 /// `member_removed` without a commit) or was revoked in its user's
 /// DeviceList, and may still be in the MLS tree: a member has to remove it

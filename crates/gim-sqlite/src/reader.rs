@@ -4,8 +4,8 @@
 use std::collections::BTreeSet;
 
 use gim_base::model::{
-    Chat, DepartedMember, GroupCursor, GroupMessage, HubRecord, HubState, MediaCacheEntry,
-    MembershipChangeKind, MembershipEvent, Message, OutboxEntry, OutboxState, PendingCommit,
+    Chat, DepartedMember, GroupCursor, GroupMessage, HubRecord, HubState, KeyPackageRecord,
+    MediaCacheEntry, MembershipChangeKind, MembershipEvent, Message, OutboxEntry, OutboxState, PendingCommit,
     PendingInvite, PendingLeave, UserInfo,
 };
 use gim_base::{StateReader, StoreError};
@@ -492,6 +492,22 @@ impl StateReader for Reader<'_> {
                     verified_root_pubkey: get(row, 3)?,
                     last_seen_ms: get(row, 4)?,
                     state: hub_state(&get::<String>(row, 5)?)?,
+                })
+            },
+        )
+    }
+
+    fn key_package_records(&self) -> StoreResult<Vec<KeyPackageRecord>> {
+        self.query(
+            "SELECT kp_ref, hub_id, last_resort, created_at_ms \
+             FROM key_package_ledger ORDER BY kp_ref",
+            [],
+            |row| {
+                Ok(KeyPackageRecord {
+                    kp_ref: get(row, 0)?,
+                    hub_id: get(row, 1)?,
+                    last_resort: get(row, 2)?,
+                    created_at_ms: get(row, 3)?,
                 })
             },
         )

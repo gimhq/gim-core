@@ -84,6 +84,13 @@ pub(crate) struct HubHandle {
     token: Option<HubToken>,
 }
 
+impl HubHandle {
+    /// The hub's URL proved its identity in this run.
+    pub(crate) fn is_verified(&self) -> bool {
+        self.verified.is_some()
+    }
+}
+
 /// The persisted session secret: the home hub session and, next to it, the
 /// sessions on the other hubs, so every sign-out and enrollment discard
 /// drops them together.
@@ -125,7 +132,7 @@ fn check_identity(
 
 /// Registry order: by priority, then hub id; the first listed one is the
 /// primary hub.
-fn sort(hubs: &mut [HubRecord]) {
+pub(crate) fn sort(hubs: &mut [HubRecord]) {
     hubs.sort_by(|a, b| (a.priority, &a.hub_id).cmp(&(b.priority, &b.hub_id)));
 }
 
@@ -187,6 +194,7 @@ impl<S: StateStore + 'static> Client<S> {
         self.sign_in_hub(hub_id).await;
         // Sending may publish the hosting record, which refreshes the hubs.
         drop(guard);
+        self.top_up_listed_hubs().await;
         self.share_hub_locations().await;
         Ok(())
     }
@@ -236,6 +244,7 @@ impl<S: StateStore + 'static> Client<S> {
         }
         // Sending may publish the hosting record, which refreshes the hubs.
         drop(guard);
+        self.top_up_listed_hubs().await;
         if shared {
             self.share_hub_locations().await;
         }
@@ -445,6 +454,31 @@ impl<S: StateStore + 'static> Client<S> {
                 }
             }
             Err(err) => tracing::warn!(%hub_id, error = %err, "cannot sign in on a listed hub"),
+        }
+    }
+
+    /// The transport and a fresh session token of the verified hub
+    /// `hub_id`, signing in there first if needed. Fails like an
+    /// unreachable hub ([`TransportError::Network`]) without either.
+    pub(crate) async fn hub_session(
+        &self,
+        hub_id: &str,
+    ) -> TransportResult<(Arc<dyn Transport>, AccessToken)> {
+        self.sign_in_hub(hub_id).await;
+        self.handles()
+            .get(hub_id)
+            .and_then(|handle| {
+                let (_, transport) = handle.verified.as_ref()?;
+                let token = handle.token.as_ref().filter(|t| t.fresh())?;
+                Some((transport.clone(), token.token.clone()))
+            })
+            .ok_or_else(|| TransportError::Network(format!("no session on hub {hub_id}")))
+    }
+
+    /// Forgets the session token of `hub_id`, which the hub rejected.
+    pub(crate) fn drop_hub_token(&self, hub_id: &str) {
+        if let Some(handle) = self.handles().get_mut(hub_id) {
+            handle.token = None;
         }
     }
 

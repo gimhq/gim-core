@@ -22,8 +22,8 @@ use gim_crypto::CryptoStore;
 pub use memory::{MemoryStore, MemoryTxn, WriteTarget};
 
 use crate::model::{
-    Chat, DepartedMember, GroupCursor, GroupMessage, HubRecord, MediaCacheEntry, MembershipEvent,
-    Message, OutboxEntry, PendingCommit, PendingInvite, PendingLeave, UserInfo,
+    Chat, DepartedMember, GroupCursor, GroupMessage, HubRecord, KeyPackageRecord, MediaCacheEntry,
+    MembershipEvent, Message, OutboxEntry, PendingCommit, PendingInvite, PendingLeave, UserInfo,
 };
 use crate::{BaseError, StoreError};
 
@@ -100,6 +100,10 @@ pub trait StateReader {
     /// The hubs of the own user's hosting record known to this device, by
     /// hub id.
     fn hubs(&self) -> StoreResult<Vec<HubRecord>>;
+
+    /// The KeyPackage ledger: every KeyPackage generated for a hub, by
+    /// `kp_ref`.
+    fn key_package_records(&self) -> StoreResult<Vec<KeyPackageRecord>>;
 }
 
 /// A write transaction over state rows and MLS state. Dropping it without
@@ -159,6 +163,10 @@ pub trait StoreTxn: StateReader + CryptoStore {
     /// Replaces the hub with the same id, if any.
     fn upsert_hub(&mut self, hub: &HubRecord) -> StoreResult<()>;
     fn remove_hub(&mut self, hub_id: &str) -> StoreResult<()>;
+
+    /// Records a KeyPackage in the ledger. Fails if its `kp_ref` is
+    /// recorded already: a KeyPackage belongs to one hub, ever.
+    fn add_key_package_record(&mut self, record: &KeyPackageRecord) -> StoreResult<()>;
 
     /// Deletes every row and all MLS state, the device identity included
     /// (an unfinished enrollment is discarded this way).

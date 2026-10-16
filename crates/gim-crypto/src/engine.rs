@@ -241,6 +241,17 @@ impl MlsEngine {
         self.validate_leaf(key_package.leaf_node())
     }
 
+    /// The MLS KeyPackageRef of a KeyPackage, as the hub keys it
+    /// (`kp_ref`).
+    pub fn key_package_ref(&self, key_package: &[u8]) -> Result<Vec<u8>> {
+        let key_package = self.validate_key_package(key_package)?;
+        Ok(key_package
+            .hash_ref(&self.crypto)
+            .map_err(CryptoError::mls)?
+            .as_slice()
+            .to_vec())
+    }
+
     /// Generates one-time KeyPackages, each a TLS-serialized `MlsMessage`.
     pub fn generate_key_packages(
         &self,

@@ -23,7 +23,7 @@ use crate::client::Session;
 use crate::hubs::{hub_urls_changed, Listed};
 use crate::stream::{Backoff, ConnectionState};
 use crate::transport::{EventBatch, GroupInfo, HubEvent, TransportError};
-use crate::{Client, ClientError, Result, KEY_PACKAGE_BATCH};
+use crate::{Client, ClientError, Result};
 
 /// Shortest interval between two long-polls that returned no events.
 const MIN_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -631,62 +631,10 @@ impl<S: StateStore + 'static> Client<S> {
         Ok(changes)
     }
 
-    /// Tops the hub's one-time KeyPackages up to [`KEY_PACKAGE_BATCH`], plus
-    /// a last-resort one if it has none. Uploads a batch if the hub cannot
-    /// count them.
-    async fn top_up_key_packages(&self, session: &Session) -> Result<()> {
-        let counted = self
-            .authed(|t| async move { self.inner.transport.key_package_count(&t).await })
-            .await;
-        let count = match counted {
-            Ok(count) => count,
-            Err(err @ (TransportError::Network(_) | TransportError::Unauthorized)) => {
-                return Err(err.into())
-            }
-            Err(err) => {
-                tracing::debug!(error = %err, "cannot count KeyPackages; uploading a batch");
-                return self.upload_key_packages(session).await;
-            }
-        };
-        let missing = u64::from(KEY_PACKAGE_BATCH).saturating_sub(count.available);
-        let missing = u32::try_from(missing).unwrap_or(KEY_PACKAGE_BATCH);
-        let last_resort = !count.has_last_resort;
-        if missing == 0 && !last_resort {
-            return Ok(());
-        }
-        tracing::info!(missing, last_resort, "topping up KeyPackages");
-        let (key_packages, last_resort) = self
-            .run(move |store, engine| {
-                store.transaction(|txn| {
-                    let last_resort = if last_resort {
-                        Some(engine.generate_last_resort_key_package(&*txn)?)
-                    } else {
-                        None
-                    };
-                    Ok((engine.generate_key_packages(&*txn, missing)?, last_resort))
-                })
-            })
-            .await?;
-        let uploads = [
-            (key_packages, false),
-            (last_resort.into_iter().collect(), true),
-        ];
-        for (key_packages, last_resort) in uploads {
-            if key_packages.is_empty() {
-                continue;
-            }
-            self.authed(|t| {
-                let key_packages = key_packages.clone();
-                async move {
-                    self.inner
-                        .transport
-                        .upload_key_packages(&t, key_packages, last_resort)
-                        .await
-                }
-            })
-            .await?;
-        }
-        Ok(())
+    /// Tops the home hub's one-time KeyPackages up to
+    /// [`crate::KEY_PACKAGE_BATCH`], plus a last-resort one if it has none.
+    async fn top_up_key_packages(&self, _session: &Session) -> Result<()> {
+        self.top_up_hub(&self.home_target()).await
     }
 
     /// Applies a batch of hub events: DeviceList updates first (a device

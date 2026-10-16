@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use common::{group, key, setup, text, Device, NOW};
 use gim_base::model::{
     Chat, ChatKind, ChatMember, DepartedMember, GroupCursor, GroupMessage, HubRecord, HubState,
-    MediaCacheEntry, Membership, MembershipChangeKind, MembershipEvent, Message, MessageContent,
+    KeyPackageRecord, MediaCacheEntry, Membership, MembershipChangeKind, MembershipEvent, Message, MessageContent,
     MessageKind, OutboxEntry, OutboxKind, OutboxState, PendingCommit, PendingInvite, PendingLeave,
     PendingMedia, PendingWelcome, PreparedPayload, SendState, UserInfo,
 };
@@ -195,6 +195,18 @@ fn reads_match_memory_store() {
         .map(|h| h.hub_id)
         .collect();
     assert_eq!(hubs, ["ha", "hb"]);
+    let ledger = sqlite.key_package_records().unwrap();
+    assert_eq!(ledger.len(), 2);
+    assert!(ledger[1].last_resort);
+    // A KeyPackage belongs to one hub, ever.
+    let mut moved = ledger[0].clone();
+    moved.hub_id = "hc".into();
+    assert!(sqlite
+        .transaction(|txn| Ok(txn.add_key_package_record(&moved)?))
+        .is_err());
+    assert!(memory
+        .transaction(|txn| Ok(txn.add_key_package_record(&moved)?))
+        .is_err());
     let crew = sqlite.membership_events(&group("crew")).unwrap();
     let order: Vec<(u64, &str)> = crew.iter().map(|e| (e.seq, e.user_id.as_str())).collect();
     assert_eq!(order, [(3, "bob"), (3, "carol"), (9, "bob")]);
@@ -454,6 +466,14 @@ fn write_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
         last_seen_ms: Some(NOW),
         state: HubState::Verified,
     })?;
+    for (kp_ref, hub_id, last_resort) in [(vec![2, 2], "hb", true), (vec![1], "ha", false)] {
+        txn.add_key_package_record(&KeyPackageRecord {
+            kp_ref,
+            hub_id: hub_id.into(),
+            last_resort,
+            created_at_ms: NOW,
+        })?;
+    }
     for (g, user, dev) in [
         ("crew", "dave", "phone"),
         ("crew", "carol", "laptop"),
@@ -633,6 +653,10 @@ fn assert_same_reads(expected: &impl StateReader, actual: &impl StateReader) {
         expected.device_lists().unwrap()
     );
     assert_eq!(actual.hubs().unwrap(), expected.hubs().unwrap());
+    assert_eq!(
+        actual.key_package_records().unwrap(),
+        expected.key_package_records().unwrap()
+    );
     for message_id in ["m1", "m2", "m4", "u1", "u3", "d1", "none"].map(id) {
         assert_eq!(
             actual.message(&message_id).unwrap(),

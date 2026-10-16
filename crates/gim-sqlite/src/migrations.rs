@@ -12,6 +12,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0002_pending_leaves.sql"),
     include_str!("../migrations/0003_pending_invites.sql"),
     include_str!("../migrations/0004_hubs.sql"),
+    include_str!("../migrations/0006_key_package_ledger.sql"),
 ];
 
 /// Schema version written by this build.
@@ -86,6 +87,7 @@ mod tests {
             "device_lists",
             "membership_events",
             "hubs",
+            "key_package_ledger",
         ] {
             assert!(tables.iter().any(|t| t == table), "{table} in {tables:?}");
         }

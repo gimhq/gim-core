@@ -24,6 +24,7 @@ use tokio::sync::{broadcast, Mutex, Notify};
 use crate::hubs::{http_connector, HubConnector, HubHandle, StoredSession};
 use crate::identity::merge_directory_user;
 use crate::invites::{load_pending_invites, PendingInvites};
+use crate::routing::{HubTarget, Submission};
 use crate::send::TypingState;
 use crate::stream::ConnectionState;
 use crate::sync::SyncSettings;
@@ -369,7 +370,9 @@ pub(crate) struct Inner<S> {
 
 #[derive(Clone)]
 pub(crate) enum CommitOp {
-    Add(Vec<ClaimedKeyPackage>),
+    /// The KeyPackages and the hub they were claimed through, which the
+    /// Commit is submitted to first.
+    Add(Vec<ClaimedKeyPackage>, HubTarget),
     Remove(Vec<DeviceRef>),
     /// The Proposals pending in the group, by reference.
     Proposals,
@@ -381,6 +384,11 @@ enum Resolved {
     Accepted,
     /// Another commit won the epoch; the pending commit was dropped.
     Conflict,
+    /// No hub took the Add because its KeyPackages were not claimed
+    /// through it (`kp_not_claimed`), and none can have sequenced it: the
+    /// pending commit was dropped. Claim again through the hub, then
+    /// rebuild the commit.
+    NotClaimed(HubTarget, TransportError),
 }
 
 /// The KeyPackages claimed for an add, and who could not be added now.
@@ -393,6 +401,8 @@ pub(crate) struct Claim {
     pub(crate) unresolvable: Vec<UserId>,
     /// Number of distinct requested users other than this one.
     requested: usize,
+    /// The hub the KeyPackages were claimed through.
+    pub(crate) hub: HubTarget,
 }
 
 impl Claim {
@@ -586,9 +596,13 @@ impl<S: StateStore + 'static> Client<S> {
                 "no device to add has a KeyPackage".into(),
             ));
         }
-        self.commit(&session, group_id, CommitOp::Add(claim.key_packages))
-            .await
-            .map(drop)
+        self.commit(
+            &session,
+            group_id,
+            CommitOp::Add(claim.key_packages, claim.hub),
+        )
+        .await
+        .map(drop)
     }
 
     /// Removes every device of `users` from the group.
@@ -696,7 +710,7 @@ impl<S: StateStore + 'static> Client<S> {
                 welcome: None,
                 welcome_recipients: vec![],
             };
-            match self.submit_until_known(group_id, proposal).await {
+            match self.submit_until_known(group_id, proposal, None).await.result {
                 Ok(_) => {
                     let (gid, b) = (group_id.clone(), base.clone());
                     let client_id = leave.client_id;
@@ -751,10 +765,20 @@ impl<S: StateStore + 'static> Client<S> {
         self.send_with_reply(group_id, content, None).await
     }
 
-    /// Generates and uploads [`KEY_PACKAGE_BATCH`] one-time KeyPackages.
+    /// Generates and uploads [`KEY_PACKAGE_BATCH`] one-time KeyPackages to
+    /// every hub this device can reach, each its own (see
+    /// [`Client::replenish_hub_key_packages`]). Returns the first failure
+    /// after trying every hub.
     pub async fn replenish_key_packages(&self) -> Result<()> {
-        let session = self.require_session()?;
-        self.upload_key_packages(&session).await
+        self.require_session()?;
+        let mut failed = None;
+        for hub in self.submission_hubs().await {
+            if let Err(err) = self.replenish_hub(&hub).await {
+                tracing::warn!(hub_id = %hub.hub_id, error = %err, "cannot replenish KeyPackages");
+                failed.get_or_insert(err);
+            }
+        }
+        failed.map_or(Ok(()), Err)
     }
 
     async fn create_chat(
@@ -810,8 +834,12 @@ impl<S: StateStore + 'static> Client<S> {
             .await?;
         let added = !claim.key_packages.is_empty();
         if added {
-            self.commit(&session, &group_id, CommitOp::Add(claim.key_packages))
-                .await?;
+            self.commit(
+                &session,
+                &group_id,
+                CommitOp::Add(claim.key_packages, claim.hub),
+            )
+            .await?;
         }
         Ok((group_id, added))
     }
@@ -955,24 +983,30 @@ impl<S: StateStore + 'static> Client<S> {
         group_id: &GroupId,
         op: CommitOp,
     ) -> Result<bool> {
-        if let CommitOp::Add(key_packages) = &op {
+        if let CommitOp::Add(key_packages, _) = &op {
             // Credentials are checked against the users' current lists.
             let devices = key_packages.iter().map(|k| k.device.clone());
             let revoked = self.fetch_device_lists(devices).await?;
             self.record_revoked(session, revoked).await?;
         }
+        let mut op = op;
         let mut attempt = 1;
+        let mut reclaims = 0;
         let mut lists_retried = false;
         loop {
             self.resolve_pending_commit(session, group_id).await?;
-            let (gid, op) = (group_id.clone(), op.clone());
+            let via = match &op {
+                CommitOp::Add(_, hub) => Some(hub.clone()),
+                _ => None,
+            };
+            let (gid, op_now) = (group_id.clone(), op.clone());
             // The commit record is persisted with the MLS pending commit, so
             // a restart re-submits the very same commit.
             let created = self
                 .run(move |store, engine| {
                     store.transaction(|txn| {
-                        let (output, welcome) = match op {
-                            CommitOp::Add(key_packages) => {
+                        let (output, welcome) = match op_now {
+                            CommitOp::Add(key_packages, _) => {
                                 let (claimed, key_packages): (Vec<_>, Vec<_>) = key_packages
                                     .into_iter()
                                     .map(|k| (k.device, k.key_package))
@@ -1045,13 +1079,28 @@ impl<S: StateStore + 'static> Client<S> {
             if !created {
                 return Ok(false);
             }
-            match self.resolve_pending_commit(session, group_id).await? {
+            match self
+                .resolve_pending_commit_via(session, group_id, via.as_ref())
+                .await?
+            {
                 Resolved::Accepted | Resolved::None => return Ok(true),
                 Resolved::Conflict if attempt <= MAX_COMMIT_RETRIES => {
                     attempt += 1;
                     self.sync_locked(session).await?;
                 }
                 Resolved::Conflict => return Err(ClientError::CommitConflict(attempt)),
+                // Claim and commit through the same hub (§5.4).
+                Resolved::NotClaimed(hub, err) => {
+                    let CommitOp::Add(previous, _) = &op else {
+                        return Err(err.into());
+                    };
+                    if reclaims >= MAX_COMMIT_RETRIES {
+                        return Err(err.into());
+                    }
+                    reclaims += 1;
+                    let key_packages = self.reclaim_key_packages(&hub, previous).await?;
+                    op = CommitOp::Add(key_packages, hub);
+                }
             }
         }
     }
@@ -1064,6 +1113,21 @@ impl<S: StateStore + 'static> Client<S> {
         &self,
         session: &Session,
         group_id: &GroupId,
+    ) -> Result<Resolved> {
+        self.resolve_pending_commit_via(session, group_id, None)
+            .await
+    }
+
+    /// [`Client::resolve_pending_commit`], submitting to `first` (the hub
+    /// of an Add's claim) before the other hubs. An Add no hub takes for
+    /// `kp_not_claimed` is dropped ([`Resolved::NotClaimed`]) unless an
+    /// unreachable hub may have sequenced it: then the group must not have
+    /// moved past this device's epoch on the refusing hub.
+    async fn resolve_pending_commit_via(
+        &self,
+        session: &Session,
+        group_id: &GroupId,
+        first: Option<&HubTarget>,
     ) -> Result<Resolved> {
         let gid = group_id.clone();
         let Some(pending) = self
@@ -1082,8 +1146,26 @@ impl<S: StateStore + 'static> Client<S> {
             welcome,
             welcome_recipients,
         };
-        let submitted = self.submit_until_known(group_id, commit).await;
+        let Submission {
+            result: submitted,
+            not_claimed,
+        } = self.submit_until_known(group_id, commit, first).await;
         self.schedule_commit_retry(group_id, &submitted);
+        let not_claimed = match (&submitted, not_claimed) {
+            (Err(PostError::Transport(err)), Some(hub)) if outcome_unknown(err) => {
+                if self.group_advanced_on(&hub, group_id).await {
+                    None
+                } else {
+                    tracing::info!(hub_id = %hub.hub_id, %group_id, "no hub sequenced the Add; claiming again through the hub that refused it");
+                    Some(hub)
+                }
+            }
+            (_, hub) => hub,
+        };
+        if let (Some(hub), Err(PostError::Transport(err))) = (not_claimed, &submitted) {
+            self.drop_pending_commit(session, group_id).await?;
+            return Ok(Resolved::NotClaimed(hub, err.clone()));
+        }
         match submitted {
             Ok(accepted) => {
                 let (gid, base) = (group_id.clone(), BaseClient::new(session.device.clone()));
@@ -1097,23 +1179,29 @@ impl<S: StateStore + 'static> Client<S> {
             }
             Err(PostError::Transport(err)) if outcome_unknown(&err) => Err(err.into()),
             Err(err) => {
-                let gid = group_id.clone();
-                self.run(move |store, engine| {
-                    store.transaction(|txn| {
-                        engine.clear_pending_commit(&*txn, &gid)?;
-                        Ok(txn.remove_pending_commit(&gid)?)
-                    })
-                })
-                .await?;
-                // Messages held back while the commit was pending (see
-                // `Client::defer_group_events`), e.g. the competing commit.
-                self.apply_parked(session, group_id).await?;
+                self.drop_pending_commit(session, group_id).await?;
                 match err {
                     PostError::StaleEpoch { .. } => Ok(Resolved::Conflict),
                     PostError::Transport(err) => Err(err.into()),
                 }
             }
         }
+    }
+
+    /// Drops the group's pending commit, which no hub sequenced, then
+    /// applies the messages held back meanwhile.
+    async fn drop_pending_commit(&self, session: &Session, group_id: &GroupId) -> Result<()> {
+        let gid = group_id.clone();
+        self.run(move |store, engine| {
+            store.transaction(|txn| {
+                engine.clear_pending_commit(&*txn, &gid)?;
+                Ok(txn.remove_pending_commit(&gid)?)
+            })
+        })
+        .await?;
+        // Messages held back while the commit was pending (see
+        // `Client::defer_group_events`), e.g. the competing commit.
+        self.apply_parked(session, group_id).await
     }
 
     /// After a peer hub failure, the sync loop waits for the `Retry-After`
@@ -1190,44 +1278,34 @@ impl<S: StateStore + 'static> Client<S> {
         Ok(())
     }
 
-    /// Submits `commit`, again while the outcome is unknown, up to
-    /// [`COMMIT_POST_ATTEMPTS`] times, after the hub's `Retry-After` when it
-    /// gives one (up to [`COMMIT_RETRY_AFTER_MAX`]). Safe because the hub
-    /// recognizes a resubmitted Commit by its hash (and a Proposal by its
-    /// `client_id`).
+    /// Submits `commit` through the hubs (`first`, if given, or else the
+    /// primary first; see [`crate::routing`]), again while the outcome is
+    /// unknown, up to [`COMMIT_POST_ATTEMPTS`] times, after the hub's
+    /// `Retry-After` when it gives one (up to [`COMMIT_RETRY_AFTER_MAX`]).
+    /// Safe because the owning hub recognizes a resubmitted Commit by its
+    /// hash (and a Proposal by its `client_id`), whichever hub forwards it.
     async fn submit_until_known(
         &self,
         group_id: &GroupId,
         commit: OutgoingCommit,
-    ) -> Result<CommitAccepted, PostError> {
+        first: Option<&HubTarget>,
+    ) -> Submission<CommitAccepted> {
         let mut attempt = 0;
         loop {
             attempt += 1;
-            let submitted = self
-                .authed(|t| {
-                    let commit = commit.clone();
-                    async move {
-                        self.inner
-                            .transport
-                            .submit_commit(&t, group_id, commit)
-                            .await
-                    }
-                })
-                .await;
-            match submitted {
+            let submitted = self.submit_routed(group_id, &commit, first).await;
+            match &submitted.result {
                 Err(PostError::Transport(err))
-                    if outcome_unknown(&err) && attempt < COMMIT_POST_ATTEMPTS =>
+                    if outcome_unknown(err) && attempt < COMMIT_POST_ATTEMPTS =>
                 {
                     let delay = match err.retry_after() {
-                        Some(delay) if delay > COMMIT_RETRY_AFTER_MAX => {
-                            return Err(PostError::Transport(err))
-                        }
+                        Some(delay) if delay > COMMIT_RETRY_AFTER_MAX => return submitted,
                         Some(delay) => delay,
                         None => COMMIT_REPOST_DELAY * attempt,
                     };
                     tokio::time::sleep(delay).await;
                 }
-                submitted => return submitted,
+                _ => return submitted,
             }
         }
     }
@@ -1514,27 +1592,14 @@ impl<S: StateStore + 'static> Client<S> {
         .await
     }
 
+    /// Replenishes the home hub's KeyPackages (its `keypackages.low`).
     pub(crate) async fn upload_key_packages(&self, _session: &Session) -> Result<()> {
-        let key_packages = self
-            .run(|store, engine| {
-                store.transaction(|txn| Ok(engine.generate_key_packages(&*txn, KEY_PACKAGE_BATCH)?))
-            })
-            .await?;
-        self.authed(|t| {
-            let key_packages = key_packages.clone();
-            async move {
-                self.inner
-                    .transport
-                    .upload_key_packages(&t, key_packages, false)
-                    .await
-            }
-        })
-        .await?;
-        Ok(())
+        self.replenish_hub(&self.home_target()).await
     }
 
     /// Claims a KeyPackage of every active device of `users` and of this
-    /// user's other devices, except this device and `exclude`. Also returns
+    /// user's other devices, except this device and `exclude`, through the
+    /// first reachable hub (the primary first). Also returns
     /// the requested users (not this one) whose hub was unavailable, and
     /// those nobody could resolve.
     pub(crate) async fn claim_key_packages(
@@ -1555,17 +1620,7 @@ impl<S: StateStore + 'static> Client<S> {
             .into_iter()
             .cloned()
             .collect();
-        let claimed = self
-            .authed(|t| {
-                let users = users.clone();
-                async move {
-                    self.inner
-                        .transport
-                        .claim_key_packages_federated(&t, &users)
-                        .await
-                }
-            })
-            .await?;
+        let (claimed, hub) = self.claim_routed(&users).await?;
         // Only requested users, one KeyPackage per device: the hub must not
         // pick who joins.
         let mut seen = BTreeSet::new();
@@ -1600,6 +1655,7 @@ impl<S: StateStore + 'static> Client<S> {
             unavailable,
             unresolvable,
             requested: count,
+            hub,
         })
     }
 
