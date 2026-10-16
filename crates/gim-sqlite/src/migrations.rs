@@ -7,13 +7,35 @@
 use gim_base::StoreError;
 use rusqlite::{Connection, TransactionBehavior};
 
-const MIGRATIONS: &[&str] = &[
-    include_str!("../migrations/0001_schema.sql"),
-    include_str!("../migrations/0002_pending_leaves.sql"),
-    include_str!("../migrations/0003_pending_invites.sql"),
-    include_str!("../migrations/0004_hubs.sql"),
-    include_str!("../migrations/0005_hub_cursors.sql"),
-    include_str!("../migrations/0006_key_package_ledger.sql"),
+struct Migration {
+    sql: &'static str,
+    /// `(table, column)`: the migration is skipped when the column already
+    /// exists. Only for repairing a migration that was edited after release.
+    unless_column: Option<(&'static str, &'static str)>,
+}
+
+const fn sql(sql: &'static str) -> Migration {
+    Migration {
+        sql,
+        unless_column: None,
+    }
+}
+
+// RULE: never edit a migration that has been on core main, not even a
+// comment; append a new one. Devices keep databases built by every release,
+// and an edited migration never runs again on them (0007 repairs the one
+// time 0004 was edited after d5ead6d).
+const MIGRATIONS: &[Migration] = &[
+    sql(include_str!("../migrations/0001_schema.sql")),
+    sql(include_str!("../migrations/0002_pending_leaves.sql")),
+    sql(include_str!("../migrations/0003_pending_invites.sql")),
+    sql(include_str!("../migrations/0004_hubs.sql")),
+    sql(include_str!("../migrations/0005_hub_cursors.sql")),
+    sql(include_str!("../migrations/0006_key_package_ledger.sql")),
+    Migration {
+        sql: include_str!("../migrations/0007_hubs_url_shared.sql"),
+        unless_column: Some(("hubs", "url_shared")),
+    },
 ];
 
 /// Schema version written by this build.
@@ -44,14 +66,29 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
             "database schema v{current} is newer than this build (v{SCHEMA_VERSION})"
         )));
     }
-    for sql in &MIGRATIONS[current as usize..] {
-        txn.execute_batch(sql).map_err(StoreError::new)?;
+    for migration in &MIGRATIONS[current as usize..] {
+        if let Some((table, column)) = migration.unless_column {
+            if has_column(&txn, table, column)? {
+                continue;
+            }
+        }
+        txn.execute_batch(migration.sql).map_err(StoreError::new)?;
     }
     txn.pragma_update(None, "user_version", SCHEMA_VERSION)
         .map_err(StoreError::new)?;
     txn.pragma_update(None, "application_id", APPLICATION_ID)
         .map_err(StoreError::new)?;
     txn.commit().map_err(StoreError::new)
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, StoreError> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+        [table, column],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|count| count > 0)
+    .map_err(StoreError::new)
 }
 
 #[cfg(test)]
@@ -101,7 +138,7 @@ mod tests {
     #[test]
     fn migrates_a_v1_database_keeping_its_rows() {
         let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        conn.execute_batch(MIGRATIONS[0].sql).unwrap();
         conn.pragma_update(None, "user_version", 1).unwrap();
         conn.execute(
             "INSERT INTO pending_commits (group_id, data) VALUES ('crew', x'00')",
@@ -121,8 +158,8 @@ mod tests {
     #[test]
     fn migrates_a_v2_database_keeping_its_rows() {
         let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(MIGRATIONS[0]).unwrap();
-        conn.execute_batch(MIGRATIONS[1]).unwrap();
+        conn.execute_batch(MIGRATIONS[0].sql).unwrap();
+        conn.execute_batch(MIGRATIONS[1].sql).unwrap();
         conn.pragma_update(None, "user_version", 2).unwrap();
         conn.execute(
             "INSERT INTO pending_leaves (group_id, data) VALUES ('crew', x'01')",
@@ -150,8 +187,8 @@ mod tests {
     #[test]
     fn migrates_a_v3_database_keeping_its_rows() {
         let mut conn = Connection::open_in_memory().unwrap();
-        for sql in &MIGRATIONS[..3] {
-            conn.execute_batch(sql).unwrap();
+        for migration in &MIGRATIONS[..3] {
+            conn.execute_batch(migration.sql).unwrap();
         }
         conn.pragma_update(None, "user_version", 3).unwrap();
         conn.execute(
@@ -173,8 +210,8 @@ mod tests {
     #[test]
     fn migrates_a_v4_database_keeping_its_rows() {
         let mut conn = Connection::open_in_memory().unwrap();
-        for sql in &MIGRATIONS[..4] {
-            conn.execute_batch(sql).unwrap();
+        for migration in &MIGRATIONS[..4] {
+            conn.execute_batch(migration.sql).unwrap();
         }
         conn.pragma_update(None, "user_version", 4).unwrap();
         conn.execute(
@@ -194,8 +231,8 @@ mod tests {
     #[test]
     fn migrates_a_v5_database_keeping_its_rows() {
         let mut conn = Connection::open_in_memory().unwrap();
-        for sql in &MIGRATIONS[..5] {
-            conn.execute_batch(sql).unwrap();
+        for migration in &MIGRATIONS[..5] {
+            conn.execute_batch(migration.sql).unwrap();
         }
         conn.pragma_update(None, "user_version", 5).unwrap();
         conn.execute(
@@ -210,6 +247,27 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM hub_cursors", [], |row| row.get(0))
             .unwrap();
         assert_eq!(kept, 1);
+    }
+
+    #[test]
+    fn migrates_a_v6_database_keeping_its_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for migration in &MIGRATIONS[..6] {
+            conn.execute_batch(migration.sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 6).unwrap();
+        conn.execute(
+            "INSERT INTO hubs (hub_id, url_shared, priority, state) \
+             VALUES ('h1', 1, 0, 'verified')",
+            [],
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), SCHEMA_VERSION);
+        let shared: i64 = conn
+            .query_row("SELECT url_shared FROM hubs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(shared, 1);
     }
 
     #[test]
