@@ -5,8 +5,8 @@ use std::fs;
 use std::time::Duration;
 
 use gim_core::{
-    ChatKind, ConnectionState, GimError, MembershipChangeKind, MessageContent, ReactionGroup,
-    SendState, TimelineItem,
+    ChatKind, ChatState, ConnectionState, GimError, MembershipChangeKind, MessageContent,
+    ReactionGroup, SendState, TimelineItem,
 };
 use gim_integration_testing::{
     eventually, member_ids, message, messages, open, server_url, text, timeline, MemoryHooks,
@@ -618,7 +618,10 @@ async fn group_leave() {
         bob.client
             .send_text(chat.clone(), "still here?".to_string(), None)
             .await,
-        Err(GimError::InvalidInput { .. })
+        Err(GimError::ChatNotActive {
+            state: ChatState::Left,
+            ..
+        })
     ));
     let alone = alice
         .client
