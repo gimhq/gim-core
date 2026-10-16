@@ -65,6 +65,12 @@ pub(crate) fn hub_unreachable(err: &TransportError) -> bool {
     matches!(err, TransportError::Network(_) | TransportError::Server(_))
 }
 
+/// A hub this device cannot get a session on fails like an unreachable
+/// one, so the next hub is tried.
+fn no_session(hub_id: &str) -> TransportError {
+    TransportError::Network(format!("no session on hub {hub_id}"))
+}
+
 /// 400 `... (kp_not_claimed)`: an Add whose KeyPackages were not claimed
 /// through the hub it was submitted to.
 pub(crate) fn kp_not_claimed(err: &TransportError) -> bool {
@@ -149,11 +155,22 @@ impl<S: StateStore + 'static> Client<S> {
             let transport = self.inner.transport.clone();
             return self.authed(|t| call(transport.clone(), t)).await;
         }
-        let (transport, token) = self.hub_session(&hub.hub_id).await?;
-        match call(transport, token).await {
+        let transport = self
+            .verified_hubs()
+            .into_iter()
+            .find(|(hub_id, _, _)| *hub_id == hub.hub_id)
+            .map(|(_, _, transport)| transport)
+            .ok_or_else(|| no_session(&hub.hub_id))?;
+        let token = self
+            .hub_token(&hub.hub_id, None)
+            .await
+            .map_err(|_| no_session(&hub.hub_id))?;
+        match call(transport.clone(), token.clone()).await {
             Err(err) if err.is_unauthorized() => {
-                self.drop_hub_token(&hub.hub_id);
-                let (transport, token) = self.hub_session(&hub.hub_id).await?;
+                let token = self
+                    .hub_token(&hub.hub_id, Some(&token))
+                    .await
+                    .map_err(|_| no_session(&hub.hub_id))?;
                 call(transport, token).await
             }
             result => result,

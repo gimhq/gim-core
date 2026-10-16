@@ -27,7 +27,7 @@ use crate::invites::{load_pending_invites, PendingInvites};
 use crate::routing::{HubTarget, Submission};
 use crate::send::TypingState;
 use crate::stream::ConnectionState;
-use crate::sync::SyncSettings;
+use crate::sync::{HubLink, SyncSettings};
 use crate::transport::{
     AccessToken, ClaimedKeyPackage, CommitAccepted, OutgoingCommit, PostError, Transport,
     TransportError,
@@ -256,6 +256,7 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
                 home_hub: Default::default(),
                 persist_lock: Default::default(),
                 hosting_updated: AtomicBool::new(false),
+                hubs_changed: Notify::new(),
             }),
         })
     }
@@ -366,6 +367,9 @@ pub(crate) struct Inner<S> {
     /// `hosting_record.updated` arrived: the hub registry is refreshed
     /// after the events are applied.
     pub(crate) hosting_updated: AtomicBool,
+    /// The hub registry changed: the sync loop starts and stops the loops
+    /// of the other hubs.
+    pub(crate) hubs_changed: Notify,
 }
 
 #[derive(Clone)]
@@ -1563,10 +1567,10 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Chats joined from a Welcome start as `Group`; takes the kind from the
-    /// hub.
+    /// hub of `link`.
     pub(crate) async fn sync_chat_kind(
         &self,
-        _session: &Session,
+        link: &HubLink,
         group_id: GroupId,
     ) -> Result<Vec<StateChange>> {
         let gid = group_id.clone();
@@ -1578,9 +1582,9 @@ impl<S: StateStore + 'static> Client<S> {
             return Ok(vec![]);
         }
         let info = self
-            .authed(|t| {
+            .on_hub(link, |t, token| {
                 let gid = group_id.clone();
-                async move { self.inner.transport.group_info(&t, &gid).await }
+                async move { t.group_info(&token, &gid).await }
             })
             .await?;
         if info.kind == chat.kind {

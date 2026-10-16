@@ -57,8 +57,10 @@ pub trait StateReader {
     /// order, at most `limit`.
     fn outbox_due(&self, now_ms: u64, limit: usize) -> StoreResult<Vec<OutboxEntry>>;
 
-    /// Global event-stream cursor.
+    /// Global event-stream cursor (the home hub's).
     fn global_cursor(&self) -> StoreResult<Option<u64>>;
+    /// Event-stream cursor on a listed hub other than the home hub.
+    fn hub_cursor(&self, hub_id: &str) -> StoreResult<Option<u64>>;
     /// Applied seqs of the group (default if none).
     fn group_cursor(&self, group_id: &GroupId) -> StoreResult<GroupCursor>;
     /// Messages kept for retry (wrong epoch, Welcome not yet applied),
@@ -123,6 +125,7 @@ pub trait StoreTxn: StateReader + CryptoStore {
     fn remove_outbox(&mut self, message_id: &MessageId) -> StoreResult<()>;
 
     fn set_global_cursor(&mut self, cursor: u64) -> StoreResult<()>;
+    fn set_hub_cursor(&mut self, hub_id: &str, cursor: u64) -> StoreResult<()>;
     fn set_group_cursor(&mut self, group_id: &GroupId, cursor: &GroupCursor) -> StoreResult<()>;
     /// Keeps a message for retry; replaces any parked message with the same
     /// (group, seq).

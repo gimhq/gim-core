@@ -387,6 +387,11 @@ macro_rules! delegate_reader {
                 Reader($conn).global_cursor()
             }
 
+            fn hub_cursor(&self, hub_id: &str) -> StoreResult<Option<u64>> {
+                let $this = self;
+                Reader($conn).hub_cursor(hub_id)
+            }
+
             fn group_cursor(&self, group_id: &GroupId) -> StoreResult<GroupCursor> {
                 let $this = self;
                 Reader($conn).group_cursor(group_id)
@@ -590,6 +595,14 @@ impl StoreTxn for SqliteTxn<'_> {
             "INSERT INTO sync_state (id, global_cursor) VALUES (1, ?1) \
              ON CONFLICT (id) DO UPDATE SET global_cursor = excluded.global_cursor",
             [cursor],
+        )
+    }
+
+    fn set_hub_cursor(&mut self, hub_id: &str, cursor: u64) -> StoreResult<()> {
+        self.check(WriteTarget::GroupCursor)?;
+        self.execute(
+            "INSERT OR REPLACE INTO hub_cursors (hub_id, cursor) VALUES (?1, ?2)",
+            params![hub_id, cursor],
         )
     }
 

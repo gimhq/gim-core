@@ -3,9 +3,22 @@
 //! acknowledgement, DeviceList updates, expired cursor recovery (pending
 //! Welcomes, then a resync), and the background sync loop (WebSocket stream
 //! with a long-poll fallback, reconnect with backoff).
+//!
+//! Multi-homing (contract `multihoming.md` §6.3): every listed hub other
+//! than the home hub whose URL was verified gets a loop of its own, with
+//! its own cursor (event ids differ between hubs). The owner fans every
+//! message out to all listed hubs, so the hubs deliver the same messages:
+//! all of them feed the same application path, and gim-base applies a
+//! message once per `(gid, seq)`. The owner assigns `seq` together with
+//! `message_id`, so `(gid, seq)` identifies a message on every hub, and the
+//! group cursors persist it as the dedup index. Welcomes are joined once
+//! and acknowledged on every hub that delivers them; a 410 is recovered
+//! per hub, from that hub.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::future::Future;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::FutureExt;
@@ -17,12 +30,16 @@ use gim_base::{BaseClient, BaseError, StateReader, StateStore, StoreTxn};
 use gim_common::{now_ms, DeviceRef, GroupId, UserId};
 use gim_crypto::{inspect_handshake, CryptoError};
 use tokio::sync::broadcast;
+use tokio::task::{AbortHandle, JoinSet};
 use tokio::time::Instant;
 
 use crate::client::Session;
 use crate::hubs::{hub_urls_changed, Listed};
+use crate::routing::HubTarget;
 use crate::stream::{Backoff, ConnectionState};
-use crate::transport::{EventBatch, GroupInfo, HubEvent, TransportError};
+use crate::transport::{
+    AccessToken, EventBatch, GroupInfo, HubEvent, Transport, TransportError, TransportResult,
+};
 use crate::{Client, ClientError, Result};
 
 /// Shortest interval between two long-polls that returned no events.
@@ -89,6 +106,34 @@ impl Fetched {
             Err(err) => Err(err.into()),
         }
     }
+}
+
+/// A hub the sync path reads from: the home hub (the client's transport
+/// and session) or another listed hub, with this device's session there.
+#[derive(Clone)]
+pub(crate) struct HubLink {
+    /// `None` for the home hub.
+    hub_id: Option<String>,
+    transport: Arc<dyn Transport>,
+}
+
+impl HubLink {
+    fn is_home(&self) -> bool {
+        self.hub_id.is_none()
+    }
+
+    /// For logs.
+    fn name(&self) -> &str {
+        self.hub_id.as_deref().unwrap_or("home")
+    }
+}
+
+/// The loops of the listed hubs other than the home hub, by hub id, with
+/// the URL each follows. Dropping it (the sync loop stopped) stops them.
+#[derive(Default)]
+struct HubLoops {
+    tasks: JoinSet<()>,
+    running: HashMap<String, (String, AbortHandle)>,
 }
 
 impl<S: StateStore + 'static> Client<S> {
@@ -168,12 +213,72 @@ impl<S: StateStore + 'static> Client<S> {
     /// Fetches the pending events once (no waiting), applies them, persists
     /// the cursor and replenishes KeyPackages if the hub asked for it.
     /// Returns the applied changes, which are also broadcast (both without
-    /// the self groups' changes).
+    /// the self groups' changes). The other listed hubs with a verified URL
+    /// are read the same way after the home hub; their failures are only
+    /// logged, and a failure of the home hub is returned after them.
     pub async fn sync_once(&self) -> Result<Vec<StateChange>> {
         let session = self.require_session()?;
-        let fetched = self.fetch(&session, Duration::ZERO).await?;
-        let changes = self.apply_fetched(&session, fetched).await?;
-        Ok(self.visible(changes))
+        let home = self.sync_hub_once(&session, &self.home_link()).await;
+        let mut changes = Vec::new();
+        for link in self.hub_links() {
+            match self.sync_hub_once(&session, &link).await {
+                Ok(applied) => changes.extend(applied),
+                Err(err) => {
+                    tracing::warn!(hub_id = link.name(), error = %err, "cannot sync a listed hub");
+                }
+            }
+        }
+        let mut all = home?;
+        all.extend(changes);
+        Ok(self.visible(all))
+    }
+
+    async fn sync_hub_once(&self, session: &Session, link: &HubLink) -> Result<Vec<StateChange>> {
+        let fetched = self.fetch(link, Duration::ZERO).await?;
+        self.apply_fetched(session, link, fetched).await
+    }
+
+    /// The home hub: the client's own transport.
+    pub(crate) fn home_link(&self) -> HubLink {
+        HubLink {
+            hub_id: None,
+            transport: self.inner.transport.clone(),
+        }
+    }
+
+    /// The listed hubs other than the home hub whose URL was verified in
+    /// this run, by hub id.
+    fn hub_links(&self) -> Vec<HubLink> {
+        self.verified_hubs()
+            .into_iter()
+            .map(|(hub_id, _, transport)| HubLink {
+                hub_id: Some(hub_id),
+                transport,
+            })
+            .collect()
+    }
+
+    /// Runs `call` on the hub of `link` with a valid session token there:
+    /// [`Client::authed`] on the home hub; on another hub, signs in there
+    /// first if the token expired, and once more if the hub rejects it.
+    pub(crate) async fn on_hub<T, F, Fut>(&self, link: &HubLink, call: F) -> TransportResult<T>
+    where
+        F: Fn(Arc<dyn Transport>, AccessToken) -> Fut,
+        Fut: Future<Output = TransportResult<T>>,
+    {
+        let Some(hub_id) = &link.hub_id else {
+            return self
+                .authed(|token| call(link.transport.clone(), token))
+                .await;
+        };
+        let token = self.hub_token(hub_id, None).await?;
+        match call(link.transport.clone(), token.clone()).await {
+            Err(TransportError::Unauthorized) => {
+                let token = self.hub_token(hub_id, Some(&token)).await?;
+                call(link.transport.clone(), token).await
+            }
+            result => result,
+        }
     }
 
     pub(crate) fn wake_sync(&self) {
@@ -204,13 +309,76 @@ impl<S: StateStore + 'static> Client<S> {
         }
     }
 
-    /// The sync loop, with the hosting record renewal and the pending
-    /// invite retries alongside.
+    /// The sync loop of the home hub, with the loops of the other listed
+    /// hubs, the hosting record renewal and the pending invite retries
+    /// alongside.
     async fn sync_loop(&self, session: Session) -> Result<()> {
         tokio::select! {
-            result = self.follow_events(session) => result,
+            result = self.follow_events(session.clone()) => result,
+            never = self.maintain_hub_loops(session) => match never {},
             never = self.maintain_hosting_record() => match never {},
             never = self.maintain_pending_invites() => match never {},
+        }
+    }
+
+    /// Keeps one loop per listed hub with a verified URL other than the
+    /// home hub ([`Client::follow_hub`]): starts the loops of hubs joining
+    /// the registry, stops those of hubs leaving it, and restarts a loop
+    /// whose hub got another URL.
+    async fn maintain_hub_loops(&self, session: Session) -> std::convert::Infallible {
+        let mut loops = HubLoops::default();
+        loop {
+            let hubs = self.verified_hubs();
+            loops.running.retain(|hub_id, (url, task)| {
+                let keep = hubs.iter().any(|(id, u, _)| id == hub_id && u == url);
+                if !keep {
+                    tracing::info!(%hub_id, "stopping the sync of a hub");
+                    task.abort();
+                }
+                keep
+            });
+            for (hub_id, url, transport) in hubs {
+                if loops.running.contains_key(&hub_id) {
+                    continue;
+                }
+                tracing::info!(%hub_id, "starting the sync of a listed hub");
+                let link = HubLink {
+                    hub_id: Some(hub_id.clone()),
+                    transport,
+                };
+                let (client, session) = (self.clone(), session.clone());
+                let task = loops
+                    .tasks
+                    .spawn(async move { client.follow_hub(session, link).await });
+                loops.running.insert(hub_id, (url, task));
+            }
+            tokio::select! {
+                () = self.inner.hubs_changed.notified() => {}
+                // Reaps stopped loops.
+                Some(_) = loops.tasks.join_next() => {}
+            }
+        }
+    }
+
+    /// The loop of a listed hub other than the home hub: as the home loop,
+    /// but it reports no connection state and never stops by itself; any
+    /// failure (also a hub refusing the session) is retried with backoff
+    /// until the hub leaves the registry.
+    async fn follow_hub(&self, session: Session, link: HubLink) {
+        let settings = self.inner.sync_settings;
+        let mut backoff = Backoff::new(settings.backoff_min, settings.backoff_max);
+        let mut stream_retry_at = None;
+        loop {
+            let Err(err) = self
+                .follow(&session, &link, &mut backoff, &mut stream_retry_at)
+                .await
+            else {
+                continue;
+            };
+            stream_retry_at = None;
+            let delay = backoff.next_delay();
+            tracing::debug!(hub_id = link.name(), error = %err, ?delay, "hub sync failed; reconnecting");
+            tokio::time::sleep(delay).await;
         }
     }
 
@@ -218,10 +386,11 @@ impl<S: StateStore + 'static> Client<S> {
         let settings = self.inner.sync_settings;
         let mut backoff = Backoff::new(settings.backoff_min, settings.backoff_max);
         let mut stream_retry_at = None;
+        let home = self.home_link();
         loop {
             self.set_connection_state(ConnectionState::Connecting);
             let Err(err) = self
-                .follow(&session, &mut backoff, &mut stream_retry_at)
+                .follow(&session, &home, &mut backoff, &mut stream_retry_at)
                 .await
             else {
                 continue;
@@ -247,26 +416,35 @@ impl<S: StateStore + 'static> Client<S> {
         }
     }
 
-    /// One connection: catches up over HTTP, then follows the stream or
-    /// long-polls. Returns `Ok` to reconnect at once (after an expired
-    /// cursor, or to try the stream again).
+    /// The connection state of the home hub's loop; the other hubs' loops
+    /// report none.
+    fn report(&self, link: &HubLink, state: ConnectionState) {
+        if link.is_home() {
+            self.set_connection_state(state);
+        }
+    }
+
+    /// One connection to the hub of `link`: catches up over HTTP, then
+    /// follows the stream or long-polls. Returns `Ok` to reconnect at once
+    /// (after an expired cursor, or to try the stream again).
     async fn follow(
         &self,
         session: &Session,
+        link: &HubLink,
         backoff: &mut Backoff,
         stream_retry_at: &mut Option<Instant>,
     ) -> Result<()> {
         let settings = self.inner.sync_settings;
         let mut connected = false;
         loop {
-            let fetched = self.fetch(session, Duration::ZERO).await?;
+            let fetched = self.fetch(link, Duration::ZERO).await?;
             if !connected {
                 connected = true;
                 backoff.reset();
-                self.set_connection_state(ConnectionState::Syncing);
+                self.report(link, ConnectionState::Syncing);
             }
             let caught_up = matches!(&fetched, Fetched::Batch(b) if b.events.is_empty());
-            self.apply_fetched(session, fetched).await?;
+            self.apply_fetched(session, link, fetched).await?;
             if caught_up {
                 break;
             }
@@ -274,9 +452,11 @@ impl<S: StateStore + 'static> Client<S> {
 
         let mut stream = None;
         if stream_retry_at.is_none_or(|at| Instant::now() >= at) {
-            let cursor = self.run(|store, _| Ok(store.global_cursor()?)).await?;
+            let cursor = self.cursor(link).await?;
             match self
-                .authed(|t| async move { self.inner.transport.open_stream(&t, cursor).await })
+                .on_hub(link, |t, token| async move {
+                    t.open_stream(&token, cursor).await
+                })
                 .await
             {
                 Ok(Some(opened)) => {
@@ -287,21 +467,26 @@ impl<S: StateStore + 'static> Client<S> {
                     return Err(TransportError::Unauthorized.into())
                 }
                 Ok(None) | Err(_) => {
-                    tracing::debug!("event stream unavailable; long-polling");
+                    tracing::debug!(
+                        hub_id = link.name(),
+                        "event stream unavailable; long-polling"
+                    );
                     *stream_retry_at = Some(Instant::now() + settings.stream_retry);
                 }
             }
         }
-        self.set_connection_state(ConnectionState::Connected);
+        self.report(link, ConnectionState::Connected);
 
         loop {
             let fetched = match stream.as_mut() {
                 Some(stream) => match stream.next().await {
                     // The token expired under the open stream: sign in again
-                    // and reconnect.
+                    // and reconnect (on another hub, the next request does).
                     Err(TransportError::Unauthorized) => {
-                        let token = self.session().map(|s| s.token);
-                        self.renew_token(token.as_ref()).await?;
+                        if link.is_home() {
+                            let token = self.session().map(|s| s.token);
+                            self.renew_token(token.as_ref()).await?;
+                        }
                         return Ok(());
                     }
                     next => Fetched::from_result(next)?,
@@ -311,7 +496,7 @@ impl<S: StateStore + 'static> Client<S> {
                         return Ok(());
                     }
                     let started = Instant::now();
-                    let fetched = self.fetch(session, settings.long_poll_wait).await?;
+                    let fetched = self.fetch(link, settings.long_poll_wait).await?;
                     if matches!(&fetched, Fetched::Batch(b) if b.events.is_empty()) {
                         // The request was not held (a transport that does
                         // not wait, or an early answer): do not spin.
@@ -322,9 +507,9 @@ impl<S: StateStore + 'static> Client<S> {
             };
             let expired = matches!(fetched, Fetched::Expired { .. });
             if expired {
-                self.set_connection_state(ConnectionState::Syncing);
+                self.report(link, ConnectionState::Syncing);
             }
-            self.apply_fetched(session, fetched).await?;
+            self.apply_fetched(session, link, fetched).await?;
             if expired {
                 // The stream closes after an expiry; reconnect from the head.
                 return Ok(());
@@ -332,14 +517,28 @@ impl<S: StateStore + 'static> Client<S> {
         }
     }
 
-    /// Fetches the events after the persisted cursor, waiting up to `wait`
-    /// for the first one. Does not take the group lock.
-    pub(crate) async fn fetch(&self, _session: &Session, wait: Duration) -> Result<Fetched> {
-        let cursor = self.run(|store, _| Ok(store.global_cursor()?)).await?;
+    /// Fetches the events of the hub of `link` after its persisted cursor,
+    /// waiting up to `wait` for the first one. Does not take the group
+    /// lock.
+    pub(crate) async fn fetch(&self, link: &HubLink, wait: Duration) -> Result<Fetched> {
+        let cursor = self.cursor(link).await?;
         let fetched = self
-            .authed(|t| async move { self.inner.transport.fetch_events(&t, cursor, wait).await })
+            .on_hub(link, |t, token| async move {
+                t.fetch_events(&token, cursor, wait).await
+            })
             .await;
         Fetched::from_result(fetched)
+    }
+
+    /// The persisted event cursor on the hub of `link`: the global cursor
+    /// for the home hub.
+    async fn cursor(&self, link: &HubLink) -> Result<Option<u64>> {
+        let hub_id = link.hub_id.clone();
+        self.run(move |store, _| match hub_id {
+            None => Ok(store.global_cursor()?),
+            Some(hub_id) => Ok(store.hub_cursor(&hub_id)?),
+        })
+        .await
     }
 
     /// Applies fetched events under the group lock, then commits the
@@ -348,16 +547,28 @@ impl<S: StateStore + 'static> Client<S> {
     /// may have been queued), announces the own display name to the chats
     /// this device joined and resolves the profiles of new members and
     /// senders.
+    /// Commits go to the home hub: from another hub's events, failing
+    /// to commit is logged, so that the home hub being down does not hold
+    /// back the other hubs' events.
     pub(crate) async fn apply_fetched(
         &self,
         session: &Session,
+        link: &HubLink,
         fetched: Fetched,
     ) -> Result<Vec<StateChange>> {
         let guard = self.inner.group_lock.lock().await;
         let urls = self.hub_urls().await?;
-        let changes = self.apply_fetched_locked(session, fetched).await?;
-        self.remove_departed(session).await?;
-        self.commit_pending_proposals(session).await?;
+        let changes = self.apply_fetched_locked(session, link, fetched).await?;
+        let committed = match self.remove_departed(session).await {
+            Ok(()) => self.commit_pending_proposals(session).await,
+            err => err,
+        };
+        match committed {
+            Err(err) if !link.is_home() => {
+                tracing::debug!(hub_id = link.name(), error = %err, "cannot commit after a hub's events");
+            }
+            committed => committed?,
+        }
         self.resume_leaves(session).await;
         drop(guard);
         if self.inner.hosting_updated.swap(false, Ordering::SeqCst) {
@@ -398,15 +609,18 @@ impl<S: StateStore + 'static> Client<S> {
         Ok(changes)
     }
 
-    /// [`Client::sync_once`] for callers holding the group lock.
+    /// [`Client::sync_once`] of the home hub for callers holding the group
+    /// lock.
     pub(crate) async fn sync_locked(&self, session: &Session) -> Result<Vec<StateChange>> {
-        let fetched = self.fetch(session, Duration::ZERO).await?;
-        self.apply_fetched_locked(session, fetched).await
+        let home = self.home_link();
+        let fetched = self.fetch(&home, Duration::ZERO).await?;
+        self.apply_fetched_locked(session, &home, fetched).await
     }
 
     async fn apply_fetched_locked(
         &self,
         session: &Session,
+        link: &HubLink,
         fetched: Fetched,
     ) -> Result<Vec<StateChange>> {
         // An own commit must be merged before later commits are processed.
@@ -415,12 +629,12 @@ impl<S: StateStore + 'static> Client<S> {
         match fetched {
             Fetched::Batch(batch) => {
                 let events = self.defer_group_events(batch.events, &deferred).await?;
-                self.apply_events_locked(session, events, batch.next_cursor)
+                self.apply_events_locked(session, link, events, batch.next_cursor)
                     .await
             }
             Fetched::Expired { head } => match deferred.into_values().next() {
                 Some(err) => Err(err),
-                None => self.recover_expired_locked(session, head).await,
+                None => self.recover_expired_locked(session, link, head).await,
             },
         }
     }
@@ -474,22 +688,30 @@ impl<S: StateStore + 'static> Client<S> {
         }
         // Applied ones are unparked by gim-base's next drain.
         let events = parked.into_iter().map(IncomingEvent::Message).collect();
-        self.apply_group_events(session, events).await.map(drop)
+        self.apply_group_events(session, &self.home_link(), events)
+            .await
+            .map(drop)
     }
 
-    /// Resyncs after an expired cursor: joins the groups of the pending
-    /// Welcomes (and acknowledges them), backfills every joined chat by seq
-    /// from its last contiguous seq, refreshes the known DeviceLists,
-    /// surfaces the hub's groups that cannot be joined, tops up KeyPackages
-    /// (a `KeyPackagesLow` may have been pruned), then continues from the
-    /// head cursor.
+    /// Resyncs after an expired cursor on the hub of `link`, from that
+    /// hub: joins the groups of the pending Welcomes (and acknowledges
+    /// them), backfills every joined chat by seq from its last contiguous
+    /// seq, refreshes the known DeviceLists, surfaces the hub's groups that
+    /// cannot be joined, tops up that hub's KeyPackages (a
+    /// `KeyPackagesLow` may have been pruned), then continues from the head
+    /// cursor. The other hubs' cursors are not touched.
     async fn recover_expired_locked(
         &self,
         session: &Session,
+        link: &HubLink,
         head: u64,
     ) -> Result<Vec<StateChange>> {
-        tracing::info!(head, "event cursor expired; resyncing");
-        let mut changes = self.join_pending_welcomes(session).await?;
+        tracing::info!(
+            hub_id = link.name(),
+            head,
+            "event cursor expired; resyncing"
+        );
+        let mut changes = self.join_pending_welcomes(session, link).await?;
         let revoked = self.refresh_known_device_lists(session).await?;
         self.record_revoked(session, revoked).await?;
         let chats = self
@@ -514,40 +736,55 @@ impl<S: StateStore + 'static> Client<S> {
                 .run(move |store, _| Ok(store.group_cursor(&gid)?.contiguous_seq))
                 .await?;
             if let Some(history) = self
-                .group_history(session, &chat.group_id, after, None)
+                .group_history_from(link, &chat.group_id, after, None)
                 .await?
             {
                 events.extend(history.into_iter().map(IncomingEvent::Message));
             }
         }
-        let unjoined = self.unjoined_hub_groups(&joined).await?;
-        self.top_up_key_packages(session).await?;
-        changes.extend(self.apply_group_events(session, events).await?);
-        self.set_cursor(head, true).await?;
+        let unjoined = self.unjoined_hub_groups(link, &joined).await?;
+        match &link.hub_id {
+            None => self.top_up_key_packages(session).await?,
+            Some(hub_id) => {
+                let hub = HubTarget {
+                    hub_id: hub_id.clone(),
+                    home: false,
+                };
+                self.top_up_hub(&hub).await?;
+            }
+        }
+        changes.extend(self.apply_group_events(session, link, events).await?);
+        self.set_cursor(link, head, true).await?;
         changes.extend(self.record_unjoinable(unjoined).await?);
         Ok(changes)
     }
 
-    /// Joins the groups of every pending Welcome and acknowledges them, page
-    /// by page. Welcomes of groups already joined are acknowledged too.
-    async fn join_pending_welcomes(&self, session: &Session) -> Result<Vec<StateChange>> {
+    /// Joins the groups of every Welcome pending on the hub of `link` and
+    /// acknowledges them there, page by page. Welcomes of groups already
+    /// joined are acknowledged too.
+    async fn join_pending_welcomes(
+        &self,
+        session: &Session,
+        link: &HubLink,
+    ) -> Result<Vec<StateChange>> {
         let mut changes = Vec::new();
         loop {
             let page = self
-                .authed(|t| async move {
-                    self.inner
-                        .transport
-                        .pending_welcomes(&t, WELCOME_PAGE)
-                        .await
+                .on_hub(link, |t, token| async move {
+                    t.pending_welcomes(&token, WELCOME_PAGE).await
                 })
                 .await?;
             let full = page.len() == WELCOME_PAGE as usize;
             if page.is_empty() {
                 break;
             }
-            tracing::info!(count = page.len(), "joining pending Welcomes");
+            tracing::info!(
+                hub_id = link.name(),
+                count = page.len(),
+                "joining pending Welcomes"
+            );
             let events = page.into_iter().map(IncomingEvent::Message).collect();
-            changes.extend(self.apply_group_events(session, events).await?);
+            changes.extend(self.apply_group_events(session, link, events).await?);
             if !full {
                 break;
             }
@@ -577,11 +814,16 @@ impl<S: StateStore + 'static> Client<S> {
         Ok(revoked)
     }
 
-    /// The hub's groups of this device that are not joined here. Empty if
-    /// the hub cannot list them; network and auth errors are returned.
-    async fn unjoined_hub_groups(&self, joined: &BTreeSet<GroupId>) -> Result<Vec<GroupInfo>> {
+    /// The groups of this device on the hub of `link` that are not joined
+    /// here. Empty if the hub cannot list them; network and auth errors are
+    /// returned.
+    async fn unjoined_hub_groups(
+        &self,
+        link: &HubLink,
+        joined: &BTreeSet<GroupId>,
+    ) -> Result<Vec<GroupInfo>> {
         match self
-            .authed(|t| async move { self.inner.transport.list_groups(&t).await })
+            .on_hub(link, |t, token| async move { t.list_groups(&token).await })
             .await
         {
             Ok(groups) => Ok(groups
@@ -637,13 +879,16 @@ impl<S: StateStore + 'static> Client<S> {
         self.top_up_hub(&self.home_target()).await
     }
 
-    /// Applies a batch of hub events: DeviceList updates first (a device
-    /// revoked in the latest list is rejected as a sender, whatever the
-    /// event order), then the group events; then persists `next_cursor`
-    /// (only forward).
+    /// Applies a batch of events of the hub of `link`: DeviceList updates
+    /// first (a device revoked in the latest list is rejected as a sender,
+    /// whatever the event order), then the group events; then persists
+    /// `next_cursor` (only forward) as that hub's cursor. Every hub
+    /// delivers the same DeviceList and hosting record events; applying
+    /// them again changes nothing.
     async fn apply_events_locked(
         &self,
         session: &Session,
+        link: &HubLink,
         events: Vec<HubEvent>,
         next_cursor: u64,
     ) -> Result<Vec<StateChange>> {
@@ -681,65 +926,101 @@ impl<S: StateStore + 'static> Client<S> {
             }
         }
         self.record_revoked(session, revoked).await?;
-        let changes = self.apply_group_events(session, group_events).await?;
-        self.set_cursor(next_cursor, false).await?;
+        let changes = self.apply_group_events(session, link, group_events).await?;
+        self.set_cursor(link, next_cursor, false).await?;
         Ok(changes)
     }
 
-    /// Persists the global cursor: only forward, unless `reset`.
-    async fn set_cursor(&self, next_cursor: u64, reset: bool) -> Result<()> {
+    /// Persists the cursor on the hub of `link` (the global cursor for the
+    /// home hub): only forward, unless `reset`.
+    async fn set_cursor(&self, link: &HubLink, next_cursor: u64, reset: bool) -> Result<()> {
+        let hub_id = link.hub_id.clone();
         self.run(move |store, _| {
-            let cursor = store.global_cursor()?;
+            let cursor = match &hub_id {
+                None => store.global_cursor()?,
+                Some(hub_id) => store.hub_cursor(hub_id)?,
+            };
             if reset || cursor.is_none_or(|c| next_cursor > c) {
-                store.transaction(|txn| Ok(txn.set_global_cursor(next_cursor)?))?;
+                store.transaction(|txn| match &hub_id {
+                    None => Ok(txn.set_global_cursor(next_cursor)?),
+                    Some(hub_id) => Ok(txn.set_hub_cursor(hub_id, next_cursor)?),
+                })?;
             }
             Ok(())
         })
         .await
     }
 
-    /// Applies group events in order, after backfilling seq gaps and
-    /// fetching the DeviceLists of the devices they refer to that are not
-    /// known yet. Broadcasts the changes, acknowledges the applied Welcomes
-    /// and replenishes KeyPackages if asked to.
+    /// Applies group events of the hub of `link` in order, after
+    /// backfilling seq gaps and fetching the DeviceLists of the devices
+    /// they refer to that are not known yet. Messages already applied from
+    /// another hub change nothing (gim-base skips a `(gid, seq)` applied
+    /// before). Broadcasts the changes, acknowledges the Welcomes on that
+    /// hub (also those joined from another hub) and replenishes that hub's
+    /// KeyPackages if it asked to.
     pub(crate) async fn apply_group_events(
         &self,
         session: &Session,
+        link: &HubLink,
         events: Vec<IncomingEvent>,
     ) -> Result<Vec<StateChange>> {
-        let events = self.backfill_gaps(session, events).await?;
-        let devices = self.referenced_devices(session, &events).await?;
-        let revoked = self.fetch_device_lists(devices).await?;
-        self.record_revoked(session, revoked).await?;
-        let joined: BTreeSet<GroupId> = events
+        let events = self.backfill_gaps(session, link, events).await?;
+        let welcomes: BTreeSet<(GroupId, u64)> = events
             .iter()
             .filter_map(|event| match event {
                 IncomingEvent::Message(m)
                     if m.kind == MessageKind::Welcome && m.sender != session.device =>
                 {
-                    Some(m.group_id.clone())
+                    Some((m.group_id.clone(), m.seq))
                 }
                 _ => None,
             })
             .collect();
+        let joining = self.unapplied(welcomes.clone()).await?;
+        let devices = self.referenced_devices(link, &events, &joining).await?;
+        let revoked = self.fetch_device_lists(devices).await?;
+        self.record_revoked(session, revoked).await?;
         let mut changes = self.apply_events_fetching_lists(session, events).await?;
         self.load_own_device_list(session).await?;
-        for group_id in &joined {
-            changes.extend(self.sync_chat_kind(session, group_id.clone()).await?);
+        for group_id in &joining {
+            changes.extend(self.sync_chat_kind(link, group_id.clone()).await?);
         }
         self.emit(&changes);
         // Applied or unusable: either way the hub need not keep them.
-        for group_id in joined {
-            self.authed(|t| {
+        let acked: BTreeSet<GroupId> = welcomes.into_iter().map(|(gid, _)| gid).collect();
+        for group_id in acked {
+            self.on_hub(link, |t, token| {
                 let gid = group_id.clone();
-                async move { self.inner.transport.ack_welcome(&t, &gid).await }
+                async move { t.ack_welcome(&token, &gid).await }
             })
             .await?;
         }
         if changes.contains(&StateChange::KeyPackagesLow) {
-            self.upload_key_packages(session).await?;
+            match &link.hub_id {
+                None => self.upload_key_packages(session).await?,
+                // That hub only: each hub has its own KeyPackages.
+                Some(hub_id) => self.replenish_hub_key_packages(hub_id).await?,
+            }
         }
         Ok(changes)
+    }
+
+    /// The groups of the `welcomes` (group, seq) not applied yet: a Welcome
+    /// at an applied seq was joined from another hub.
+    async fn unapplied(&self, welcomes: BTreeSet<(GroupId, u64)>) -> Result<BTreeSet<GroupId>> {
+        if welcomes.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        self.run(move |store, _| {
+            let mut joining = BTreeSet::new();
+            for (group_id, seq) in welcomes {
+                if !store.group_cursor(&group_id)?.contains(seq) {
+                    joining.insert(group_id);
+                }
+            }
+            Ok(joining)
+        })
+        .await
     }
 
     /// Loads the own DeviceList kept by gim-base (from a `self.device_list`
@@ -818,28 +1099,20 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Devices whose credentials applying `events` checks: senders, added
-    /// devices, and the hub roster of each group a Welcome joins (its
-    /// ratchet tree is only readable once joined).
+    /// devices, and the roster on the hub of `link` of each group a Welcome
+    /// joins (`joining`; its ratchet tree is only readable once joined).
     async fn referenced_devices(
         &self,
-        session: &Session,
+        link: &HubLink,
         events: &[IncomingEvent],
+        joining: &BTreeSet<GroupId>,
     ) -> Result<BTreeSet<DeviceRef>> {
         let mut devices = referenced_in(events);
-        let joining: BTreeSet<&GroupId> = events
-            .iter()
-            .filter_map(|event| match event {
-                IncomingEvent::Message(m)
-                    if m.kind == MessageKind::Welcome && m.sender != session.device =>
-                {
-                    Some(&m.group_id)
-                }
-                _ => None,
-            })
-            .collect();
         for group_id in joining {
             let info = self
-                .authed(|t| async move { self.inner.transport.group_info(&t, group_id).await })
+                .on_hub(link, |t, token| async move {
+                    t.group_info(&token, group_id).await
+                })
                 .await;
             match info {
                 Ok(info) => devices.extend(info.members),
@@ -860,7 +1133,8 @@ impl<S: StateStore + 'static> Client<S> {
     /// not looked up again.
     async fn backfill_gaps(
         &self,
-        session: &Session,
+        _session: &Session,
+        link: &HubLink,
         events: Vec<IncomingEvent>,
     ) -> Result<Vec<IncomingEvent>> {
         let mut seqs: BTreeMap<GroupId, BTreeSet<u64>> = BTreeMap::new();
@@ -897,7 +1171,7 @@ impl<S: StateStore + 'static> Client<S> {
                 continue;
             };
             let Some(history) = self
-                .group_history(session, &group_id, from - 1, Some(to))
+                .group_history_from(link, &group_id, from - 1, Some(to))
                 .await?
             else {
                 continue;
@@ -944,14 +1218,65 @@ impl<S: StateStore + 'static> Client<S> {
         Ok(merged)
     }
 
-    /// Messages of the group after `after_seq`, up to `until` (all if
-    /// `None`), paging through the hub history. `None` if the group's
-    /// history cannot be read (e.g. this device was removed): network and
-    /// auth errors are returned, anything else skips the group, whose holes
-    /// are then looked up again on its next message.
+    /// [`Client::group_history_from`] the home hub.
     pub(crate) async fn group_history(
         &self,
         _session: &Session,
+        group_id: &GroupId,
+        after_seq: u64,
+        until: Option<u64>,
+    ) -> Result<Option<Vec<GroupMessage>>> {
+        self.group_history_from(&self.home_link(), group_id, after_seq, until)
+            .await
+    }
+
+    /// Messages of the group after `after_seq`, up to `until` (all if
+    /// `None`), from the hub of `preferred`, or else from the first other
+    /// listed hub that can serve them (every listed hub keeps a replica
+    /// with the same seqs). See [`Client::group_history_on`]; if no hub
+    /// serves them, the preferred hub's result is returned.
+    async fn group_history_from(
+        &self,
+        preferred: &HubLink,
+        group_id: &GroupId,
+        after_seq: u64,
+        until: Option<u64>,
+    ) -> Result<Option<Vec<GroupMessage>>> {
+        let first = self
+            .group_history_on(preferred, group_id, after_seq, until)
+            .await;
+        if matches!(first, Ok(Some(_))) {
+            return first;
+        }
+        let others = std::iter::once(self.home_link())
+            .chain(self.hub_links())
+            .filter(|link| link.hub_id != preferred.hub_id);
+        for link in others {
+            match self
+                .group_history_on(&link, group_id, after_seq, until)
+                .await
+            {
+                Ok(Some(messages)) => {
+                    tracing::debug!(%group_id, from = preferred.name(), to = link.name(), "read group history from another hub");
+                    return Ok(Some(messages));
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::debug!(%group_id, hub_id = link.name(), error = %err, "cannot read group history");
+                }
+            }
+        }
+        first
+    }
+
+    /// Messages of the group after `after_seq`, up to `until` (all if
+    /// `None`), paging through the history on the hub of `link`. `None` if
+    /// the group's history cannot be read (e.g. this device was removed):
+    /// network and auth errors are returned, anything else skips the
+    /// group, whose holes are then looked up again on its next message.
+    async fn group_history_on(
+        &self,
+        link: &HubLink,
         group_id: &GroupId,
         mut after_seq: u64,
         until: Option<u64>,
@@ -960,10 +1285,8 @@ impl<S: StateStore + 'static> Client<S> {
         loop {
             let from_seq = after_seq + 1;
             let fetched = self
-                .authed(|t| async move {
-                    self.inner
-                        .transport
-                        .group_messages(&t, group_id, from_seq, BACKFILL_PAGE)
+                .on_hub(link, |t, token| async move {
+                    t.group_messages(&token, group_id, from_seq, BACKFILL_PAGE)
                         .await
                 })
                 .await;

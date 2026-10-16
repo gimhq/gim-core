@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use common::{server_handshakes, server_messages, Device, FlakyTransport};
-use gim_base::model::{ChatKind, GroupMessage, KeyPackageRecord, SendState};
+use gim_base::model::{ChatKind, GroupMessage, KeyPackageRecord, SendState, StateChange};
 use gim_base::{MemoryStore, StateReader};
 use gim_common::{now_ms, ClientId, DeviceRef, GroupId, UserId};
 use gim_identity::{HostingEntry, RootKey, UserHostingRecord};
@@ -425,9 +425,8 @@ impl Transport for Hub {
         wait: Duration,
     ) -> TransportResult<EventBatch> {
         self.up()?;
-        self.owner
-            .fetch_events(&self.owner_token(t)?, cursor, wait)
-            .await
+        // A co-host's own events (`keypackages.low`); the owner's for A.
+        self.own.fetch_events(t, cursor, wait).await
     }
 
     async fn pending_welcomes(
@@ -688,6 +687,33 @@ async fn low_on_one_hub_replenishes_that_hub_only() {
     assert_eq!(s.hub_a.uploads().len(), uploads_a);
     assert_eq!(s.ledger(&s.fake_b).len(), 2 * batch + 1);
     assert_eq!(s.ledger(&s.fake_a).len(), batch + 1);
+}
+
+#[tokio::test]
+async fn key_packages_low_event_on_a_listed_hub_replenishes_that_hub_only() {
+    let s = Setup::new().await;
+    let device = s.device();
+    let batch = KEY_PACKAGE_BATCH as usize;
+    // Claims on B leave few packages there: B sends `keypackages.low`.
+    let claimed = batch - 3;
+    for _ in 0..claimed {
+        s.fake_b
+            .service()
+            .claim_key_packages(std::slice::from_ref(&device.user_id));
+    }
+    let uploads_a = s.hub_a.uploads().len();
+    let changes = s.alice.sync_once().await.unwrap();
+    assert!(
+        changes.contains(&StateChange::KeyPackagesLow),
+        "{changes:?}"
+    );
+    assert_eq!(
+        s.fake_b.service().key_package_count(&device),
+        batch - claimed + batch
+    );
+    assert_eq!(s.fake_a.service().key_package_count(&device), batch);
+    assert_eq!(s.hub_a.uploads().len(), uploads_a);
+    assert_eq!(s.ledger(&s.fake_b).len(), 2 * batch + 1);
 }
 
 #[tokio::test]
