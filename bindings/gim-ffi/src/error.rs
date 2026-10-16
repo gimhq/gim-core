@@ -223,5 +223,19 @@ mod tests {
                 ..
             }
         ));
+        let blob = TransportError::RetryLater {
+            status: 503,
+            retry_after_secs: 7,
+            reason: "peer_unavailable".into(),
+        };
+        assert!(matches!(
+            GimError::from(ClientError::Transport(blob)),
+            GimError::RetryLater { status: 503, .. }
+        ));
+        let refused = TransportError::PeerRefused("peer_refused".into());
+        assert!(matches!(
+            GimError::from(ClientError::Transport(refused)),
+            GimError::Server { status: 502, .. }
+        ));
     }
 }

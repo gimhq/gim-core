@@ -269,6 +269,7 @@ rejecting, so a freshly published record is not refused.
 | `FetchLog` | this hub owns `gid`; caller listed for at least one current member, or for a member removed by a Commit with `seq >= from_seq` (so a removed member's hub can fetch the removing Commit) | `UNAUTHORIZED` |
 | `GetDeviceList`, `GetHostingRecord` | none (public signed objects) | - |
 | `NotifyDeviceList` (new) | caller listed for `user_id` | `UNAUTHORIZED` |
+| `FetchBlob` (H5-B1) | `blob_id` names this hub as origin and was uploaded here; caller is a reader hub of the uploader (§5.6) | `UNAUTHORIZED`, `INVALID` (legacy or malformed id), `NOT_FOUND` |
 
 "This hub hosts U" means U is a hosted user (§1.1). A hub never acts on behalf of a user it does
 not host: outbound requests with an acting user are only sent for hosted users, otherwise the
@@ -692,6 +693,71 @@ Resolved in H3-T5:
   `detached_at` older than `GIM_HUB_EVENT_RETENTION_DAYS`, cascading to their roster, messages and
   `commit_membership`; groups owned here (`replica_from_seq = NULL`) are never deleted.
 
+### 5.6 Blobs (H5-B1)
+
+Clients only talk to their own hub; the hub federates blob reads.
+
+- **Ids.** `POST /v2/blobs` returns `blob_id = <origin hub_id>/b_<base64url(16 random bytes)>`,
+  the uploading hub being the origin (same convention as gids; `/` is `%2F` in paths). Ids
+  without `/` (`b_<...>`, uploaded before this change) are legacy single-hub ids: they always mean
+  "this hub" and are never fetched over S2S. Existing rows keep their ids; no data migration.
+- **Files.** Contents live in `$GIM_HUB_DATA_DIR/blobs/`. A legacy id is its own file name; for an
+  origin-qualified id the `/` becomes `_` (hub ids are lowercase base32, so names stay distinct).
+  Only ids that parse (valid `hub_id`, `b_` + 22 base64url characters) are mapped to a file, and
+  only after a database lookup (`blobs` or `remote_blobs`), never from the path segment alone.
+- **Tables.** `blobs` holds blobs uploaded here; `remote_blobs (blob_id, size, fetched_at)`
+  (`0010_remote_blobs.sql`) holds cached copies of other hubs' blobs.
+- **Download** (`GET /v2/blobs/{blob_id}`, authenticated as before):
+  1. legacy id or own origin: `blobs` row → serve (Range as before), else 404;
+  2. foreign origin with a `remote_blobs` row: serve the cached copy (Range as before);
+  3. foreign origin, not cached, federation disabled: 404;
+  4. foreign origin, not cached: fetch from the origin with `FetchBlob`, store, record, serve.
+     Fetches are serialized per blob id (an in-process lock): concurrent downloads of one blob
+     fetch it once, later ones find the cached copy. The fetch runs in its own task, so a client
+     that disconnects does not abort it.
+- **Fetch.** `FetchBlob{blob_id, offset, max_len = 4 MiB}` until `size` bytes arrived; every
+  chunk must report the same `size` and echo its `offset`, and `size` must not exceed the
+  requester's `GIM_HUB_MAX_BLOB_BYTES`, otherwise 502 `peer_refused`. Chunks go to
+  `.<file name>.<random>.tmp`, synced and renamed into place before the `remote_blobs` row is
+  written, so a partial fetch never becomes visible; a failed or interrupted fetch (restart) is
+  simply repeated on the next download. Blobs are immutable, so a refetch is idempotent.
+- **Error mapping** (as §6.3):
+
+  | Origin result | Client response |
+  |---|---|
+  | chunk(s) | 200 / 206 from the cached copy |
+  | `NOT_FOUND` | 404 `not_found` |
+  | `UNAUTHORIZED`, `INVALID`, any other refusal, local policy refusal, inconsistent chunks, blob over the size limit | 502 `peer_refused` |
+  | timeout, transport error, `INTERNAL`, `RATE_LIMITED`, `HELLO_REQUIRED` after retry | 503 `peer_unavailable` with `Retry-After` |
+
+- **Authorization on the origin** (beyond binding and `policy.admit`, which rate-limits
+  `FetchBlob` per caller with `GIM_HUB_FETCH_BLOB_PER_MINUTE`, default 600 requests of up to
+  4 MiB):
+  1. the id is origin-qualified and names this hub, else `UNAUTHORIZED` (another origin) or
+     `INVALID` (legacy or malformed). A hub never serves a cached copy of another hub's blob: no
+     transitive serving;
+  2. a `blobs` row exists (uploaded here), else `NOT_FOUND`;
+  3. the caller is a reader hub of the uploader, else `UNAUTHORIZED`. Reader hubs are
+     `device_list_peer_hubs(uploader)` (the uploader's co-hosts, the owning hubs of the uploader's
+     groups, the hubs of the members of groups owned here that contain the uploader) plus the
+     hubs listed for every member of any group the uploader is in, whoever owns it (replicas
+     included). The extension covers a group owned by a third hub, where the reader's hub is
+     neither the owner nor listed in a group owned by the origin. Cached hosting records are used
+     as they are (no refresh).
+- **Threat model.** Blob ids carry 128 random bits and are unguessable; contents are encrypted
+  end to end (the key travels inside MLS messages). The origin cannot know which message
+  referenced a blob, so the check is relationship-based rather than per message: it ties access
+  to an existing relationship with the uploader and keeps unrelated allowlisted hubs out. A
+  malicious allowlisted hub that learns an id and hosts a user sharing a group with the uploader
+  can fetch the ciphertext only. A malicious origin can only serve wrong bytes for its own ids,
+  which the client's decryption rejects; it cannot overwrite another hub's blobs (file names are
+  derived from the full id, including the origin).
+- **Multi-homing.** Co-hosts of the uploader are reader hubs, so a user's other hubs fetch the
+  same way. While the origin is down, a hub that already cached a copy keeps serving it; a hub
+  that never fetched it answers 503 (multihoming.md Q6).
+- **Retention.** Neither uploaded blobs nor cached copies are pruned today; a cache eviction
+  policy is future work (operations.md).
+
 ## 6. Flows
 
 Notation: `C@H` = client C on its own hub H. Owner of the group = A. All S2S calls go through the
@@ -901,6 +967,9 @@ enforces only the per-caller buckets (`ClaimKeyPackage` 600/min; `GetDeviceList`
 `GetHostingRecord` 600/min together). The 10/min limit per `(caller, requester_user_id,
 target_user_id)` is enforced by the `ClaimKeyPackage` handler (H3-T3), answering `RATE_LIMITED`.
 
+H5-B1: `FetchBlob` has its own bucket, `GIM_HUB_FETCH_BLOB_PER_MINUTE` requests (default 600,
+each at most 4 MiB) per caller.
+
 ## 7. Durable outbound queue
 
 Used for owner → member traffic only (`Deliver`, `DeliverWelcome`) and `NotifyDeviceList`.
@@ -1054,6 +1123,7 @@ numbering lets subtasks work in parallel; each adds one line to the list):
 | `0005_group_federation.sql` | `commit_membership`, `groups.replica_from_seq`, `groups.detached`, `pending_welcomes.message_id` + unique index `(message_id, user_id, device_id) WHERE message_id IS NOT NULL` | H3-T5 |
 | `0008_replica_detached_at.sql` | `groups.detached_at` (§5.4) | H4-CL3 |
 | `0009_message_proposal.sql` | `messages` rebuilt with `kind` `'proposal'`; `pending_proposals` (§5.3) | H3-FX3 |
+| `0010_remote_blobs.sql` | `remote_blobs` (§5.6) | H5-B1 |
 
 Single-hub databases migrate in place; owned groups have `replica_from_seq = NULL`. Existing
 Commits get no `commit_membership` rows; a `FetchLog` over them returns Commits without membership
@@ -1227,6 +1297,7 @@ All additive; they need L1 / gim-core sign-off before implementation of the affe
 | `Message.kind` | new value `proposal` for Proposals sequenced through `POST /v2/groups/{gid}/commits` (§5.3, H3-FX3) |
 | New event `hosting_record.expiring` | `{user_id, expires_at, seq}` to the user's active devices when < 48 h remain |
 | Error codes | `invalid_hosting_record` (400), `stale_hosting_record` (409), `hosting_record_required` (403), `peer_refused` (502), `peer_unavailable` (503, with `Retry-After` seconds) |
+| `POST /v2/blobs`, `GET /v2/blobs/{blob_id}` (H5-B1) | `blob_id` is `<origin hub_id>/b_<random>` (legacy `b_<random>` stays valid); `GET` of a foreign blob fetches it from the origin and may return 502 `peer_refused`, 503 `peer_unavailable` (§5.6) |
 
 gim-core consequences (for the core L2): publish a hosting record at onboarding and renew it
 (§4.1); treat `unavailable` claims as retryable; treat 502/503 as retryable with the same
@@ -1254,6 +1325,7 @@ invalid value stops the hub naming the variable). All are ignored unless `GIM_HU
 | `GIM_HUB_OUTBOX_MAX_ENTRIES_PER_PEER` | `100000` | Backlog cap, entries |
 | `GIM_HUB_OUTBOX_MAX_BYTES_PER_PEER` | `1073741824` | Backlog cap, bytes |
 | `GIM_HUB_OUTBOX_BACKOFF_MAX_SECONDS` | `300` | Maximum retry backoff per peer |
+| `GIM_HUB_FETCH_BLOB_PER_MINUTE` | `600` | `FetchBlob` requests served per caller hub and minute (§5.6, minimum 1) |
 
 Data directory additions: `runtime_key`, `runtime_cert`, `allowlist` (default location). The
 Docker image exposes 4001/tcp and 4001/udp. The `hub_id` and the PeerId are logged at startup;
@@ -1369,6 +1441,7 @@ Resolved in H4-CL2:
 | T11 | PSK | `compose.psk.yaml`: T2 between A and B over TCP; hub-x without PSK | T2 passes; X cannot connect (pnet handshake fails); startup with a QUIC listen address and a PSK fails |
 | T12 | Runtime cert renewal / rotation | restart hub-a with a new runtime key | B re-binds via `Hello`; gid and hosting records unchanged; messaging continues |
 | T13 | Leave by Proposal | frank@B sends a self-Remove Proposal for a group owned by A; grace@C commits it by reference | Proposal forwarded and sequenced by A (epoch unchanged, `kind = proposal` on every hub); C resolves the reference on its replica; frank removed on every hub with `group.member_removed` |
+| T14 | Cross-hub blobs (H5-B1) | alice@A uploads two attachments of the DM with bob@B (one larger than a 4 MiB chunk); bob downloads the first on B; stop hub-a; bob downloads both; start hub-a | B fetches from A and serves the bytes (Range too); while A is down the cached blob is served and the other one is 503 `peer_unavailable` with `Retry-After`; after the restart it is served |
 
 ## 12. Implementation breakdown
 

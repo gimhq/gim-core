@@ -185,7 +185,7 @@ implementations fast and thread-safe.
 | `markRead(chatId, upToMessageId)` | | Also sends a read receipt. M1 marks the whole chat read; `upToMessageId` is only validated. |
 | `setTyping(chatId, active)` | | Call with `true` on each keystroke (sent at most every 3 s) and `false` when typing stops. |
 | `stopTyping(chatId)` | | Same as `setTyping(chatId, false)`: call when the input is cleared, the message sent or the chat is left. Does nothing unless typing was reported. |
-| `fetchMedia(chatId, messageId, destPath)` | file path | Downloads and decrypts the attachment. `NotFound` if the hub no longer has the blob; `RetryLater(503, …)` while the hub storing it is unavailable. |
+| `fetchMedia(chatId, messageId, destPath)` | file path | Downloads and decrypts the attachment. A blob uploaded on another hub is fetched by the own hub from that hub on first access. `NotFound` if the blob is unknown (or federation is disabled on the own hub); `RetryLater(503, …)` while the uploader's hub stays unreachable and `Server(502, …)` while it keeps refusing, after up to 3 attempts within the call. |
 | `fetchThumbnail(chatId, messageId, destPath)` | file path? | `null`/`nil` if the media has no thumbnail. |
 | `chatList(listener)` | `TaskHandle` | |
 | `timeline(chatId)` | `Timeline` | |

@@ -888,8 +888,7 @@ async fn download_blob_range_ignored_by_server() {
 }
 
 /// Origin-prefixed blob ids (`<hub_id>/b_<base64url>`) are opaque: the
-/// `/` reaches the hub as `%2F`, not as a path separator. A peer hub outage
-/// is retryable after `Retry-After`; a missing blob is not found.
+/// `/` reaches the hub as `%2F`, not as a path separator.
 #[tokio::test]
 async fn download_blob_with_an_origin_prefixed_id() {
     let server = MockServer::start().await;
@@ -900,13 +899,97 @@ async fn download_blob_with_an_origin_prefixed_id() {
         ResponseTemplate::new(200).set_body_bytes(vec![7u8, 8]),
     )
     .await;
+    let http = transport(&server);
+    assert_eq!(
+        http.download_blob(&token(), "hxxxx/b_abc-_", None).await,
+        Ok(vec![7, 8])
+    );
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[0].url.path(), "/v2/blobs/hxxxx%2Fb_abc-_");
+}
+
+/// Mounts `response` for the first `times` downloads of `route`, then 200.
+async fn blob_fails(server: &MockServer, route: &str, response: ResponseTemplate, times: u64) {
+    Mock::given(method("GET"))
+        .and(path(route))
+        .respond_with(response)
+        .up_to_n_times(times)
+        .with_priority(1)
+        .mount(server)
+        .await;
+    mount(
+        server,
+        "GET",
+        route,
+        ResponseTemplate::new(206).set_body_bytes(vec![1u8, 2]),
+    )
+    .await;
+}
+
+/// The own hub fetches a foreign blob from its origin: 503
+/// `peer_unavailable` is retried after `Retry-After`, 502 `peer_refused`
+/// after a short backoff, both at most 3 attempts.
+#[tokio::test]
+async fn download_blob_retries_peer_failures() {
+    let server = MockServer::start().await;
+    blob_fails(
+        &server,
+        "/v2/blobs/hpeer%2Fb_slow",
+        throttled(503, "peer_unavailable", "1"),
+        1,
+    )
+    .await;
+    blob_fails(
+        &server,
+        "/v2/blobs/hpeer%2Fb_moved",
+        ResponseTemplate::new(502).set_body_json(error_body("peer_refused")),
+        2,
+    )
+    .await;
+    let http = transport(&server);
+
+    let started = Instant::now();
+    assert_eq!(
+        http.download_blob(&token(), "hpeer/b_slow", Some(0..2))
+            .await,
+        Ok(vec![1, 2])
+    );
+    assert!(started.elapsed() >= Duration::from_secs(1));
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    // The retry asks for the same range.
+    assert_eq!(requests[1].headers.get("range").unwrap(), "bytes=0-1");
+
+    assert_eq!(
+        http.download_blob(&token(), "hpeer/b_moved", Some(0..2))
+            .await,
+        Ok(vec![1, 2])
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 5);
+}
+
+#[tokio::test]
+async fn download_blob_peer_failures_past_the_budget() {
+    let server = MockServer::start().await;
     mount(
         &server,
         "GET",
         "/v2/blobs/hpeer%2Fb_down",
-        ResponseTemplate::new(503)
-            .insert_header("retry-after", "7")
-            .set_body_json(error_body("peer_unavailable")),
+        throttled(503, "peer_unavailable", "1"),
+    )
+    .await;
+    mount(
+        &server,
+        "GET",
+        "/v2/blobs/hpeer%2Fb_away",
+        throttled(503, "peer_unavailable", "61"),
+    )
+    .await;
+    mount(
+        &server,
+        "GET",
+        "/v2/blobs/hpeer%2Fb_refused",
+        ResponseTemplate::new(502).set_body_json(error_body("peer_refused")),
     )
     .await;
     mount(
@@ -917,30 +1000,44 @@ async fn download_blob_with_an_origin_prefixed_id() {
     )
     .await;
     let http = transport(&server);
-    assert_eq!(
-        http.download_blob(&token(), "hxxxx/b_abc-_", None).await,
-        Ok(vec![7, 8])
-    );
-    let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests[0].url.path(), "/v2/blobs/hxxxx%2Fb_abc-_");
+    let count = || async { server.received_requests().await.unwrap().len() };
 
-    let err = http
-        .download_blob(&token(), "hpeer/b_down", None)
-        .await
-        .unwrap_err();
+    let started = Instant::now();
     assert_eq!(
-        err,
-        TransportError::PeerUnavailable {
-            retry_after_secs: Some(7),
+        http.download_blob(&token(), "hpeer/b_down", None).await,
+        Err(TransportError::RetryLater {
+            status: 503,
+            retry_after_secs: 1,
             reason: "peer_unavailable: nope".into(),
-        }
+        })
     );
-    assert_eq!(err.retry_after(), Some(Duration::from_secs(7)));
+    assert!(started.elapsed() >= Duration::from_secs(2));
+    assert_eq!(count().await, 3);
+
+    // A delay beyond the total budget is not waited for.
+    assert_eq!(
+        http.download_blob(&token(), "hpeer/b_away", None).await,
+        Err(TransportError::RetryLater {
+            status: 503,
+            retry_after_secs: 61,
+            reason: "peer_unavailable: nope".into(),
+        })
+    );
+    assert_eq!(count().await, 4);
+
+    assert_eq!(
+        http.download_blob(&token(), "hpeer/b_refused", None).await,
+        Err(TransportError::PeerRefused("peer_refused: nope".into()))
+    );
+    assert_eq!(count().await, 7);
+
+    // Unknown blob, or federation disabled: not retried.
     assert_eq!(
         http.download_blob(&token(), "hxxxx/b_gone", Some(0..4))
             .await,
         Err(TransportError::NotFound("not_found: nope".into()))
     );
+    assert_eq!(count().await, 8);
 }
 
 #[tokio::test]

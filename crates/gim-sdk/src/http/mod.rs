@@ -35,8 +35,14 @@ pub use reqwest::Url;
 pub const MAX_WAIT: Duration = Duration::from_secs(30);
 /// Retries of a public read answered 429 or 503 with `Retry-After`.
 const PUBLIC_READ_RETRIES: u32 = 2;
-/// Longest total `Retry-After` wait of one public read.
+/// Longest total `Retry-After` wait of one public read or blob download.
 const PUBLIC_READ_MAX_DELAY: Duration = Duration::from_secs(60);
+/// Attempts of a blob download answered 502 `peer_refused` or 503
+/// `peer_unavailable`.
+const BLOB_READ_ATTEMPTS: u32 = 3;
+/// Delay after a blob download's first 502 `peer_refused` (or 503 without
+/// `Retry-After`); doubles.
+const BLOB_READ_BACKOFF: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HttpConfig {
@@ -202,6 +208,58 @@ impl HttpTransport {
             tokio::time::sleep(delay).await;
             retries += 1;
             waited += delay;
+        }
+    }
+
+    /// GET of a blob. The own hub fetches a foreign blob from its origin
+    /// hub: 503 `peer_unavailable` is retried after its `Retry-After`, 502
+    /// `peer_refused` (transient right after a hosting record change) after
+    /// a doubling backoff, at most [`BLOB_READ_ATTEMPTS`] attempts and
+    /// [`PUBLIC_READ_MAX_DELAY`] in total. Then 503 fails with
+    /// [`TransportError::RetryLater`], 502 with
+    /// [`TransportError::PeerRefused`].
+    async fn blob_response(
+        &self,
+        token: &AccessToken,
+        path: &str,
+        range: Option<&Range<u64>>,
+    ) -> TransportResult<Response> {
+        let mut attempt = 1;
+        let mut backoff = BLOB_READ_BACKOFF;
+        let mut waited = Duration::ZERO;
+        loop {
+            let mut request = self.request(Method::GET, path, Some(token));
+            if let Some(range) = range {
+                request = request.header(RANGE, format!("bytes={}-{}", range.start, range.end - 1));
+            }
+            let response = Self::send(request).await?;
+            let status = response.status();
+            if status.is_success() {
+                return Ok(response);
+            }
+            let retry_after = retry_after(&response);
+            let body = response.bytes().await.unwrap_or_default();
+            let err = error::from_status(status, retry_after, &body);
+            let delay = match &err {
+                TransportError::PeerUnavailable { .. } => {
+                    retry_after.map_or(backoff, Duration::from_secs)
+                }
+                TransportError::PeerRefused(_) => backoff,
+                _ => return Err(err),
+            };
+            if attempt == BLOB_READ_ATTEMPTS || waited + delay > PUBLIC_READ_MAX_DELAY {
+                return Err(match (err, retry_after) {
+                    (TransportError::PeerUnavailable { .. }, Some(_)) => {
+                        error::retry_later(status, delay, &body)
+                    }
+                    (err, _) => err,
+                });
+            }
+            tracing::debug!(%status, ?delay, path, "blob download failed at the origin; retrying");
+            tokio::time::sleep(delay).await;
+            attempt += 1;
+            waited += delay;
+            backoff *= 2;
         }
     }
 
@@ -701,14 +759,12 @@ impl Transport for HttpTransport {
         blob_id: &str,
         range: Option<Range<u64>>,
     ) -> TransportResult<Vec<u8>> {
-        let mut request = self.request(Method::GET, &paths::blob(blob_id), Some(token));
-        if let Some(range) = &range {
-            if range.is_empty() {
-                return Ok(Vec::new());
-            }
-            request = request.header(RANGE, format!("bytes={}-{}", range.start, range.end - 1));
+        if range.as_ref().is_some_and(Range::is_empty) {
+            return Ok(Vec::new());
         }
-        let response = Self::send_ok(request).await?;
+        let response = self
+            .blob_response(token, &paths::blob(blob_id), range.as_ref())
+            .await?;
         let partial = response.status() == StatusCode::PARTIAL_CONTENT;
         let body = response.bytes().await.map_err(error::from_reqwest)?;
         match range {

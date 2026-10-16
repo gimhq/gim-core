@@ -141,7 +141,7 @@
           "blobs"
         ],
         "summary": "Upload an encrypted blob",
-        "description": "Stores the request body verbatim. The client encrypts before upload and shares the blob ID and key inside MLS messages. Bodies larger than the hub limit (default 104857600 bytes) fail with 413.",
+        "description": "Stores the request body verbatim. The client encrypts before upload and shares the blob ID and key inside MLS messages. Bodies larger than the hub limit (default 104857600 bytes) fail with 413. The blob ID is `<hub_id>/b_<random>`, naming this hub as the origin; percent-encode the `/` as `%2F` in paths.",
         "operationId": "upload_blob",
         "requestBody": {
           "description": "Raw encrypted bytes",
@@ -201,18 +201,18 @@
           "blobs"
         ],
         "summary": "Download an encrypted blob",
-        "description": "Supports a single byte range (`Range: bytes=a-b`, `bytes=a-`, or `bytes=-n`).",
+        "description": "Supports a single byte range (`Range: bytes=a-b`, `bytes=a-`, or `bytes=-n`). A blob uploaded on another hub (its ID names that hub as the origin) is fetched from the origin on first access, cached, and then served like a local blob. Legacy IDs without `/` name this hub.",
         "operationId": "download_blob",
         "parameters": [
           {
             "name": "blob_id",
             "in": "path",
-            "description": "Opaque blob ID",
+            "description": "Blob ID `<origin hub_id>/b_<random>`, `/` percent-encoded as `%2F`; legacy IDs are `b_<random>`",
             "required": true,
             "schema": {
               "type": "string"
             },
-            "example": "b_Hk4dN7sL2pX9cV0mB5qT1g"
+            "example": "hciqgtrdldzdkwq3c7fkmzvld7djgm3waetwtedhujnndujzulpgk6vq%2Fb_Hk4dN7sL2pX9cV0mB5qT1g"
           },
           {
             "name": "Range",
@@ -275,6 +275,26 @@
           },
           "416": {
             "description": "Range not satisfiable (`range_not_satisfiable`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The origin hub refused to serve the blob (`peer_refused`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The origin hub is unreachable (`peer_unavailable`, with `Retry-After`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2395,8 +2415,8 @@
         "properties": {
           "blob_id": {
             "type": "string",
-            "description": "Opaque blob ID.",
-            "example": "b_Hk4dN7sL2pX9cV0mB5qT1g"
+            "description": "Blob ID `<origin hub_id>/b_<random>`; percent-encode `/` in paths.",
+            "example": "hciqgtrdldzdkwq3c7fkmzvld7djgm3waetwtedhujnndujzulpgk6vq/b_Hk4dN7sL2pX9cV0mB5qT1g"
           },
           "size": {
             "type": "integer",
