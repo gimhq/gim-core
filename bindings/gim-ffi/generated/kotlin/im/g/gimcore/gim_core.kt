@@ -858,6 +858,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_chat_members(
     ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_chat_state(
+    ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_claim_handle(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_confirm_approval(
@@ -968,6 +970,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_gim_core_checksum_method_timeline_chat_id(
     ): Int
+    external fun uniffi_gim_core_checksum_method_timeline_chat_state(
+    ): Int
     external fun uniffi_gim_core_checksum_method_timeline_paginate_backwards(
     ): Int
     external fun uniffi_gim_core_checksum_method_timelinelistener_on_update(
@@ -1027,6 +1031,8 @@ internal object UniffiLib {
     external fun uniffi_gim_core_fn_method_gimclient_chat_list(`ptr`: Long,`listener`: Long,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_chat_members(`ptr`: Long,`chatId`: RustBuffer.ByValue,
+    ): Long
+    external fun uniffi_gim_core_fn_method_gimclient_chat_state(`ptr`: Long,`chatId`: RustBuffer.ByValue,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_claim_handle(`ptr`: Long,`handle`: RustBuffer.ByValue,
     ): Long
@@ -1171,6 +1177,8 @@ internal object UniffiLib {
     external fun uniffi_gim_core_fn_method_timeline_add_listener(`ptr`: Long,`listener`: Long,
     ): Long
     external fun uniffi_gim_core_fn_method_timeline_chat_id(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_gim_core_fn_method_timeline_chat_state(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_gim_core_fn_method_timeline_paginate_backwards(`ptr`: Long,`count`: Short,
     ): Long
@@ -1337,6 +1345,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_gim_core_checksum_method_gimclient_chat_members() and 0xFFFF) != 23360) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_chat_state() and 0xFFFF) != 39217) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_claim_handle() and 0xFFFF) != 25957) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1376,7 +1387,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_gim_core_checksum_method_gimclient_find_user() and 0xFFFF) != 25186) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_gim_core_checksum_method_gimclient_leave_chat() and 0xFFFF) != 31409) {
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_leave_chat() and 0xFFFF) != 60569) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_local_state_reset() and 0xFFFF) != 57050) {
@@ -1500,6 +1511,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_timeline_chat_id() and 0xFFFF) != 55675) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_gim_core_checksum_method_timeline_chat_state() and 0xFFFF) != 202) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_timeline_paginate_backwards() and 0xFFFF) != 49934) {
@@ -2719,6 +2733,12 @@ public interface GimClientInterface {
     suspend fun `chatMembers`(`chatId`: kotlin.String): List<UserProfile>
     
     /**
+     * Where this device stands in the chat, from local state (no network
+     * call, so it is available right after a restart).
+     */
+    suspend fun `chatState`(`chatId`: kotlin.String): ChatState
+    
+    /**
      * Claims `handle` in the hub directory, so others find the user with
      * `find_user`; `Server(409)` if it is taken.
      */
@@ -2791,6 +2811,11 @@ public interface GimClientInterface {
      */
     suspend fun `findUser`(`handle`: kotlin.String): UserProfile?
     
+    /**
+     * Starts leaving the chat; returns once the hub accepted the request,
+     * with the chat `ChatState::Leaving` (see `ChatState`). Calling it again
+     * while leaving re-sends the request. `ChatNotActive` once left.
+     */
     suspend fun `leaveChat`(`chatId`: kotlin.String)
     
     /**
@@ -3201,6 +3226,32 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
 
     
     /**
+     * Where this device stands in the chat, from local state (no network
+     * call, so it is available right after a restart).
+     */
+    @Throws(GimException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `chatState`(`chatId`: kotlin.String) : ChatState {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_gim_core_fn_method_gimclient_chat_state(
+                uniffiHandle,
+                
+        FfiConverterString.lower(`chatId`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_gim_core_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_gim_core_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeChatState.lift(it) },
+        // Error FFI converter
+        GimException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * Claims `handle` in the hub directory, so others find the user with
      * `find_user`; `Server(409)` if it is taken.
      */
@@ -3546,6 +3597,11 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
     }
 
     
+    /**
+     * Starts leaving the chat; returns once the hub accepted the request,
+     * with the chat `ChatState::Leaving` (see `ChatState`). Calling it again
+     * while leaving re-sends the request. `ChatNotActive` once left.
+     */
     @Throws(GimException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
     override suspend fun `leaveChat`(`chatId`: kotlin.String) {
@@ -6080,6 +6136,12 @@ public interface TimelineInterface {
     fun `chatId`(): kotlin.String
     
     /**
+     * The chat's current state, from local state; `None` while the chat
+     * is not known locally.
+     */
+    fun `chatState`(): ChatState?
+    
+    /**
      * Loads up to `count` older items into the timeline (delivered through
      * the listeners). Returns whether more history exists.
      */
@@ -6222,6 +6284,23 @@ open class Timeline: Disposable, AutoCloseable, TimelineInterface
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_gim_core_fn_method_timeline_chat_id(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * The chat's current state, from local state; `None` while the chat
+     * is not known locally.
+     */override fun `chatState`(): ChatState? {
+            return FfiConverterOptionalTypeChatState.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_gim_core_fn_method_timeline_chat_state(
         it,
         _status)
 }
@@ -6954,6 +7033,12 @@ data class ChatSummary (
     var `updatedAtMs`: kotlin.ULong
     , 
     var `memberCount`: kotlin.UInt
+    , 
+    /**
+     * Where this device stands in the chat; read from local state, so it is
+     * right from the first callback after a restart.
+     */
+    var `state`: ChatState
     
 ){
     
@@ -6978,6 +7063,7 @@ public object FfiConverterTypeChatSummary: FfiConverterRustBuffer<ChatSummary> {
             FfiConverterUInt.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterUInt.read(buf),
+            FfiConverterTypeChatState.read(buf),
         )
     }
 
@@ -6989,7 +7075,8 @@ public object FfiConverterTypeChatSummary: FfiConverterRustBuffer<ChatSummary> {
             FfiConverterOptionalTypeMessagePreview.allocationSize(value.`lastMessage`) +
             FfiConverterUInt.allocationSize(value.`unreadCount`) +
             FfiConverterULong.allocationSize(value.`updatedAtMs`) +
-            FfiConverterUInt.allocationSize(value.`memberCount`)
+            FfiConverterUInt.allocationSize(value.`memberCount`) +
+            FfiConverterTypeChatState.allocationSize(value.`state`)
     )
 
     override fun write(value: ChatSummary, buf: ByteBuffer) {
@@ -7001,6 +7088,7 @@ public object FfiConverterTypeChatSummary: FfiConverterRustBuffer<ChatSummary> {
             FfiConverterUInt.write(value.`unreadCount`, buf)
             FfiConverterULong.write(value.`updatedAtMs`, buf)
             FfiConverterUInt.write(value.`memberCount`, buf)
+            FfiConverterTypeChatState.write(value.`state`, buf)
     }
 }
 
@@ -7801,6 +7889,59 @@ public object FfiConverterTypeChatListDiff : FfiConverterRustBuffer<ChatListDiff
 
 
 
+/**
+ * Where this device stands in a chat. Changes reach the chat list as a
+ * `Set` diff of the row: `Active -> Leaving` when `leave_chat` starts,
+ * `Leaving -> Left` once another member commits the removal, and
+ * `Leaving -> Active` if the hub refuses the leave for good.
+ */
+
+enum class ChatState {
+    
+    /**
+     * A member; messages can be sent.
+     */
+    ACTIVE,
+    /**
+     * Leaving was asked for: still a member until another member commits
+     * the removal, but nothing can be sent (`GimError::ChatNotActive`).
+     * gim-core keeps and re-sends the leave across restarts.
+     */
+    LEAVING,
+    /**
+     * Removed (after leaving, by another member or by the hub); history is
+     * kept, nothing can be sent.
+     */
+    LEFT;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeChatState: FfiConverterRustBuffer<ChatState> {
+    override fun read(buf: ByteBuffer) = try {
+        ChatState.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: ChatState) = 4UL
+
+    override fun write(value: ChatState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
 
 enum class ConnectionState {
     
@@ -7974,6 +8115,20 @@ sealed class GimException: kotlin.Exception() {
             get() = "reason=${ `reason` }"
     }
     
+    /**
+     * The call sends to (or changes) a chat this device is leaving or has
+     * left. `state` is `Leaving` or `Left`; see `ChatState`.
+     */
+    class ChatNotActive(
+        
+        val `chatId`: kotlin.String, 
+        
+        val `state`: ChatState
+        ) : GimException() {
+        override val message
+            get() = "chatId=${ `chatId` }, state=${ `state` }"
+    }
+    
 
     
 
@@ -8022,6 +8177,10 @@ public object FfiConverterTypeGimError : FfiConverterRustBuffer<GimException> {
             10 -> GimException.NotImplemented()
             11 -> GimException.Internal(
                 FfiConverterString.read(buf),
+                )
+            12 -> GimException.ChatNotActive(
+                FfiConverterString.read(buf),
+                FfiConverterTypeChatState.read(buf),
                 )
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
@@ -8084,6 +8243,12 @@ public object FfiConverterTypeGimError : FfiConverterRustBuffer<GimException> {
                 4UL
                 + FfiConverterString.allocationSize(value.`reason`)
             )
+            is GimException.ChatNotActive -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`chatId`)
+                + FfiConverterTypeChatState.allocationSize(value.`state`)
+            )
         }
     }
 
@@ -8142,6 +8307,12 @@ public object FfiConverterTypeGimError : FfiConverterRustBuffer<GimException> {
             is GimException.Internal -> {
                 buf.putInt(11)
                 FfiConverterString.write(value.`reason`, buf)
+                Unit
+            }
+            is GimException.ChatNotActive -> {
+                buf.putInt(12)
+                FfiConverterString.write(value.`chatId`, buf)
+                FfiConverterTypeChatState.write(value.`state`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -8787,7 +8958,17 @@ sealed class TimelineItem {
     data class MembershipChange(
         val `userName`: kotlin.String, 
         val `change`: im.g.gimcore.MembershipChangeKind, 
-        val `atMs`: kotlin.ULong) : TimelineItem()
+        val `atMs`: kotlin.ULong, 
+        /**
+         * The user who joined or left; the signed-in user's own `Left` has
+         * their user id here.
+         */
+        val `userId`: kotlin.String, 
+        /**
+         * The user who caused the change: the adder or remover, the user
+         * themselves for `Left`. `None` if unknown.
+         */
+        val `actorUserId`: kotlin.String?) : TimelineItem()
         
     {
         
@@ -8821,6 +9002,8 @@ public object FfiConverterTypeTimelineItem : FfiConverterRustBuffer<TimelineItem
                 FfiConverterString.read(buf),
                 FfiConverterTypeMembershipChangeKind.read(buf),
                 FfiConverterULong.read(buf),
+                FfiConverterString.read(buf),
+                FfiConverterOptionalString.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
@@ -8848,6 +9031,8 @@ public object FfiConverterTypeTimelineItem : FfiConverterRustBuffer<TimelineItem
                 + FfiConverterString.allocationSize(value.`userName`)
                 + FfiConverterTypeMembershipChangeKind.allocationSize(value.`change`)
                 + FfiConverterULong.allocationSize(value.`atMs`)
+                + FfiConverterString.allocationSize(value.`userId`)
+                + FfiConverterOptionalString.allocationSize(value.`actorUserId`)
             )
         }
     }
@@ -8869,6 +9054,8 @@ public object FfiConverterTypeTimelineItem : FfiConverterRustBuffer<TimelineItem
                 FfiConverterString.write(value.`userName`, buf)
                 FfiConverterTypeMembershipChangeKind.write(value.`change`, buf)
                 FfiConverterULong.write(value.`atMs`, buf)
+                FfiConverterString.write(value.`userId`, buf)
+                FfiConverterOptionalString.write(value.`actorUserId`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -9161,6 +9348,38 @@ public object FfiConverterOptionalTypeUserProfile: FfiConverterRustBuffer<UserPr
         } else {
             buf.put(1)
             FfiConverterTypeUserProfile.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeChatState: FfiConverterRustBuffer<ChatState?> {
+    override fun read(buf: ByteBuffer): ChatState? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeChatState.read(buf)
+    }
+
+    override fun allocationSize(value: ChatState?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeChatState.allocationSize(value)
+        }
+    }
+
+    override fun write(value: ChatState?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeChatState.write(value, buf)
         }
     }
 }
