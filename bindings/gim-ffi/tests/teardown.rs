@@ -54,7 +54,11 @@ impl Probe {
     async fn finish(&self) {
         self.finished.store(true, Ordering::SeqCst);
         tokio::time::sleep(SLOW + Duration::from_millis(100)).await;
-        assert_eq!(self.late.load(Ordering::SeqCst), 0, "callback after teardown");
+        assert_eq!(
+            self.late.load(Ordering::SeqCst),
+            0,
+            "callback after teardown"
+        );
     }
 }
 
