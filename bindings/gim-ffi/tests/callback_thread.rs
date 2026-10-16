@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use gim_core::{
     create_client_with_fake_transport, ChatListDiff, ChatListListener, ClientConfig,
-    ConnectionState, ConnectionStateListener, GimClient, GimError, LocalTimeZone, PlatformHooks,
-    TimelineDiff, TimelineListener, TypingListener,
+    ConnectionState, ConnectionStateListener, GimClient, GimError, HubInfo, HubListListener,
+    LocalTimeZone, PlatformHooks, TimelineDiff, TimelineListener, TypingListener,
 };
 use gim_sdk::testing::FakeTransport;
 use tempfile::TempDir;
@@ -128,6 +128,12 @@ impl TypingListener for Platform {
     }
 }
 
+impl HubListListener for Platform {
+    fn on_update(&self, _hubs: Vec<HubInfo>) {
+        self.0.called("HubListListener");
+    }
+}
+
 impl LocalTimeZone for Platform {
     fn utc_offset_secs(&self, _at_ms: i64) -> i32 {
         self.0.called("LocalTimeZone");
@@ -168,6 +174,7 @@ async fn every_callback_runs_on_the_callback_thread() {
     client.start_sync().await.unwrap();
     let chats = client.chat_list(platform()).await.unwrap();
     let states = client.connection_state(platform()).await.unwrap();
+    let hubs = client.hub_list(platform()).await.unwrap();
     let chat = client
         .create_group_chat("Crew".to_string(), Vec::new())
         .await
@@ -183,13 +190,13 @@ async fn every_callback_runs_on_the_callback_thread() {
     client.set_local_time_zone(Some(platform()));
     tokio::time::sleep(Duration::from_millis(200)).await;
     client.sign_out().await.unwrap();
-    for handle in [chats, states, typing, items] {
+    for handle in [chats, states, hubs, typing, items] {
         assert!(handle.is_finished());
     }
     drop(timeline);
     drop(client);
-    // Hooks, two zones and four listeners.
-    check.assert_clean(7).await;
+    // Hooks, two zones and five listeners.
+    check.assert_clean(8).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

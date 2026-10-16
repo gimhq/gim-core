@@ -177,6 +177,64 @@ impl<S: StateStore + 'static> Client<S> {
         }
     }
 
+    /// Runs a read (DeviceList, user directory, hosting record) on the home
+    /// hub and, while the hub asked cannot be reached (network, 5xx), on
+    /// the next verified hub in registry order. Definite answers, also
+    /// rejections, never fall back.
+    pub(crate) async fn read_routed<T, F, Fut>(
+        &self,
+        call: F,
+    ) -> std::result::Result<T, TransportError>
+    where
+        F: Fn(Arc<dyn Transport>, AccessToken) -> Fut,
+        Fut: Future<Output = std::result::Result<T, TransportError>>,
+    {
+        let mut hubs = self.submission_hubs().await;
+        hubs.retain(|h| !h.home);
+        hubs.insert(0, self.home_target());
+        let mut failed = None;
+        for hub in hubs {
+            match self.authed_on(&hub, &call).await {
+                Err(err) if hub_unreachable(&err) => {
+                    tracing::debug!(hub_id = %hub.hub_id, error = %err, "hub unreachable; reading from the next hub");
+                    failed = Some(err);
+                }
+                read => return read,
+            }
+        }
+        Err(failed.unwrap_or_else(|| TransportError::Network("no hub to read from".into())))
+    }
+
+    /// [`Client::read_routed`] for public reads, which need no session.
+    pub(crate) async fn public_read_routed<T, F, Fut>(
+        &self,
+        call: F,
+    ) -> std::result::Result<T, TransportError>
+    where
+        F: Fn(Arc<dyn Transport>) -> Fut,
+        Fut: Future<Output = std::result::Result<T, TransportError>>,
+    {
+        let others = self.verified_hubs();
+        let mut transports = vec![("home".to_string(), self.inner.transport.clone())];
+        for hub in self.submission_hubs().await {
+            if let Some((hub_id, _, transport)) = others.iter().find(|(id, _, _)| *id == hub.hub_id)
+            {
+                transports.push((hub_id.clone(), transport.clone()));
+            }
+        }
+        let mut failed = None;
+        for (hub_id, transport) in transports {
+            match call(transport).await {
+                Err(err) if hub_unreachable(&err) => {
+                    tracing::debug!(%hub_id, error = %err, "hub unreachable; reading from the next hub");
+                    failed = Some(err);
+                }
+                read => return read,
+            }
+        }
+        Err(failed.unwrap_or_else(|| TransportError::Network("no hub to read from".into())))
+    }
+
     /// Submits a Commit or Proposal through the hubs, `first` (the hub of
     /// an Add's claim) or else the primary first; see the module docs.
     pub(crate) async fn submit_routed(

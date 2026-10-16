@@ -19,12 +19,14 @@ use tokio::task::JoinHandle;
 use url::Url;
 
 use crate::callbacks::{on_callback_thread, Callbacks, Foreign, DRAIN_TIMEOUT};
+use crate::convert::hub_infos;
 use crate::error::parse_id;
 use crate::hooks::HookSecrets;
 use crate::timeline::PlatformTimeZone;
 use crate::{
-    ChatListDiff, ChatListListener, ChatState, ConnectionState, DeviceInfo, GimError, LinkSession,
-    LocalTimeZone, PendingApproval, PlatformHooks, Session, TaskHandle, Timeline, UserProfile,
+    ChatListDiff, ChatListListener, ChatState, ConnectionState, DeviceInfo, GimError, HubInfo,
+    LinkSession, LocalTimeZone, PendingApproval, PlatformHooks, Session, TaskHandle, Timeline,
+    UserProfile,
 };
 
 type Sdk = Client<SqliteStore>;
@@ -48,6 +50,15 @@ pub trait ConnectionStateListener: Send + Sync {
 #[uniffi::export(with_foreign)]
 pub trait TypingListener: Send + Sync {
     fn on_update(&self, user_ids: Vec<String>);
+}
+
+/// Receives the user's hubs (see `GimClient::hubs`) whenever they may have
+/// changed: added, removed, verified, reprioritized, or a URL shared by
+/// another own device. The first callback carries the current list. Called
+/// on gim-core's callback thread.
+#[uniffi::export(with_foreign)]
+pub trait HubListListener: Send + Sync {
+    fn on_update(&self, hubs: Vec<HubInfo>);
 }
 
 /// Creates the client. Opens (or creates) local state under
@@ -80,8 +91,13 @@ pub async fn create_client_with_fake_transport(
 }
 
 fn parse_server_url(value: &str) -> Result<Url, GimError> {
+    parse_hub_url("server_url", value)
+}
+
+/// A hub's client API base URL: `http://` or `https://` with a host.
+fn parse_hub_url(what: &str, value: &str) -> Result<Url, GimError> {
     let invalid = |reason: String| GimError::InvalidInput {
-        reason: format!("server_url: {reason}"),
+        reason: format!("{what}: {reason}"),
     };
     let url = Url::parse(value).map_err(|e| invalid(e.to_string()))?;
     if !matches!(url.scheme(), "http" | "https") {
@@ -554,6 +570,54 @@ impl GimClient {
     pub async fn revoke_device(&self, device_id: String) -> Result<(), GimError> {
         let device_id: DeviceId = parse_id("device_id", device_id)?;
         Ok(self.sdk()?.revoke_device(&device_id).await?)
+    }
+
+    /// The hubs of the user's hosting record known to this device, primary
+    /// first (by priority, then hub id), including removed ones. With a
+    /// single hub: the home hub.
+    pub async fn hubs(&self) -> Result<Vec<HubInfo>, GimError> {
+        Ok(hub_infos(self.sdk()?.hubs().await?))
+    }
+
+    /// Adds the hub at `url` (entered by the user) to the hosting record:
+    /// checks that it is a gim hub, signs in there, lists it last
+    /// (least preferred), uploads this device's KeyPackages there, follows
+    /// its events and shares its URL with the own other devices. Adding a
+    /// listed hub again only records `url` for it on this device. Returns
+    /// the hub.
+    pub async fn add_hub(&self, url: String) -> Result<HubInfo, GimError> {
+        parse_hub_url("url", &url)?;
+        let sdk = self.sdk()?;
+        let added = sdk.add_hub(&url).await?;
+        hub_infos(sdk.hubs().await?)
+            .into_iter()
+            .find(|h| h.hub_id == added.hub.hub_id)
+            .ok_or_else(|| GimError::Internal {
+                reason: format!("hub {} not listed after adding it", added.hub.hub_id),
+            })
+    }
+
+    /// Removes a hub from the hosting record. `HomeHub` for the hub this
+    /// client was created for, `LastHub` for the only listed hub,
+    /// `HubOwnsGroups` (with the number of chats) unless
+    /// `confirm_owned_groups` if the hub owns chats of this user,
+    /// `HubNotDrained` while something sent through it is not settled.
+    pub async fn remove_hub(
+        &self,
+        hub_id: String,
+        confirm_owned_groups: bool,
+    ) -> Result<(), GimError> {
+        Ok(self
+            .sdk()?
+            .remove_hub(&hub_id, confirm_owned_groups)
+            .await?)
+    }
+
+    /// Makes a listed hub the primary hub (priority 0, the others follow
+    /// in their order). Every hub whose priority changes must be reachable
+    /// from this device (`HubInfo.signed_in`), else `InvalidInput`.
+    pub async fn set_primary_hub(&self, hub_id: String) -> Result<(), GimError> {
+        Ok(self.sdk()?.set_primary_hub(&hub_id).await?)
     }
 
     /// The signed-in user's id; `None` without a session.
@@ -1103,6 +1167,43 @@ impl GimClient {
                 let state = *states.borrow_and_update();
                 if callbacks
                     .call(|| listener.call(move |l| l.on_change(state)))
+                    .is_none()
+                {
+                    return;
+                }
+            }
+        })))
+    }
+
+    /// Subscribes to the user's hubs; the first callback carries the
+    /// current list.
+    pub async fn hub_list(
+        &self,
+        listener: Arc<dyn HubListListener>,
+    ) -> Result<Arc<TaskHandle>, GimError> {
+        let listener = Foreign::new(listener);
+        let sdk = self.sdk()?.clone();
+        let mut changes = sdk.subscribe_hub_changes();
+        let current = hub_infos(sdk.hubs().await?);
+        let callbacks = self.callbacks.clone();
+        Ok(Arc::new(TaskHandle::spawn(&self.callbacks, async move {
+            if callbacks
+                .call(|| listener.call(move |l| l.on_update(current)))
+                .is_none()
+            {
+                return;
+            }
+            loop {
+                match changes.recv().await {
+                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
+                // A failed read is retried on the next change.
+                let Ok(hubs) = sdk.hubs().await.map(hub_infos) else {
+                    continue;
+                };
+                if callbacks
+                    .call(|| listener.call(move |l| l.on_update(hubs)))
                     .is_none()
                 {
                     return;

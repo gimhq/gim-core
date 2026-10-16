@@ -4,9 +4,9 @@
 use gim_ui::VectorDiff;
 
 use crate::{
-    ChatKind, ChatListDiff, ChatState, ChatSummary, DeviceInfo, MediaRef, MembershipChangeKind,
-    MessageContent, MessageItem, MessagePreview, ReactionGroup, ReplyPreview, SendState,
-    TimelineDiff, TimelineItem, UserProfile,
+    ChatKind, ChatListDiff, ChatState, ChatSummary, DeviceInfo, HubInfo, HubState, MediaRef,
+    MembershipChangeKind, MessageContent, MessageItem, MessagePreview, ReactionGroup, ReplyPreview,
+    SendState, TimelineDiff, TimelineItem, UserProfile,
 };
 
 /// Maps a gim-ui diff onto an FFI diff enum with the same variants.
@@ -259,4 +259,33 @@ impl From<gim_ui::SendState> for SendState {
             gim_ui::SendState::Failed { reason } => Self::Failed { reason },
         }
     }
+}
+
+impl From<gim_base::model::HubState> for HubState {
+    fn from(state: gim_base::model::HubState) -> Self {
+        match state {
+            gim_base::model::HubState::Unverified => Self::Unverified,
+            gim_base::model::HubState::Verified => Self::Verified,
+            gim_base::model::HubState::Removed => Self::Removed,
+        }
+    }
+}
+
+/// The hubs in registry order; the first one not removed is the primary.
+pub(crate) fn hub_infos(hubs: Vec<gim_sdk::HubStatus>) -> Vec<HubInfo> {
+    let primary = hubs
+        .iter()
+        .find(|h| h.hub.state != gim_base::model::HubState::Removed)
+        .map(|h| h.hub.hub_id.clone());
+    hubs.into_iter()
+        .map(|h| HubInfo {
+            is_primary: primary.as_ref() == Some(&h.hub.hub_id),
+            hub_id: h.hub.hub_id,
+            url: h.hub.url,
+            state: h.hub.state.into(),
+            priority: h.hub.priority,
+            is_home: h.home,
+            signed_in: h.signed_in,
+        })
+        .collect()
 }

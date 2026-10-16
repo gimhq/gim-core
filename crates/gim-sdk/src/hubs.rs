@@ -84,11 +84,11 @@ impl HubToken {
 pub(crate) struct HubHandle {
     /// The transport to the verified URL, once `GET /v2/hub` there proved
     /// the hub in this run; never used before.
-    verified: Option<(String, Arc<dyn Transport>)>,
+    pub(crate) verified: Option<(String, Arc<dyn Transport>)>,
     /// A URL whose proof failed in this run: not contacted again until a
     /// URL is set on this device or the next run.
-    rejected: Option<String>,
-    token: Option<HubToken>,
+    pub(crate) rejected: Option<String>,
+    pub(crate) token: Option<HubToken>,
 }
 
 impl HubHandle {
@@ -260,6 +260,18 @@ impl<S: StateStore + 'static> Client<S> {
             .collect())
     }
 
+    /// A notification whenever the hub registry may have changed (a hub
+    /// added, removed, verified or reprioritized, a URL shared by another
+    /// own device); read [`Client::hubs`] then.
+    pub fn subscribe_hub_changes(&self) -> tokio::sync::broadcast::Receiver<()> {
+        self.inner.hub_changes.subscribe()
+    }
+
+    pub(crate) fn notify_hub_changes(&self) {
+        // No subscriber is fine.
+        let _ = self.inner.hub_changes.send(());
+    }
+
     /// Records `url` as the client API base URL of the listed hub
     /// `hub_id`: checks it with `GET /v2/hub`, signs in there and shares
     /// the URL with the own other devices. A URL that serves another hub is
@@ -304,6 +316,7 @@ impl<S: StateStore + 'static> Client<S> {
         drop(guard);
         self.top_up_listed_hubs().await;
         self.inner.hubs_changed.notify_one();
+        self.notify_hub_changes();
         self.share_hub_locations().await;
         Ok(())
     }
@@ -357,6 +370,7 @@ impl<S: StateStore + 'static> Client<S> {
         drop(guard);
         self.top_up_listed_hubs().await;
         self.inner.hubs_changed.notify_one();
+        self.notify_hub_changes();
         if shared {
             self.share_hub_locations().await;
         }
@@ -570,7 +584,7 @@ impl<S: StateStore + 'static> Client<S> {
 
     /// Signs in on the verified hub `hub_id`; the challenge must name
     /// `hub_id` and its proven URL. Keeps and persists the new token.
-    async fn renew_hub_token(&self, hub_id: &str) -> TransportResult<AccessToken> {
+    pub(crate) async fn renew_hub_token(&self, hub_id: &str) -> TransportResult<AccessToken> {
         let (url, transport) = self
             .handles()
             .get(hub_id)
@@ -649,7 +663,7 @@ impl<S: StateStore + 'static> Client<S> {
         }
     }
 
-    async fn save_hub(&self, hub: HubRecord) -> Result<()> {
+    pub(crate) async fn save_hub(&self, hub: HubRecord) -> Result<()> {
         self.run(move |store, _| store.transaction(|txn| Ok(txn.upsert_hub(&hub)?)))
             .await
     }
