@@ -6,6 +6,8 @@ use std::fmt::Write;
 
 /// `GET` → [`Health`](super::Health).
 pub const HEALTHZ: &str = "/healthz";
+/// `GET` (no token) → [`HubInfo`](super::HubInfo).
+pub const HUB: &str = "/v2/hub";
 /// `POST` [`AuthChallengeRequest`](super::AuthChallengeRequest) →
 /// [`AuthChallenge`](super::AuthChallenge).
 pub const AUTH_CHALLENGE: &str = "/v2/auth/challenge";

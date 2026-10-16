@@ -1,6 +1,6 @@
 //! The self group (arch §9.4): the MLS group of the user's own devices. It
-//! carries the signed DeviceList (on change), the display name, contacts
-//! and read markers as `self.*` envelope contents, which gim-base applies
+//! carries the signed DeviceList (on change), the display name, contacts,
+//! read markers and the hub URLs as `self.*` envelope contents, which gim-base applies
 //! on receipt; it is hidden from the chat list. A device adopts a group as
 //! its self group when the first `self.*` content of another own device
 //! arrives in it.
@@ -289,6 +289,7 @@ impl<S: StateStore + 'static> Client<S> {
             self.send_to_self_group(Content::SelfProfile { display_name })
                 .await?;
         }
+        self.share_hub_locations().await;
         let chats = self.run(|store, _| Ok(store.chats()?)).await?;
         for chat in chats {
             if chat.membership != Membership::Joined
