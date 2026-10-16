@@ -318,6 +318,24 @@ bitcode and link-test notes. `out/` is never committed.
 - `xcframework` (pushes to `main` and manual runs, macOS): runs
   `scripts/build-xcframework.sh` and uploads `gim-core-ios-<sha>` with the zip,
   its checksum, the Swift sources and `GIM_CORE_VERSION`.
+- `integration` (every push, pull request, manual run): checks out gim-hub at
+  the pinned commit (`scripts/gim-hub-dev.sh rev`, the `GIM_HUB_REV` default,
+  so CI and local runs test the same hub) with the read-only deploy key in the
+  `GIM_HUB_DEPLOY_KEY` secret, builds the hub image from that checkout
+  (`GIM_HUB_CHECKOUT`, no `git archive`) and runs the single-hub and
+  federation suites of `scripts/integration-test.sh` and both modes of
+  `testing/gim-cli-interop.sh` on a `gim-ci` network. Hub logs are printed
+  on failure. Without the secret (pull requests from forks) the
+  `integration-gate` job skips it.
+
+To build the hub from a directory that already holds `GIM_HUB_REV` locally:
+
+```sh
+GIM_HUB_CHECKOUT=/path/to/gim-hub scripts/integration-test.sh
+```
+
+A git checkout must have `GIM_HUB_REV` checked out; any other directory (an
+archive extraction) is built as is and labelled `GIM_HUB_REV`.
 
 ## Android packaging
 
