@@ -7,10 +7,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use common::{group, key, setup, text, Device, NOW};
 use gim_base::model::{
-    Chat, ChatKind, ChatMember, DepartedMember, GroupCursor, GroupMessage, MediaCacheEntry,
-    Membership, MembershipChangeKind, MembershipEvent, Message, MessageContent, MessageKind,
-    OutboxEntry, OutboxKind, OutboxState, PendingCommit, PendingInvite, PendingLeave, PendingMedia,
-    PendingWelcome, PreparedPayload, SendState, UserInfo,
+    Chat, ChatKind, ChatMember, DepartedMember, GroupCursor, GroupMessage, HubRecord, HubState,
+    MediaCacheEntry, Membership, MembershipChangeKind, MembershipEvent, Message, MessageContent,
+    MessageKind, OutboxEntry, OutboxKind, OutboxState, PendingCommit, PendingInvite, PendingLeave,
+    PendingMedia, PendingWelcome, PreparedPayload, SendState, UserInfo,
 };
 use gim_base::{
     BaseError, MemoryStore, StateReader, StateStore, StoreError, StoreTxn, WriteTarget,
@@ -188,6 +188,13 @@ fn reads_match_memory_store() {
     );
     assert_eq!(sqlite.departed_members().unwrap().len(), 3);
     assert_eq!(sqlite.device_lists().unwrap().len(), 2);
+    let hubs: Vec<String> = sqlite
+        .hubs()
+        .unwrap()
+        .into_iter()
+        .map(|h| h.hub_id)
+        .collect();
+    assert_eq!(hubs, ["ha", "hb"]);
     let crew = sqlite.membership_events(&group("crew")).unwrap();
     let order: Vec<(u64, &str)> = crew.iter().map(|e| (e.seq, e.user_id.as_str())).collect();
     assert_eq!(order, [(3, "bob"), (3, "carol"), (9, "bob")]);
@@ -431,6 +438,22 @@ fn write_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
     for (user, data) in [("bob", vec![1, 2]), ("alice", vec![3])] {
         txn.upsert_device_list(&UserId::new(user).unwrap(), &data)?;
     }
+    txn.upsert_hub(&HubRecord {
+        hub_id: "hb".into(),
+        url: None,
+        priority: 1,
+        verified_root_pubkey: None,
+        last_seen_ms: None,
+        state: HubState::Unverified,
+    })?;
+    txn.upsert_hub(&HubRecord {
+        hub_id: "ha".into(),
+        url: Some("https://a.example".into()),
+        priority: 0,
+        verified_root_pubkey: Some(vec![7; 32]),
+        last_seen_ms: Some(NOW),
+        state: HubState::Verified,
+    })?;
     for (g, user, dev) in [
         ("crew", "dave", "phone"),
         ("crew", "carol", "laptop"),
@@ -523,6 +546,18 @@ fn update_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
     retried.next_retry_at_ms = NOW + 30;
     txn.upsert_pending_invite(&retried)?;
     txn.remove_pending_invite(&group("crew"), &UserId::new("dave").unwrap())?;
+    let mut removed = txn.hubs()?.remove(0);
+    removed.state = HubState::Removed;
+    txn.upsert_hub(&removed)?;
+    txn.upsert_hub(&HubRecord {
+        hub_id: "hc".into(),
+        url: Some("https://c.example".into()),
+        priority: 255,
+        verified_root_pubkey: None,
+        last_seen_ms: None,
+        state: HubState::Unverified,
+    })?;
+    txn.remove_hub("hb")?;
     txn.add_membership_event(&membership(
         "crew",
         12,
@@ -597,6 +632,7 @@ fn assert_same_reads(expected: &impl StateReader, actual: &impl StateReader) {
         actual.device_lists().unwrap(),
         expected.device_lists().unwrap()
     );
+    assert_eq!(actual.hubs().unwrap(), expected.hubs().unwrap());
     for message_id in ["m1", "m2", "m4", "u1", "u3", "d1", "none"].map(id) {
         assert_eq!(
             actual.message(&message_id).unwrap(),

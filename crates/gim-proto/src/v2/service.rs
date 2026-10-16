@@ -17,12 +17,31 @@ pub const HOSTING_RECORD_REQUIRED: &str = "hosting_record_required";
 pub const PEER_REFUSED: &str = "peer_refused";
 /// Error code of a 503 (with `Retry-After`): a peer hub did not answer.
 pub const PEER_UNAVAILABLE: &str = "peer_unavailable";
+/// Error code of a 409 on `POST /v2/keypackages`: the upload contains a
+/// KeyPackage this hub already claimed from another hub.
+pub const DUPLICATE_KEY_PACKAGE: &str = "duplicate_key_package";
+/// Marker in the message of a 400 `validation_failed` on
+/// `POST /v2/groups/{gid}/commits`: an Add's KeyPackage was not claimed
+/// through this hub.
+pub const KP_NOT_CLAIMED: &str = "kp_not_claimed";
 
 /// `Health`: `GET /healthz`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Health {
     pub status: HealthStatus,
     /// Hub build version.
+    pub version: String,
+}
+
+/// `HubInfo`: `GET /v2/hub` (no token), so a client can check that a URL
+/// belongs to the `hub_id` listed in its hosting record before signing in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HubInfo {
+    pub hub_id: String,
+    /// The hub's 32-byte Ed25519 root public key; `hub_id` derives from it.
+    #[serde(with = "super::base64::bytes")]
+    pub hub_root_pubkey: Vec<u8>,
+    /// Hub version.
     pub version: String,
 }
 

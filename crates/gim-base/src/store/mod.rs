@@ -22,8 +22,8 @@ use gim_crypto::CryptoStore;
 pub use memory::{MemoryStore, MemoryTxn, WriteTarget};
 
 use crate::model::{
-    Chat, DepartedMember, GroupCursor, GroupMessage, MediaCacheEntry, MembershipEvent, Message,
-    OutboxEntry, PendingCommit, PendingInvite, PendingLeave, UserInfo,
+    Chat, DepartedMember, GroupCursor, GroupMessage, HubRecord, MediaCacheEntry, MembershipEvent,
+    Message, OutboxEntry, PendingCommit, PendingInvite, PendingLeave, UserInfo,
 };
 use crate::{BaseError, StoreError};
 
@@ -96,6 +96,10 @@ pub trait StateReader {
     /// first; the last one is current. Their chats are hidden from
     /// [`StateReader::chats`].
     fn self_groups(&self) -> StoreResult<Vec<GroupId>>;
+
+    /// The hubs of the own user's hosting record known to this device, by
+    /// hub id.
+    fn hubs(&self) -> StoreResult<Vec<HubRecord>>;
 }
 
 /// A write transaction over state rows and MLS state. Dropping it without
@@ -151,6 +155,10 @@ pub trait StoreTxn: StateReader + CryptoStore {
     /// Records a self group as the current one, unless it is recorded
     /// already.
     fn add_self_group(&mut self, group_id: &GroupId) -> StoreResult<()>;
+
+    /// Replaces the hub with the same id, if any.
+    fn upsert_hub(&mut self, hub: &HubRecord) -> StoreResult<()>;
+    fn remove_hub(&mut self, hub_id: &str) -> StoreResult<()>;
 
     /// Deletes every row and all MLS state, the device identity included
     /// (an unfinished enrollment is discarded this way).

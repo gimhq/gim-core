@@ -23,8 +23,9 @@ use gim_test::{
 
 use crate::transport::{
     AccessToken, Challenge, ClaimedKeyPackage, CommitAccepted, EventBatch, GroupInfo,
-    HostingEntryGrant, HubEvent, KeyPackageCount, OutgoingCommit, PostError, SessionError,
-    SessionToken, StoredHostingRecord, Transport, TransportError, TransportResult, UserRecord,
+    HostingEntryGrant, HubEvent, HubIdentity, KeyPackageCount, OutgoingCommit, PostError,
+    SessionError, SessionToken, StoredHostingRecord, Transport, TransportError, TransportResult,
+    UserRecord,
 };
 use crate::{SecretStorage, SecretStorageError};
 
@@ -89,7 +90,14 @@ impl Default for FakeTransport {
 
 impl FakeTransport {
     pub fn new() -> Self {
-        let service = Arc::new(FakeDeliveryService::new());
+        Self::with_hub_seed(HUB_ROOT_SEED)
+    }
+
+    /// Another fake hub: its root key comes from `seed` and its `hub_id`
+    /// derives from that key.
+    pub fn with_hub_seed(seed: [u8; 32]) -> Self {
+        let hub_key = HubRootKey::from_seed(&seed);
+        let service = Arc::new(FakeDeliveryService::with_hub_id(hub_key.public().hub_id()));
         let lists = service.clone();
         let stored_list = move |user_id: &UserId| {
             let bytes = lists.device_list(user_id)?;
@@ -103,7 +111,7 @@ impl FakeTransport {
             validator: Arc::new(MlsEngine::with_device_list_lookup(Arc::new(stored_list))),
             proposals: Arc::default(),
             hosting: Arc::new(FakeHosting {
-                hub_key: HubRootKey::from_seed(&HUB_ROOT_SEED),
+                hub_key,
                 records: Mutex::default(),
                 reads: AtomicUsize::new(0),
                 required: AtomicBool::new(false),
@@ -221,9 +229,9 @@ impl From<DeliveryError> for TransportError {
             | DeliveryError::HandleTaken(_)
             | DeliveryError::LinkIdTaken(_)
             | DeliveryError::GroupExists(_) => Self::Conflict(err.to_string()),
-            DeliveryError::ValidationFailed(_)
-            | DeliveryError::NotAMember(_)
-            | DeliveryError::InvalidRange { .. } => Self::Server(err.to_string()),
+            DeliveryError::ValidationFailed(_) => rejected(400, "validation_failed", err),
+            DeliveryError::NotAMember(_) => rejected(403, "not_member", err),
+            DeliveryError::InvalidRange { .. } => rejected(416, "range_not_satisfiable", err),
         }
     }
 }
@@ -237,8 +245,17 @@ impl From<DeliveryError> for PostError {
     }
 }
 
+/// A definite 4xx, as the HTTP transport maps it.
+fn rejected(status: u16, code: &str, message: impl std::fmt::Display) -> TransportError {
+    TransportError::Rejected {
+        status,
+        code: code.into(),
+        message: message.to_string(),
+    }
+}
+
 fn invalid(reason: impl std::fmt::Display) -> TransportError {
-    TransportError::Server(format!("400 validation_failed: {reason}"))
+    rejected(400, "validation_failed", reason)
 }
 
 fn to_group_info(info: gim_test::GroupInfo) -> GroupInfo {
@@ -322,6 +339,14 @@ pub fn hub_events(event: Event) -> Vec<HubEvent> {
 
 #[async_trait]
 impl Transport for FakeTransport {
+    async fn hub_info(&self) -> TransportResult<HubIdentity> {
+        Ok(HubIdentity {
+            hub_id: self.service.hub_id().to_string(),
+            hub_root_public_key: self.hosting.hub_key.public().as_bytes().to_vec(),
+            version: "fake".into(),
+        })
+    }
+
     async fn put_device_list(&self, user_id: &UserId, device_list: Vec<u8>) -> TransportResult<()> {
         let list = SignedDeviceList::from_bytes(&device_list)
             .and_then(|signed| signed.verify(user_id))
@@ -396,7 +421,7 @@ impl Transport for FakeTransport {
     ) -> TransportResult<()> {
         let device = self.device(token)?;
         if &device.user_id != user_id {
-            return Err(TransportError::Server("403 forbidden".into()));
+            return Err(rejected(403, "forbidden", "forbidden"));
         }
         Ok(self.service.put_recovery_backup(user_id, backup)?)
     }
@@ -649,7 +674,7 @@ impl Transport for FakeTransport {
         priority: u8,
     ) -> TransportResult<HostingEntryGrant> {
         if &self.device(token)?.user_id != user_id {
-            return Err(TransportError::Server("403 forbidden".into()));
+            return Err(rejected(403, "forbidden", "forbidden"));
         }
         let hub = &self.hosting.hub_key;
         Ok(HostingEntryGrant {
@@ -668,18 +693,17 @@ impl Transport for FakeTransport {
         user_id: &UserId,
         bytes: Vec<u8>,
     ) -> TransportResult<StoredHostingRecord> {
-        let rejected = |reason: String| {
-            TransportError::Server(format!("400 invalid_hosting_record: {reason}"))
-        };
+        let invalid_record =
+            |reason: String| rejected(400, gim_proto::v2::INVALID_HOSTING_RECORD, reason);
         let now = now_ms();
         let record = SignedHostingRecord::from_bytes(&bytes)
             .and_then(|signed| signed.verify(now))
-            .map_err(|e| rejected(e.to_string()))?;
+            .map_err(|e| invalid_record(e.to_string()))?;
         if record.user_id() != user_id {
-            return Err(rejected("user_id_mismatch".into()));
+            return Err(invalid_record("user_id_mismatch".into()));
         }
         if !HOSTING_RECORD_LIFETIMES_MS.contains(&(record.expires_at() - now)) {
-            return Err(rejected("lifetime_out_of_range".into()));
+            return Err(invalid_record("lifetime_out_of_range".into()));
         }
         let mut records = self.hosting_records();
         // Stored records were verified on insert; they may have expired.

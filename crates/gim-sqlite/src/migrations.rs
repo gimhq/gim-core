@@ -11,6 +11,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_schema.sql"),
     include_str!("../migrations/0002_pending_leaves.sql"),
     include_str!("../migrations/0003_pending_invites.sql"),
+    include_str!("../migrations/0004_hubs.sql"),
 ];
 
 /// Schema version written by this build.
@@ -84,6 +85,7 @@ mod tests {
             "departed_members",
             "device_lists",
             "membership_events",
+            "hubs",
         ] {
             assert!(tables.iter().any(|t| t == table), "{table} in {tables:?}");
         }
@@ -139,6 +141,43 @@ mod tests {
                 .unwrap();
             assert_eq!(kept, 1, "{table}");
         }
+    }
+
+    #[test]
+    fn migrates_a_v3_database_keeping_its_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for sql in &MIGRATIONS[..3] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 3).unwrap();
+        conn.execute(
+            "INSERT INTO pending_invites \
+             (group_id, user_id, created_at_ms, next_retry_at_ms, attempts) \
+             VALUES ('crew', 'bob', 1, 2, 0)",
+            [],
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert!(tables(&conn).iter().any(|t| t == "hubs"));
+        let kept: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pending_invites", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(kept, 1);
+    }
+
+    #[test]
+    fn hub_state_is_checked() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        let insert = |state: &str| {
+            conn.execute(
+                "INSERT OR REPLACE INTO hubs (hub_id, priority, state) VALUES ('h1', 0, ?1)",
+                [state],
+            )
+        };
+        assert!(insert("verified").is_ok());
+        assert!(insert("trusted").is_err());
     }
 
     #[test]
