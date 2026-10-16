@@ -4,9 +4,9 @@
 use std::collections::BTreeSet;
 
 use gim_base::model::{
-    Chat, DepartedMember, GroupCursor, GroupMessage, MediaCacheEntry, MembershipChangeKind,
-    MembershipEvent, Message, OutboxEntry, OutboxState, PendingCommit, PendingInvite, PendingLeave,
-    UserInfo,
+    Chat, DepartedMember, GroupCursor, GroupMessage, HubRecord, HubState, MediaCacheEntry,
+    MembershipChangeKind, MembershipEvent, Message, OutboxEntry, OutboxState, PendingCommit,
+    PendingInvite, PendingLeave, UserInfo,
 };
 use gim_base::{StateReader, StoreError};
 use gim_common::{DeviceRef, GroupId, MessageId, UserId};
@@ -52,6 +52,23 @@ fn membership_kind(value: &str) -> StoreResult<MembershipChangeKind> {
         other => Err(StoreError::new(format!(
             "unknown membership kind '{other}'"
         ))),
+    }
+}
+
+pub(crate) fn hub_state_str(state: HubState) -> &'static str {
+    match state {
+        HubState::Unverified => "unverified",
+        HubState::Verified => "verified",
+        HubState::Removed => "removed",
+    }
+}
+
+fn hub_state(value: &str) -> StoreResult<HubState> {
+    match value {
+        "unverified" => Ok(HubState::Unverified),
+        "verified" => Ok(HubState::Verified),
+        "removed" => Ok(HubState::Removed),
+        other => Err(StoreError::new(format!("unknown hub state '{other}'"))),
     }
 }
 
@@ -460,5 +477,23 @@ impl StateReader for Reader<'_> {
         self.query("SELECT group_id FROM self_groups ORDER BY n", [], |row| {
             group_id(get(row, 0)?)
         })
+    }
+
+    fn hubs(&self) -> StoreResult<Vec<HubRecord>> {
+        self.query(
+            "SELECT hub_id, url, priority, verified_root_pubkey, last_seen_ms, state \
+             FROM hubs ORDER BY hub_id",
+            [],
+            |row| {
+                Ok(HubRecord {
+                    hub_id: get(row, 0)?,
+                    url: get(row, 1)?,
+                    priority: get(row, 2)?,
+                    verified_root_pubkey: get(row, 3)?,
+                    last_seen_ms: get(row, 4)?,
+                    state: hub_state(&get::<String>(row, 5)?)?,
+                })
+            },
+        )
     }
 }

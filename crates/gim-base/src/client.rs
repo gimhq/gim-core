@@ -6,12 +6,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use gim_common::{now_ms, ClientId, DeviceRef, GroupId, MessageId, UserId};
 use gim_crypto::{decrypt_to_envelope, CryptoError, DecryptedMessage, MlsEngine, ProcessedMessage};
 use gim_identity::SignedDeviceList;
-use gim_proto::envelope::{Contact, Content, Envelope, ReceiptKind};
+use gim_proto::envelope::{Contact, Content, Envelope, HubLocation, ReceiptKind};
 
 use crate::model::{
-    to_message_id, Chat, ChatKind, ChatMember, DepartedMember, GroupMessage, IncomingEvent,
-    Membership, MembershipChangeKind, MembershipEvent, Message, MessageContent, MessageKind,
-    PendingCommit, PendingLeave, SendState, StateChange, UserInfo,
+    to_message_id, Chat, ChatKind, ChatMember, DepartedMember, GroupMessage, HubRecord, HubState,
+    IncomingEvent, Membership, MembershipChangeKind, MembershipEvent, Message, MessageContent,
+    MessageKind, PendingCommit, PendingLeave, SendState, StateChange, UserInfo,
 };
 use crate::{Result, StateReader, StateStore, StoreTxn};
 
@@ -997,6 +997,10 @@ impl BaseClient {
                 txn.add_self_group(group_id)?;
                 self.apply_read_marker(txn, &chat_id, seq, changes)
             }
+            Content::SelfHubs { hubs } => {
+                txn.add_self_group(group_id)?;
+                apply_hub_locations(txn, hubs)
+            }
         }
     }
 
@@ -1309,6 +1313,39 @@ fn mark_applied<T: StoreTxn>(txn: &mut T, group_id: &GroupId, seq: u64) -> Resul
     let mut cursor = txn.group_cursor(group_id)?;
     cursor.insert(seq);
     txn.set_group_cursor(group_id, &cursor)?;
+    Ok(())
+}
+
+/// Records the URLs another own device shared for the hubs of the hosting
+/// record. A new or changed URL is unverified until the client checked it
+/// with the hub; a hub no longer listed stays removed. Rows for hubs the
+/// stored record does not list yet are added; the client uses only listed
+/// hubs.
+fn apply_hub_locations<T: StoreTxn>(txn: &mut T, hubs: Vec<HubLocation>) -> Result<()> {
+    let stored = txn.hubs()?;
+    for location in hubs {
+        let hub = match stored.iter().find(|h| h.hub_id == location.hub_id) {
+            Some(hub) if hub.url.as_ref() == Some(&location.url) => continue,
+            Some(hub) => HubRecord {
+                url: Some(location.url),
+                verified_root_pubkey: None,
+                state: match hub.state {
+                    HubState::Removed => HubState::Removed,
+                    _ => HubState::Unverified,
+                },
+                ..hub.clone()
+            },
+            None => HubRecord {
+                hub_id: location.hub_id,
+                url: Some(location.url),
+                priority: location.priority,
+                verified_root_pubkey: None,
+                last_seen_ms: None,
+                state: HubState::Unverified,
+            },
+        };
+        txn.upsert_hub(&hub)?;
+    }
     Ok(())
 }
 

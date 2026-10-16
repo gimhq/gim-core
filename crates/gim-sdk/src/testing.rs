@@ -23,8 +23,9 @@ use gim_test::{
 
 use crate::transport::{
     AccessToken, Challenge, ClaimedKeyPackage, CommitAccepted, EventBatch, GroupInfo,
-    HostingEntryGrant, HubEvent, KeyPackageCount, OutgoingCommit, PostError, SessionError,
-    SessionToken, StoredHostingRecord, Transport, TransportError, TransportResult, UserRecord,
+    HostingEntryGrant, HubEvent, HubIdentity, KeyPackageCount, OutgoingCommit, PostError,
+    SessionError, SessionToken, StoredHostingRecord, Transport, TransportError, TransportResult,
+    UserRecord,
 };
 use crate::{SecretStorage, SecretStorageError};
 
@@ -89,7 +90,14 @@ impl Default for FakeTransport {
 
 impl FakeTransport {
     pub fn new() -> Self {
-        let service = Arc::new(FakeDeliveryService::new());
+        Self::with_hub_seed(HUB_ROOT_SEED)
+    }
+
+    /// Another fake hub: its root key comes from `seed` and its `hub_id`
+    /// derives from that key.
+    pub fn with_hub_seed(seed: [u8; 32]) -> Self {
+        let hub_key = HubRootKey::from_seed(&seed);
+        let service = Arc::new(FakeDeliveryService::with_hub_id(hub_key.public().hub_id()));
         let lists = service.clone();
         let stored_list = move |user_id: &UserId| {
             let bytes = lists.device_list(user_id)?;
@@ -103,7 +111,7 @@ impl FakeTransport {
             validator: Arc::new(MlsEngine::with_device_list_lookup(Arc::new(stored_list))),
             proposals: Arc::default(),
             hosting: Arc::new(FakeHosting {
-                hub_key: HubRootKey::from_seed(&HUB_ROOT_SEED),
+                hub_key,
                 records: Mutex::default(),
                 reads: AtomicUsize::new(0),
                 required: AtomicBool::new(false),
@@ -331,6 +339,14 @@ pub fn hub_events(event: Event) -> Vec<HubEvent> {
 
 #[async_trait]
 impl Transport for FakeTransport {
+    async fn hub_info(&self) -> TransportResult<HubIdentity> {
+        Ok(HubIdentity {
+            hub_id: self.service.hub_id().to_string(),
+            hub_root_public_key: self.hosting.hub_key.public().as_bytes().to_vec(),
+            version: "fake".into(),
+        })
+    }
+
     async fn put_device_list(&self, user_id: &UserId, device_list: Vec<u8>) -> TransportResult<()> {
         let list = SignedDeviceList::from_bytes(&device_list)
             .and_then(|signed| signed.verify(user_id))

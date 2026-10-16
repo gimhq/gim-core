@@ -297,6 +297,35 @@ pub struct PendingInvite {
     pub attempts: u32,
 }
 
+/// Where a hub of the own user's hosting record stands for this device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HubState {
+    /// Listed, but no URL is known yet or `GET /v2/hub` at the URL did not
+    /// prove the hub's identity: never used, no credentials sent there.
+    Unverified,
+    /// Listed, and the URL proved the hub's identity.
+    Verified,
+    /// No longer listed by the current hosting record.
+    Removed,
+}
+
+/// A hub of the own user's hosting record, as this device knows it. One
+/// per `hub_id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HubRecord {
+    pub hub_id: String,
+    /// Client API base URL, once known.
+    pub url: Option<String>,
+    /// Priority in the hosting record; lower is preferred.
+    pub priority: u8,
+    /// The 32-byte root public key `GET /v2/hub` at `url` returned, once
+    /// verified against `hub_id`.
+    pub verified_root_pubkey: Option<Vec<u8>>,
+    /// Unix milliseconds of the last successful contact.
+    pub last_seen_ms: Option<u64>,
+    pub state: HubState,
+}
+
 /// A device that left a group (a self-remove proposal, or a hub-side
 /// `member_removed` without a commit) or was revoked in its user's
 /// DeviceList, and may still be in the MLS tree: a member has to remove it

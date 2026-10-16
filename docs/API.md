@@ -111,6 +111,14 @@ user's signed DeviceList. Handles are optional directory entries pointing at a u
   Publication failures never fail these calls and are retried by sync. A federated request the
   hub rejects with 403 `hosting_record_required` publishes the record and is retried once; only if
   that fails does the call fail with `Server(403, …)`.
+- **Multiple hubs** (multi-homing, groundwork): gim-core keeps a registry of the hubs the hosting
+  record lists, with each hub's URL and this device's session there; it is persisted and restored
+  with the session. The hub the client was created with is checked with `GET /v2/hub` and
+  recorded. URLs of the other hubs come from the user's other devices (shared in the hidden self
+  group); a URL is used only after `GET /v2/hub` there proves the listed hub id, then the device
+  signs in there too. The registry follows the record on every publication and on the hub's
+  `hosting_record.updated` event. All traffic still goes through the hub the client was created
+  with; no API for the app yet.
 - **Federation**: users are addressed by user id everywhere; a remote user may have no handle and is
   shown by display name, else a short user id. A chat is created on the own hub, which owns it (the
   `<hub_id>/` prefix of its id); in chats owned by another hub, messages and member changes of

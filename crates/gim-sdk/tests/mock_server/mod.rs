@@ -63,6 +63,8 @@ pub struct Controls {
     /// Stream connections whose serving task has taken the per-connection
     /// controls above; the client may report `Connected` before that.
     pub streams_served: AtomicUsize,
+    /// `POST /v2/auth/challenge` requests served.
+    pub challenges: AtomicUsize,
     /// `(cursor, wait)` of every `GET /v2/events`.
     pub polls: Mutex<Vec<(Option<u64>, Option<u32>)>>,
     /// `(group, from_seq - 1)` of every history request.
@@ -108,6 +110,7 @@ impl MockServer {
             controls: controls.clone(),
         };
         let app = Router::new()
+            .route(v2::paths::HUB, get(hub))
             .route(v2::paths::AUTH_CHALLENGE, post(auth_challenge))
             .route(v2::paths::AUTH_SESSION, post(create_session))
             .route(
@@ -386,10 +389,19 @@ fn event_dto(e: StreamEvent) -> v2::Event {
     }
 }
 
+async fn hub(State(state): State<AppState>) -> Response {
+    reply(state.transport.hub_info().await.map(|info| v2::HubInfo {
+        hub_id: info.hub_id,
+        hub_root_pubkey: info.hub_root_public_key,
+        version: info.version,
+    }))
+}
+
 async fn auth_challenge(
     State(state): State<AppState>,
     Json(request): Json<v2::AuthChallengeRequest>,
 ) -> Response {
+    state.controls.challenges.fetch_add(1, Ordering::SeqCst);
     let result = async {
         let device = DeviceRef::parse(&request.user_id, &request.device_id).map_err(invalid)?;
         let challenge = state.transport.auth_challenge(&device).await?;

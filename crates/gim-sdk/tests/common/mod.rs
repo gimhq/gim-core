@@ -18,9 +18,9 @@ use gim_identity::{HostingEntry, HubRootKey, RootKey};
 use gim_sdk::testing::{FakeTransport, MemorySecretStorage};
 use gim_sdk::transport::{
     AccessToken, Challenge, ClaimedKeyPackage, CommitAccepted, EventBatch, GroupInfo,
-    HostingEntryGrant, HubEvent, KeyPackageClaim, KeyPackageCount, OutgoingCommit, PostError,
-    SessionError, SessionToken, StoredHostingRecord, Transport, TransportError, TransportResult,
-    UserRecord,
+    HostingEntryGrant, HubEvent, HubIdentity, KeyPackageClaim, KeyPackageCount, OutgoingCommit,
+    PostError, SessionError, SessionToken, StoredHostingRecord, Transport, TransportError,
+    TransportResult, UserRecord,
 };
 use gim_sdk::{Client, ClientBuilder, SecretStorage, SyncSettings};
 use tempfile::TempDir;
@@ -75,6 +75,8 @@ pub struct Faults {
     pub concurrent_hosting: Mutex<VecDeque<(UserId, Vec<u8>)>>,
     /// `put_hosting_record` calls.
     pub hosting_puts: AtomicUsize,
+    /// `auth_challenge` calls.
+    pub challenges: AtomicUsize,
     /// Events appended to the next `fetch_events` result.
     pub injected_events: Mutex<Vec<HubEvent>>,
     pub posts: Mutex<VecDeque<PostFault>>,
@@ -147,8 +149,12 @@ pub struct FlakyTransport {
 
 impl FlakyTransport {
     pub fn new() -> Self {
+        Self::over(FakeTransport::new())
+    }
+
+    pub fn over(inner: FakeTransport) -> Self {
         Self {
-            inner: FakeTransport::new(),
+            inner,
             faults: Arc::default(),
         }
     }
@@ -187,7 +193,12 @@ impl Transport for FlakyTransport {
         self.inner.put_device_list(u, list).await
     }
 
+    async fn hub_info(&self) -> TransportResult<HubIdentity> {
+        self.inner.hub_info().await
+    }
+
     async fn auth_challenge(&self, d: &DeviceRef) -> TransportResult<Challenge> {
+        self.faults.challenges.fetch_add(1, Ordering::SeqCst);
         self.inner.auth_challenge(d).await
     }
 

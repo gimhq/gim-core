@@ -24,9 +24,9 @@ use tokio_util::io::ReaderStream;
 use crate::stream::ws;
 use crate::transport::{
     AccessToken, Challenge, ClaimedKeyPackage, CommitAccepted, EventBatch, EventStream, GroupInfo,
-    HostingEntryGrant, HubEvent, KeyPackageClaim, KeyPackageCount, OutgoingCommit, PostError,
-    SessionError, SessionToken, StoredHostingRecord, Transport, TransportError, TransportResult,
-    UserRecord,
+    HostingEntryGrant, HubEvent, HubIdentity, KeyPackageClaim, KeyPackageCount, OutgoingCommit,
+    PostError, SessionError, SessionToken, StoredHostingRecord, Transport, TransportError,
+    TransportResult, UserRecord,
 };
 
 pub use reqwest::Url;
@@ -290,6 +290,19 @@ impl HttpTransport {
 
 #[async_trait]
 impl Transport for HttpTransport {
+    fn base_url(&self) -> Option<String> {
+        Some(self.base_url.clone())
+    }
+
+    async fn hub_info(&self) -> TransportResult<HubIdentity> {
+        let info: v2::HubInfo = Self::json(self.api(Method::GET, paths::HUB, None)).await?;
+        Ok(HubIdentity {
+            hub_id: info.hub_id,
+            hub_root_public_key: info.hub_root_pubkey,
+            version: info.version,
+        })
+    }
+
     async fn put_device_list(&self, user_id: &UserId, device_list: Vec<u8>) -> TransportResult<()> {
         let request = v2::PutDeviceListRequest { device_list };
         let _: v2::DeviceList = Self::json(

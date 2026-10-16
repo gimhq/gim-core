@@ -21,6 +21,7 @@ use gim_proto::envelope::Content;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex, Notify};
 
+use crate::hubs::{http_connector, HubConnector, HubHandle, StoredSession};
 use crate::identity::merge_directory_user;
 use crate::invites::{load_pending_invites, PendingInvites};
 use crate::send::TypingState;
@@ -99,6 +100,7 @@ pub struct ClientBuilder<S> {
     secrets: Arc<dyn SecretStorage>,
     data_dir: Option<PathBuf>,
     sync_settings: SyncSettings,
+    hub_connector: Option<HubConnector>,
 }
 
 impl<S: StateStore + 'static> ClientBuilder<S> {
@@ -113,6 +115,7 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
             secrets,
             data_dir: None,
             sync_settings: SyncSettings::default(),
+            hub_connector: None,
         }
     }
 
@@ -181,6 +184,13 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
         self
     }
 
+    /// Opens transports to the user's other hubs by URL; default: HTTP
+    /// (see [`HubConnector`]).
+    pub fn hub_connector(mut self, connector: HubConnector) -> Self {
+        self.hub_connector = Some(connector);
+        self
+    }
+
     /// App-private directory; temporary media files (encrypted uploads,
     /// partial downloads) go to its `tmp` subdirectory. Required.
     pub fn data_dir(mut self, dir: impl Into<PathBuf>) -> Self {
@@ -239,6 +249,12 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
                 pending_invites: std::sync::Mutex::new(pending_invites),
                 invite_wake: Notify::new(),
                 commit_retry_at: Default::default(),
+                hub_connector: self.hub_connector.unwrap_or_else(http_connector),
+                hubs: Default::default(),
+                hub_lock: Mutex::new(()),
+                home_hub: Default::default(),
+                persist_lock: Default::default(),
+                hosting_updated: AtomicBool::new(false),
             }),
         })
     }
@@ -337,6 +353,18 @@ pub(crate) struct Inner<S> {
     /// Unix milliseconds before which the sync loop does not resubmit a
     /// group's pending commit, after a peer hub failure.
     pub(crate) commit_retry_at: std::sync::Mutex<HashMap<GroupId, u64>>,
+    pub(crate) hub_connector: HubConnector,
+    /// Transports and sessions of the hubs other than the home hub.
+    pub(crate) hubs: std::sync::Mutex<HashMap<String, HubHandle>>,
+    /// Serializes hub registry updates.
+    pub(crate) hub_lock: Mutex<()>,
+    /// `hub_id` of the hub behind `transport`, once verified.
+    pub(crate) home_hub: std::sync::Mutex<Option<String>>,
+    /// Serializes writes of the session secret.
+    pub(crate) persist_lock: std::sync::Mutex<()>,
+    /// `hosting_record.updated` arrived: the hub registry is refreshed
+    /// after the events are applied.
+    pub(crate) hosting_updated: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -428,7 +456,7 @@ impl<S: StateStore + 'static> Client<S> {
         let Some(encoded) = self.inner.secrets.get(SESSION_SECRET_KEY)? else {
             return Ok(false);
         };
-        let session: Session = serde_json::from_slice(&encoded)
+        let StoredSession { session, hubs } = serde_json::from_slice(&encoded)
             .map_err(|e| ClientError::InvalidSession(e.to_string()))?;
         if self.inner.secrets.get(DEVICE_KEY_SECRET_KEY)?.is_none() {
             tracing::warn!("stored session has no device key; signing out");
@@ -463,6 +491,7 @@ impl<S: StateStore + 'static> Client<S> {
         if !repaired.is_empty() {
             tracing::warn!(groups = ?repaired, "dropped dangling pending commits");
         }
+        self.load_hub_tokens(hubs);
         self.set_session(session.clone());
         match self.valid_token().await {
             // `renew_token` signed out.
@@ -1672,6 +1701,7 @@ impl<S: StateStore + 'static> Client<S> {
             .session
             .write()
             .unwrap_or_else(|e| e.into_inner()) = None;
+        self.handles().clear();
         Ok(self.inner.secrets.delete(SESSION_SECRET_KEY)?)
     }
 }

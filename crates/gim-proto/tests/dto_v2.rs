@@ -20,18 +20,6 @@ const GID: &str =
 const CLIENT: &str = "9f1c2a7e-0b44-4d0e-9a51-3c8f1e2d6b70";
 const TS: i64 = 1_760_479_200_000;
 
-/// Multi-homing additions of the contract (H4) that `gim_proto::v2` does
-/// not model yet; C4 adds them. Also deferred there: the error codes
-/// `duplicate_key_package` and `kp_not_claimed`.
-const DEFERRED_SCHEMAS: [&str; 4] = [
-    "HostingRecordHub",
-    "HostingRecordUpdated",
-    "HostingRecordUpdatedEvent",
-    "HubInfo",
-];
-const DEFERRED_EVENTS: [&str; 1] = ["hosting_record.updated"];
-const DEFERRED_ROUTES: [&str; 1] = ["/v2/hub"];
-
 fn spec() -> Value {
     serde_json::from_str(include_str!("../contract/hub-v2/openapi.json"))
         .expect("openapi.json parses")
@@ -89,6 +77,13 @@ fn event_json(cursor: u64, event_type: &str, data: Value) -> Value {
     json!({"cursor": cursor, "created_at": TS, "type": event_type, "data": data})
 }
 
+fn hosting_record_updated_json() -> Value {
+    json!({
+        "user_id": USER, "seq": 4, "expires_at": TS, "hosted": true,
+        "hubs": [{"hub_id": HUB, "priority": 0}],
+    })
+}
+
 fn error_json() -> Value {
     json!({"code": "not_found", "message": "no such group"})
 }
@@ -118,6 +113,11 @@ fn cases() -> Vec<Case> {
             "Health",
             json!({"status": "ok", "version": "0.1.0"}),
             json!({"status": "ok", "version": "0.1.0"}),
+        ),
+        case::<HubInfo>(
+            "HubInfo",
+            json!({"hub_id": HUB, "hub_root_pubkey": b(), "version": "0.1.0"}),
+            json!({"hub_id": HUB, "hub_root_pubkey": b(), "version": "0.1.0"}),
         ),
         case::<AuthChallengeRequest>(
             "AuthChallengeRequest",
@@ -347,6 +347,21 @@ fn cases() -> Vec<Case> {
                 json!({"user_id": USER, "expires_at": TS, "seq": 2}),
             ),
         ),
+        case::<HostingRecordHub>(
+            "HostingRecordHub",
+            json!({"hub_id": HUB, "priority": 1}),
+            json!({"hub_id": HUB, "priority": 1}),
+        ),
+        case::<HostingRecordUpdated>(
+            "HostingRecordUpdated",
+            hosting_record_updated_json(),
+            hosting_record_updated_json(),
+        ),
+        case::<Event>(
+            "HostingRecordUpdatedEvent",
+            event_json(8, "hosting_record.updated", hosting_record_updated_json()),
+            event_json(8, "hosting_record.updated", hosting_record_updated_json()),
+        ),
         case::<EventList>(
             "EventList",
             json!({"events": [event_json(5, "keypackages.low", json!({"available": 1}))], "next_cursor": 5}),
@@ -522,7 +537,6 @@ fn every_schema_has_a_dto() {
     let mut ours: BTreeSet<String> = cases().iter().map(|c| c.schema.to_owned()).collect();
     ours.extend(enums().iter().map(|(name, _)| (*name).to_owned()));
     ours.insert("Event".to_owned());
-    ours.extend(DEFERRED_SCHEMAS.iter().map(|name| (*name).to_owned()));
     assert_eq!(
         all, ours,
         "openapi.json schema set changed; update gim_proto::v2"
@@ -562,14 +576,14 @@ fn event_types_match() {
             EventData::HOSTING_RECORD_EXPIRING,
             "HostingRecordExpiringEvent",
         ),
+        (
+            EventData::HOSTING_RECORD_UPDATED,
+            "HostingRecordUpdatedEvent",
+        ),
     ];
     assert_eq!(
         keys(mapping),
-        ours.iter()
-            .map(|(t, _)| *t)
-            .chain(DEFERRED_EVENTS)
-            .map(str::to_owned)
-            .collect()
+        ours.iter().map(|(t, _)| (*t).to_owned()).collect()
     );
     for (event_type, schema) in ours {
         assert_eq!(
@@ -581,8 +595,7 @@ fn event_types_match() {
     }
 }
 
-/// Every route in openapi.json but [`DEFERRED_ROUTES`] is covered by
-/// `paths` (35 operations, 1 of them deferred).
+/// Every route in openapi.json is covered by `paths` (35 operations).
 #[test]
 fn paths_cover_openapi() {
     let spec = spec();
@@ -613,6 +626,7 @@ fn paths_cover_openapi() {
     ];
     let mut ours: BTreeSet<String> = [
         paths::HEALTHZ,
+        paths::HUB,
         paths::AUTH_CHALLENGE,
         paths::AUTH_SESSION,
         paths::ME,
@@ -635,7 +649,6 @@ fn paths_cover_openapi() {
             .iter()
             .map(|path| path.replace("%7B", "{").replace("%7D", "}")),
     );
-    ours.extend(DEFERRED_ROUTES.iter().map(|route| (*route).to_owned()));
     assert_eq!(routes, ours);
 }
 
@@ -817,8 +830,9 @@ fn known_events() {
             event_json(5, "keypackages.low", json!({"available": 2})),
             event_json(6, "device_list.updated", json!({"user_id": USER, "device_list": "AAEC"})),
             event_json(7, "hosting_record.expiring", json!({"user_id": USER, "expires_at": TS, "seq": 3})),
+            event_json(8, "hosting_record.updated", hosting_record_updated_json()),
         ],
-        "next_cursor": 7
+        "next_cursor": 8
     }));
     let events = list.events;
     assert!(matches!(&events[0].data, EventData::Message(m) if m.kind == MessageKind::Application));
@@ -855,6 +869,26 @@ fn known_events() {
         })
     );
     assert_eq!(events[6].data.event_type(), "hosting_record.expiring");
+    assert_eq!(
+        events[7].data,
+        EventData::HostingRecordUpdated(HostingRecordUpdated {
+            user_id: USER.into(),
+            seq: 4,
+            expires_at: TS,
+            hosted: true,
+            hubs: vec![HostingRecordHub {
+                hub_id: HUB.into(),
+                priority: 0,
+            }],
+        })
+    );
+    assert_eq!(events[7].data.event_type(), "hosting_record.updated");
+}
+
+#[test]
+fn multihoming_error_codes() {
+    assert_eq!(DUPLICATE_KEY_PACKAGE, "duplicate_key_package");
+    assert_eq!(KP_NOT_CLAIMED, "kp_not_claimed");
 }
 
 #[test]
