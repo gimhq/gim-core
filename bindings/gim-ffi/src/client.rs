@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -22,7 +23,7 @@ use crate::error::parse_id;
 use crate::hooks::HookSecrets;
 use crate::timeline::PlatformTimeZone;
 use crate::{
-    ChatListDiff, ChatListListener, ConnectionState, DeviceInfo, GimError, LinkSession,
+    ChatListDiff, ChatListListener, ChatState, ConnectionState, DeviceInfo, GimError, LinkSession,
     LocalTimeZone, PendingApproval, PlatformHooks, Session, TaskHandle, Timeline, UserProfile,
 };
 
@@ -262,6 +263,41 @@ impl GimClient {
             .ok_or(GimError::NotRegistered)?
             .device
             .user_id)
+    }
+
+    /// `ChatNotActive` if this device is leaving or has left the chat.
+    async fn check_active(&self, group_id: &GroupId) -> Result<(), GimError> {
+        let gid = group_id.clone();
+        let membership = self
+            .read(move |store| Ok(store.chat(&gid)?.map(|chat| chat.membership)))
+            .await?;
+        match membership {
+            Some(membership @ (Membership::Leaving | Membership::Left)) => {
+                Err(GimError::ChatNotActive {
+                    chat_id: group_id.to_string(),
+                    state: gim_ui::ChatState::from(membership).into(),
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Runs a call that sends to the chat: `ChatNotActive` instead of it if
+    /// the chat is leaving or left, also when that is why it failed with
+    /// `InvalidInput`.
+    async fn in_active_chat<T>(
+        &self,
+        group_id: &GroupId,
+        call: impl Future<Output = Result<T, GimError>>,
+    ) -> Result<T, GimError> {
+        self.check_active(group_id).await?;
+        match call.await {
+            Err(err @ GimError::InvalidInput { .. }) => {
+                self.check_active(group_id).await?;
+                Err(err)
+            }
+            result => result,
+        }
     }
 
     fn stop_sync_tasks(&self) {
@@ -697,14 +733,20 @@ impl GimClient {
             .into_iter()
             .map(|id| parse_id("user_ids", id))
             .collect::<Result<Vec<UserId>, _>>()?;
-        Ok(sdk.add_members(&group_id, &users).await?)
+        self.in_active_chat(&group_id, async {
+            Ok(sdk.add_members(&group_id, &users).await?)
+        })
+        .await
     }
 
     pub async fn remove_member(&self, chat_id: String, user_id: String) -> Result<(), GimError> {
         let sdk = self.sdk()?;
         let group_id: GroupId = parse_id("chat_id", chat_id)?;
         let user_id: UserId = parse_id("user_id", user_id)?;
-        Ok(sdk.remove_members(&group_id, &[user_id]).await?)
+        self.in_active_chat(&group_id, async {
+            Ok(sdk.remove_members(&group_id, &[user_id]).await?)
+        })
+        .await
     }
 
     /// Current members of the chat, one entry per user (not per device),
@@ -715,10 +757,39 @@ impl GimClient {
             .await
     }
 
+    /// Starts leaving the chat; returns once the hub accepted the request,
+    /// with the chat `ChatState::Leaving` (see `ChatState`). Calling it again
+    /// while leaving re-sends the request. `ChatNotActive` once left.
     pub async fn leave_chat(&self, chat_id: String) -> Result<(), GimError> {
         let sdk = self.sdk()?;
         let group_id: GroupId = parse_id("chat_id", chat_id)?;
-        Ok(sdk.leave(&group_id).await?)
+        match sdk.leave(&group_id).await {
+            Err(err) => {
+                let err = GimError::from(err);
+                if matches!(err, GimError::InvalidInput { .. }) {
+                    self.check_active(&group_id).await?;
+                }
+                Err(err)
+            }
+            Ok(()) => Ok(()),
+        }
+    }
+
+    /// Where this device stands in the chat, from local state (no network
+    /// call, so it is available right after a restart).
+    pub async fn chat_state(&self, chat_id: String) -> Result<ChatState, GimError> {
+        let group_id: GroupId = parse_id("chat_id", chat_id)?;
+        let membership = self
+            .read(move |store| {
+                store
+                    .chat(&group_id)?
+                    .map(|chat| chat.membership)
+                    .ok_or_else(|| GimError::NotFound {
+                        reason: format!("chat {group_id}"),
+                    })
+            })
+            .await?;
+        Ok(gim_ui::ChatState::from(membership).into())
     }
 
     /// Updates the group name and/or avatar and shares them with the
@@ -736,8 +807,11 @@ impl GimClient {
             let mime = image_mime(Path::new(&path));
             (PathBuf::from(path), mime)
         });
-        sdk.set_group_info(&group_id, name, avatar).await?;
-        Ok(())
+        self.in_active_chat(&group_id, async {
+            sdk.set_group_info(&group_id, name, avatar).await?;
+            Ok(())
+        })
+        .await
     }
 
     /// Queues a text message and returns its message id (the client id).
@@ -751,7 +825,10 @@ impl GimClient {
         let group_id: GroupId = parse_id("chat_id", chat_id)?;
         let reply_to: Option<MessageId> =
             reply_to.map(|id| parse_id("reply_to", id)).transpose()?;
-        Ok(sdk.send_text(&group_id, body, reply_to).await?.into())
+        self.in_active_chat(&group_id, async {
+            Ok(sdk.send_text(&group_id, body, reply_to).await?.into())
+        })
+        .await
     }
 
     /// Encrypts, uploads and sends a file; returns its message id. The file
@@ -769,13 +846,17 @@ impl GimClient {
         let reply_to: Option<MessageId> =
             reply_to.map(|id| parse_id("reply_to", id)).transpose()?;
         let data_dir = self.data_dir.clone();
-        let copy =
-            tokio::task::spawn_blocking(move || copy_outgoing(&data_dir, Path::new(&file_path)))
-                .await??;
-        Ok(sdk
-            .send_media(&group_id, copy, mime, caption, reply_to)
-            .await?
-            .into())
+        self.in_active_chat(&group_id, async {
+            let copy = tokio::task::spawn_blocking(move || {
+                copy_outgoing(&data_dir, Path::new(&file_path))
+            })
+            .await??;
+            Ok(sdk
+                .send_media(&group_id, copy, mime, caption, reply_to)
+                .await?
+                .into())
+        })
+        .await
     }
 
     pub async fn edit_message(
@@ -787,8 +868,11 @@ impl GimClient {
         let sdk = self.sdk()?;
         let group_id: GroupId = parse_id("chat_id", chat_id)?;
         let target: MessageId = parse_id("message_id", message_id)?;
-        sdk.edit(&group_id, &target, new_body).await?;
-        Ok(())
+        self.in_active_chat(&group_id, async {
+            sdk.edit(&group_id, &target, new_body).await?;
+            Ok(())
+        })
+        .await
     }
 
     pub async fn delete_message(
@@ -799,8 +883,11 @@ impl GimClient {
         let sdk = self.sdk()?;
         let group_id: GroupId = parse_id("chat_id", chat_id)?;
         let target: MessageId = parse_id("message_id", message_id)?;
-        sdk.delete(&group_id, &target).await?;
-        Ok(())
+        self.in_active_chat(&group_id, async {
+            sdk.delete(&group_id, &target).await?;
+            Ok(())
+        })
+        .await
     }
 
     pub async fn react(
@@ -812,8 +899,11 @@ impl GimClient {
         let sdk = self.sdk()?;
         let group_id: GroupId = parse_id("chat_id", chat_id)?;
         let target: MessageId = parse_id("message_id", message_id)?;
-        sdk.react(&group_id, &target, emoji).await?;
-        Ok(())
+        self.in_active_chat(&group_id, async {
+            sdk.react(&group_id, &target, emoji).await?;
+            Ok(())
+        })
+        .await
     }
 
     pub async fn unreact(
@@ -825,16 +915,20 @@ impl GimClient {
         let sdk = self.sdk()?;
         let group_id: GroupId = parse_id("chat_id", chat_id)?;
         let target: MessageId = parse_id("message_id", message_id)?;
-        sdk.unreact(&group_id, &target, emoji).await?;
-        Ok(())
+        self.in_active_chat(&group_id, async {
+            sdk.unreact(&group_id, &target, emoji).await?;
+            Ok(())
+        })
+        .await
     }
 
     /// Re-queues a message in `SendState::Failed`.
     pub async fn retry_send(&self, chat_id: String, message_id: String) -> Result<(), GimError> {
         let sdk = self.sdk()?;
-        let _: GroupId = parse_id("chat_id", chat_id)?;
+        let group_id: GroupId = parse_id("chat_id", chat_id)?;
         let message_id: MessageId = parse_id("message_id", message_id)?;
-        Ok(sdk.retry_send(&message_id).await?)
+        self.in_active_chat(&group_id, async { Ok(sdk.retry_send(&message_id).await?) })
+            .await
     }
 
     /// Removes an unsent message from the outbox and the timeline.

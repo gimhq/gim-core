@@ -1082,6 +1082,12 @@ public protocol GimClientProtocol: AnyObject, Sendable {
     func chatMembers(chatId: String) async throws  -> [UserProfile]
     
     /**
+     * Where this device stands in the chat, from local state (no network
+     * call, so it is available right after a restart).
+     */
+    func chatState(chatId: String) async throws  -> ChatState
+    
+    /**
      * Claims `handle` in the hub directory, so others find the user with
      * `find_user`; `Server(409)` if it is taken.
      */
@@ -1154,6 +1160,11 @@ public protocol GimClientProtocol: AnyObject, Sendable {
      */
     func findUser(handle: String) async throws  -> UserProfile?
     
+    /**
+     * Starts leaving the chat; returns once the hub accepted the request,
+     * with the chat `ChatState::Leaving` (see `ChatState`). Calling it again
+     * while leaving re-sends the request. `ChatNotActive` once left.
+     */
     func leaveChat(chatId: String) async throws 
     
     /**
@@ -1480,6 +1491,26 @@ open func chatMembers(chatId: String)async throws  -> [UserProfile]  {
 }
     
     /**
+     * Where this device stands in the chat, from local state (no network
+     * call, so it is available right after a restart).
+     */
+open func chatState(chatId: String)async throws  -> ChatState  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_gim_core_fn_method_gimclient_chat_state(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(chatId)
+                )
+            },
+            pollFunc: ffi_gim_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_gim_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_gim_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeChatState_lift,
+            errorHandler: FfiConverterTypeGimError_lift
+        )
+}
+    
+    /**
      * Claims `handle` in the hub directory, so others find the user with
      * `find_user`; `Server(409)` if it is taken.
      */
@@ -1734,6 +1765,11 @@ open func findUser(handle: String)async throws  -> UserProfile?  {
         )
 }
     
+    /**
+     * Starts leaving the chat; returns once the hub accepted the request,
+     * with the chat `ChatState::Leaving` (see `ChatState`). Calling it again
+     * while leaving re-sends the request. `ChatNotActive` once left.
+     */
 open func leaveChat(chatId: String)async throws   {
     return
         try  await uniffiRustCallAsync(
@@ -3366,6 +3402,12 @@ public protocol TimelineProtocol: AnyObject, Sendable {
     func chatId()  -> String
     
     /**
+     * The chat's current state, from local state; `None` while the chat
+     * is not known locally.
+     */
+    func chatState()  -> ChatState?
+    
+    /**
      * Loads up to `count` older items into the timeline (delivered through
      * the listeners). Returns whether more history exists.
      */
@@ -3453,6 +3495,19 @@ open func chatId() -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
         uniffiCallStatus in
     uniffi_gim_core_fn_method_timeline_chat_id(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The chat's current state, from local state; `None` while the chat
+     * is not known locally.
+     */
+open func chatState() -> ChatState?  {
+    return try!  FfiConverterOptionTypeChatState.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_gim_core_fn_method_timeline_chat_state(
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
@@ -3951,13 +4006,22 @@ public struct ChatSummary: Equatable, Hashable {
     public var unreadCount: UInt32
     public var updatedAtMs: UInt64
     public var memberCount: UInt32
+    /**
+     * Where this device stands in the chat; read from local state, so it is
+     * right from the first callback after a restart.
+     */
+    public var state: ChatState
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(chatId: String, kind: ChatKind, 
         /**
          * Group name, or the other user's display name for a direct chat.
-         */name: String, avatar: MediaRef?, lastMessage: MessagePreview?, unreadCount: UInt32, updatedAtMs: UInt64, memberCount: UInt32) {
+         */name: String, avatar: MediaRef?, lastMessage: MessagePreview?, unreadCount: UInt32, updatedAtMs: UInt64, memberCount: UInt32, 
+        /**
+         * Where this device stands in the chat; read from local state, so it is
+         * right from the first callback after a restart.
+         */state: ChatState) {
         self.chatId = chatId
         self.kind = kind
         self.name = name
@@ -3966,6 +4030,7 @@ public struct ChatSummary: Equatable, Hashable {
         self.unreadCount = unreadCount
         self.updatedAtMs = updatedAtMs
         self.memberCount = memberCount
+        self.state = state
     }
 
     
@@ -3991,7 +4056,8 @@ public struct FfiConverterTypeChatSummary: FfiConverterRustBuffer {
                 lastMessage: FfiConverterOptionTypeMessagePreview.read(from: &buf), 
                 unreadCount: FfiConverterUInt32.read(from: &buf), 
                 updatedAtMs: FfiConverterUInt64.read(from: &buf), 
-                memberCount: FfiConverterUInt32.read(from: &buf)
+                memberCount: FfiConverterUInt32.read(from: &buf), 
+                state: FfiConverterTypeChatState.read(from: &buf)
         )
     }
 
@@ -4004,6 +4070,7 @@ public struct FfiConverterTypeChatSummary: FfiConverterRustBuffer {
         FfiConverterUInt32.write(value.unreadCount, into: &buf)
         FfiConverterUInt64.write(value.updatedAtMs, into: &buf)
         FfiConverterUInt32.write(value.memberCount, into: &buf)
+        FfiConverterTypeChatState.write(value.state, into: &buf)
     }
 }
 
@@ -4877,6 +4944,97 @@ public func FfiConverterTypeChatListDiff_lower(_ value: ChatListDiff) -> RustBuf
 
 
 
+/**
+ * Where this device stands in a chat. Changes reach the chat list as a
+ * `Set` diff of the row: `Active -> Leaving` when `leave_chat` starts,
+ * `Leaving -> Left` once another member commits the removal, and
+ * `Leaving -> Active` if the hub refuses the leave for good.
+ */
+
+public enum ChatState: Equatable, Hashable {
+    
+    /**
+     * A member; messages can be sent.
+     */
+    case active
+    /**
+     * Leaving was asked for: still a member until another member commits
+     * the removal, but nothing can be sent (`GimError::ChatNotActive`).
+     * gim-core keeps and re-sends the leave across restarts.
+     */
+    case leaving
+    /**
+     * Removed (after leaving, by another member or by the hub); history is
+     * kept, nothing can be sent.
+     */
+    case left
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ChatState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeChatState: FfiConverterRustBuffer {
+    typealias SwiftType = ChatState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ChatState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .active
+        
+        case 2: return .leaving
+        
+        case 3: return .left
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ChatState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .active:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .leaving:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .left:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChatState_lift(_ buf: RustBuffer) throws -> ChatState {
+    return try FfiConverterTypeChatState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChatState_lower(_ value: ChatState) -> RustBuffer {
+    return FfiConverterTypeChatState.lower(value)
+}
+
+
+
 
 public enum ConnectionState: Equatable, Hashable {
     
@@ -5026,6 +5184,12 @@ enum GimError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
      */
     case Internal(reason: String
     )
+    /**
+     * The call sends to (or changes) a chat this device is leaving or has
+     * left. `state` is `Leaving` or `Left`; see `ChatState`.
+     */
+    case ChatNotActive(chatId: String, state: ChatState
+    )
 
     
 
@@ -5084,6 +5248,10 @@ public struct FfiConverterTypeGimError: FfiConverterRustBuffer {
         case 10: return .NotImplemented
         case 11: return .Internal(
             reason: try FfiConverterString.read(from: &buf)
+            )
+        case 12: return .ChatNotActive(
+            chatId: try FfiConverterString.read(from: &buf), 
+            state: try FfiConverterTypeChatState.read(from: &buf)
             )
 
          default: throw UniffiInternalError.unexpectedEnumCase
@@ -5150,6 +5318,12 @@ public struct FfiConverterTypeGimError: FfiConverterRustBuffer {
         case let .Internal(reason):
             writeInt(&buf, Int32(11))
             FfiConverterString.write(reason, into: &buf)
+            
+        
+        case let .ChatNotActive(chatId,state):
+            writeInt(&buf, Int32(12))
+            FfiConverterString.write(chatId, into: &buf)
+            FfiConverterTypeChatState.write(state, into: &buf)
             
         }
     }
@@ -5628,7 +5802,15 @@ public enum TimelineItem: Equatable, Hashable {
      */
     case dateSeparator(dayStartMs: UInt64
     )
-    case membershipChange(userName: String, change: MembershipChangeKind, atMs: UInt64
+    case membershipChange(userName: String, change: MembershipChangeKind, atMs: UInt64, 
+        /**
+         * The user who joined or left; the signed-in user's own `Left` has
+         * their user id here.
+         */userId: String, 
+        /**
+         * The user who caused the change: the adder or remover, the user
+         * themselves for `Left`. `None` if unknown.
+         */actorUserId: String?
     )
 
 
@@ -5657,7 +5839,7 @@ public struct FfiConverterTypeTimelineItem: FfiConverterRustBuffer {
         case 2: return .dateSeparator(dayStartMs: try FfiConverterUInt64.read(from: &buf)
         )
         
-        case 3: return .membershipChange(userName: try FfiConverterString.read(from: &buf), change: try FfiConverterTypeMembershipChangeKind.read(from: &buf), atMs: try FfiConverterUInt64.read(from: &buf)
+        case 3: return .membershipChange(userName: try FfiConverterString.read(from: &buf), change: try FfiConverterTypeMembershipChangeKind.read(from: &buf), atMs: try FfiConverterUInt64.read(from: &buf), userId: try FfiConverterString.read(from: &buf), actorUserId: try FfiConverterOptionString.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -5678,11 +5860,13 @@ public struct FfiConverterTypeTimelineItem: FfiConverterRustBuffer {
             FfiConverterUInt64.write(dayStartMs, into: &buf)
             
         
-        case let .membershipChange(userName,change,atMs):
+        case let .membershipChange(userName,change,atMs,userId,actorUserId):
             writeInt(&buf, Int32(3))
             FfiConverterString.write(userName, into: &buf)
             FfiConverterTypeMembershipChangeKind.write(change, into: &buf)
             FfiConverterUInt64.write(atMs, into: &buf)
+            FfiConverterString.write(userId, into: &buf)
+            FfiConverterOptionString.write(actorUserId, into: &buf)
             
         }
     }
@@ -5915,6 +6099,30 @@ fileprivate struct FfiConverterOptionTypeUserProfile: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeUserProfile.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeChatState: FfiConverterRustBuffer {
+    typealias SwiftType = ChatState?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeChatState.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeChatState.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -6275,6 +6483,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_gim_core_checksum_method_gimclient_chat_members() != 23360) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_gim_core_checksum_method_gimclient_chat_state() != 39217) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_gim_core_checksum_method_gimclient_claim_handle() != 25957) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6314,7 +6525,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_gim_core_checksum_method_gimclient_find_user() != 25186) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_gim_core_checksum_method_gimclient_leave_chat() != 31409) {
+    if (uniffi_gim_core_checksum_method_gimclient_leave_chat() != 60569) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_gimclient_local_state_reset() != 57050) {
@@ -6438,6 +6649,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_timeline_chat_id() != 55675) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_gim_core_checksum_method_timeline_chat_state() != 202) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_timeline_paginate_backwards() != 49934) {

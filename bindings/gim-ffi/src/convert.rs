@@ -4,7 +4,7 @@
 use gim_ui::VectorDiff;
 
 use crate::{
-    ChatKind, ChatListDiff, ChatSummary, DeviceInfo, MediaRef, MembershipChangeKind,
+    ChatKind, ChatListDiff, ChatState, ChatSummary, DeviceInfo, MediaRef, MembershipChangeKind,
     MessageContent, MessageItem, MessagePreview, ReactionGroup, ReplyPreview, SendState,
     TimelineDiff, TimelineItem, UserProfile,
 };
@@ -109,6 +109,17 @@ impl From<gim_ui::ChatListItem> for ChatSummary {
             unread_count: c.unread_count,
             updated_at_ms: c.updated_at_ms,
             member_count: c.member_count,
+            state: c.state.into(),
+        }
+    }
+}
+
+impl From<gim_ui::ChatState> for ChatState {
+    fn from(state: gim_ui::ChatState) -> Self {
+        match state {
+            gim_ui::ChatState::Active => Self::Active,
+            gim_ui::ChatState::Leaving => Self::Leaving,
+            gim_ui::ChatState::Left => Self::Left,
         }
     }
 }
@@ -135,10 +146,14 @@ impl From<gim_ui::TimelineItem> for TimelineItem {
                 user_name,
                 change,
                 at_ms,
+                user_id,
+                actor_user_id,
             } => Self::MembershipChange {
                 user_name,
                 change: change.into(),
                 at_ms,
+                user_id: user_id.into(),
+                actor_user_id: actor_user_id.map(Into::into),
             },
         }
     }

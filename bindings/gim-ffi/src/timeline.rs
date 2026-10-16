@@ -3,7 +3,7 @@ use std::sync::Arc;
 use futures_util::StreamExt;
 
 use crate::callbacks::{Callbacks, Foreign};
-use crate::{GimError, TaskHandle, TimelineItem};
+use crate::{ChatState, GimError, TaskHandle, TimelineItem};
 
 /// Incremental change to a timeline, mirroring eyeball-im `VectorDiff`.
 /// Apply the diffs of one `on_update` call in order.
@@ -71,6 +71,12 @@ impl Timeline {
 impl Timeline {
     pub fn chat_id(&self) -> String {
         self.inner.group_id().to_string()
+    }
+
+    /// The chat's current state, from local state; `None` while the chat
+    /// is not known locally.
+    pub fn chat_state(&self) -> Option<ChatState> {
+        self.inner.chat_state().map(Into::into)
     }
 
     /// Subscribes to timeline changes. The first callback is a `Reset` with

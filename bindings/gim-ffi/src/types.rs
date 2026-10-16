@@ -48,6 +48,26 @@ pub struct ChatSummary {
     pub unread_count: u32,
     pub updated_at_ms: u64,
     pub member_count: u32,
+    /// Where this device stands in the chat; read from local state, so it is
+    /// right from the first callback after a restart.
+    pub state: ChatState,
+}
+
+/// Where this device stands in a chat. Changes reach the chat list as a
+/// `Set` diff of the row: `Active -> Leaving` when `leave_chat` starts,
+/// `Leaving -> Left` once another member commits the removal, and
+/// `Leaving -> Active` if the hub refuses the leave for good.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ChatState {
+    /// A member; messages can be sent.
+    Active,
+    /// Leaving was asked for: still a member until another member commits
+    /// the removal, but nothing can be sent (`GimError::ChatNotActive`).
+    /// gim-core keeps and re-sends the leave across restarts.
+    Leaving,
+    /// Removed (after leaving, by another member or by the hub); history is
+    /// kept, nothing can be sent.
+    Left,
 }
 
 /// Last message shown in a chat list row.
@@ -76,6 +96,12 @@ pub enum TimelineItem {
         user_name: String,
         change: MembershipChangeKind,
         at_ms: u64,
+        /// The user who joined or left; the signed-in user's own `Left` has
+        /// their user id here.
+        user_id: String,
+        /// The user who caused the change: the adder or remover, the user
+        /// themselves for `Left`. `None` if unknown.
+        actor_user_id: Option<String>,
     },
 }
 
