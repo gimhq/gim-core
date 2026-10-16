@@ -191,6 +191,37 @@ pub enum SendState {
     Failed { reason: String },
 }
 
+/// Where a hub of the user's hosting record stands on this device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum HubState {
+    /// Listed, but this device has no URL for it that proved the hub's
+    /// identity (none known yet, or only one shared by another own device):
+    /// never contacted.
+    Unverified,
+    /// Listed, and its URL proved the hub's identity.
+    Verified,
+    /// No longer listed by the hosting record.
+    Removed,
+}
+
+/// A hub of the user's hosting record, for the hub settings screen.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct HubInfo {
+    pub hub_id: String,
+    /// Client API base URL, once known.
+    pub url: Option<String>,
+    pub state: HubState,
+    /// Priority in the hosting record; lower is preferred.
+    pub priority: u8,
+    /// The first listed hub: submissions go there first.
+    pub is_primary: bool,
+    /// The hub this client was created for (`ClientConfig.server_url`);
+    /// it cannot be removed.
+    pub is_home: bool,
+    /// This device holds a session on the hub.
+    pub signed_in: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum ConnectionState {
     Offline,
