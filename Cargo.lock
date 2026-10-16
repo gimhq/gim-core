@@ -1281,6 +1281,7 @@ dependencies = [
  "gim-identity",
  "gim-proto",
  "gim-sdk",
+ "serde_json",
  "tempfile",
  "tokio",
  "url",

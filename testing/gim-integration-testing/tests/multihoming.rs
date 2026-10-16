@@ -9,7 +9,9 @@
 //! stopped; no duplicate messages; no KeyPackage claimed twice"):
 //! [`failover_keeps_messaging_while_the_primary_hub_is_stopped`],
 //! [`added_hub_is_listed_learned_by_a_linked_device_and_delivers_once`] and
-//! [`key_packages_are_disjoint_per_hub_and_never_claimed_twice`].
+//! [`key_packages_are_disjoint_per_hub_and_never_claimed_twice`]. Push
+//! with multi-homing (plan §4 P, multihoming.md §8):
+//! [`only_the_primary_hub_pushes_and_a_fallback_takes_over`].
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::Ordering;
@@ -18,11 +20,16 @@ use std::time::Duration;
 use gim_base::model::{HubState, Membership};
 use gim_base::StateReader;
 use gim_common::{now_ms, GroupId, UserId};
+use gim_core::NotificationKind;
 use gim_crypto::MlsEngine;
 use gim_identity::SignedHostingRecord;
 use gim_integration_testing::federation::{Federation, Hub, FED_TIMEOUT};
+use gim_integration_testing::push::{
+    self, assert_message_payload, displayed, log_registration, new_pushes, process_all,
+    process_in_extension, push_log, pushes,
+};
 use gim_integration_testing::sdk::{FaultyHub, SdkDevice};
-use gim_integration_testing::{eventually_within, unique_handle};
+use gim_integration_testing::{eventually_within, messages, text, unique_handle, TestUser};
 use gim_proto::envelope::{Content, HubLocation};
 use gim_sdk::transport::Transport;
 use gim_sdk::{ClientError, HubStatus};
@@ -792,6 +799,272 @@ async fn a_shared_url_of_another_hub_stays_unverified() {
     alice.client.add_hub(&fed.b.url).await.unwrap();
     sync_until_signed_in("the phone verified b's URL", &phone, &fed.b).await;
     assert_eq!(relay.faults.sign_ins.load(Ordering::SeqCst), 0);
+}
+
+/// The seqs of the message pushes for `group` that `hub` sent to
+/// `device_id`.
+fn pushed_seqs(hub: &Hub, device_id: &str, group: &str) -> BTreeSet<u64> {
+    pushes(&hub.url, device_id, "message", group)
+        .iter()
+        .map(push::seq)
+        .collect()
+}
+
+/// The message push for `(group, seq)` that `hub` sent to `device_id`.
+fn pushed(hub: &Hub, device_id: &str, group: &str, seq: u64) -> Option<serde_json::Value> {
+    pushes(&hub.url, device_id, "message", group)
+        .into_iter()
+        .find(|p| push::seq(p) == seq)
+}
+
+/// Sends `body` from bob, waits until carol (on b only, registered) got a
+/// push for it from b, then a moment more for a (which gets the message
+/// from the owner c on its own). Returns the seqs of the message pushes
+/// for `group` that a and b sent to `device` meanwhile.
+async fn send_and_collect(
+    fed: &Federation,
+    bob: &TestUser,
+    carol: &TestUser,
+    device: &str,
+    group: &str,
+    body: &str,
+) -> (BTreeSet<u64>, BTreeSet<u64>) {
+    let (on_a, on_b) = (
+        pushed_seqs(&fed.a, device, group),
+        pushed_seqs(&fed.b, device, group),
+    );
+    let carol_before = push_log(&fed.b.url, &carol.device_id).len();
+    bob.client
+        .send_text(group.to_string(), body.into(), None)
+        .await
+        .unwrap();
+    new_pushes(
+        &fed.b.url,
+        &carol.device_id,
+        carol_before,
+        FED_TIMEOUT,
+        |pushed| pushed.iter().any(|p| p["gid"] == group),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    (
+        &pushed_seqs(&fed.a, device, group) - &on_a,
+        &pushed_seqs(&fed.b, device, group) - &on_b,
+    )
+}
+
+/// Sends from bob until b pushes to `device` and a does not (the hubs
+/// reload alice's record up to 10 s late, and a sees a returning b with
+/// its next ping). Returns the seqs b pushed for the last text.
+async fn until_only_b_pushes(
+    fed: &Federation,
+    bob: &TestUser,
+    carol: &TestUser,
+    device: &str,
+    group: &str,
+    label: &str,
+) -> BTreeSet<u64> {
+    let deadline = tokio::time::Instant::now() + FED_TIMEOUT;
+    for i in 0.. {
+        let (new_a, new_b) =
+            send_and_collect(fed, bob, carol, device, group, &format!("{label} {i}")).await;
+        if new_a.is_empty() && !new_b.is_empty() {
+            return new_b;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{label}: a pushed {new_a:?}, b pushed {new_b:?}"
+        );
+    }
+    unreachable!()
+}
+
+/// Push with multi-homing (multihoming.md §8): alice registers on a, adds
+/// b (which gets the registration from the sync loop) and makes b primary.
+/// Only b pushes to her device; with b stopped, a takes over after the
+/// failover delay (`GIM_HUB_PUSH_FAILOVER_SECONDS=5`); when b is back it
+/// pushes the messages it missed too, with the same `collapse_id` as a's
+/// pushes, and the extension shows the same notification for both. After
+/// sign-out neither hub pushes to the device. Carol (on b) is registered
+/// as a control.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs 3 federated hubs: GIM_MULTIHOMING=1 scripts/integration-test.sh"]
+async fn only_the_primary_hub_pushes_and_a_fallback_takes_over() {
+    let Some((fed, c)) = three_hubs("only_the_primary_hub_pushes_and_a_fallback_takes_over") else {
+        return;
+    };
+    let alice = TestUser::register(&fed.a.url, "alice", "Alice").await;
+    alice
+        .client
+        .register_push(log_registration())
+        .await
+        .unwrap();
+    let added = alice.client.add_hub(fed.b.url.clone()).await.unwrap();
+    assert!(added.signed_in, "{added:?}");
+    alice
+        .client
+        .set_primary_hub(fed.b.hub_id.clone())
+        .await
+        .unwrap();
+    let bob = TestUser::register(&c.url, "bob", "Bob").await;
+    let carol = TestUser::register(&fed.b.url, "carol", "Carol").await;
+    carol
+        .client
+        .register_push(log_registration())
+        .await
+        .unwrap();
+    let group = bob
+        .client
+        .create_group_chat(
+            "Crew Sporades".into(),
+            vec![alice.user_id.clone(), carol.user_id.clone()],
+        )
+        .await
+        .unwrap();
+    assert!(
+        owned_by(&GroupId::new(group.as_str()).unwrap(), &c),
+        "created on bob's primary c: {group}"
+    );
+    for user in [&alice, &carol] {
+        let (chats, _handle) = user.chat_list().await;
+        chats
+            .wait("the group joined", |c| c.iter().any(|c| c.chat_id == group))
+            .await;
+    }
+    // Carol only gets pushes: no receipts of hers replace alice's.
+    carol.client.stop_sync().await.unwrap();
+    let device = alice.device_id.clone();
+
+    // Only the primary b pushes, with the registration it got when added.
+    until_only_b_pushes(&fed, &bob, &carol, &device, &group, "settle").await;
+    let (new_a, new_b) = send_and_collect(&fed, &bob, &carol, &device, &group, "Primary b").await;
+    assert!(new_a.is_empty(), "a pushed {new_a:?}");
+    // Every push is processed, as the extension is woken for each.
+    let from_b: Vec<_> = new_b
+        .iter()
+        .map(|seq| pushed(&fed.b, &device, &group, *seq).unwrap())
+        .collect();
+    from_b
+        .iter()
+        .for_each(|p| assert_message_payload(p, &group));
+    let shown = process_all(&fed.a.url, &alice.hooks, &from_b).await;
+    let shown = displayed(&shown);
+    assert_eq!(shown.len(), 1, "{shown:?} for {from_b:?}");
+    assert_eq!(shown[0].kind, NotificationKind::Message, "{shown:?}");
+    assert_eq!(shown[0].body, "Primary b");
+    assert_eq!(shown[0].sender_display_name.as_deref(), Some("Bob"));
+
+    // With b stopped, a pushes once b is down in its view.
+    let a_before = pushed_seqs(&fed.a, &device, &group);
+    fed.b.stop();
+    let restart = Restart(&fed.b);
+    let stopped = tokio::time::Instant::now();
+    let mut sent = 0;
+    loop {
+        sent += 1;
+        bob.client
+            .send_text(group.clone(), format!("b down {sent}"), None)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        if pushed_seqs(&fed.a, &device, &group) != a_before {
+            break;
+        }
+        assert!(
+            stopped.elapsed() < FED_TIMEOUT,
+            "a never pushed while b was down"
+        );
+    }
+    let failover = stopped.elapsed();
+    // A last text after a took over: a pushes it, b missed it.
+    let a_seqs = |fed: &Federation| &pushed_seqs(&fed.a, &device, &group) - &a_before;
+    let newest = a_seqs(&fed).last().copied();
+    bob.client
+        .send_text(group.clone(), "b down last".into(), None)
+        .await
+        .unwrap();
+    eventually_within("a pushes the last text", FED_TIMEOUT, || async {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        (a_seqs(&fed).last().copied() > newest).then_some(())
+    })
+    .await;
+
+    // Back, b pushes what it missed: the same messages, one notification
+    // each.
+    fed.b.start().await;
+    drop(restart);
+    eventually_within("a and b pushed the same message", FED_TIMEOUT, || async {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let b_seqs = pushed_seqs(&fed.b, &device, &group);
+        (a_seqs(&fed).intersection(&b_seqs).count() > 0).then_some(())
+    })
+    .await;
+    // The newest message both pushed that the extension shows (carol's
+    // receipts after b's return may be pushed by both as well).
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let b_seqs = pushed_seqs(&fed.b, &device, &group);
+    let mut found = None;
+    let shared: Vec<u64> = a_seqs(&fed).intersection(&b_seqs).copied().collect();
+    for seq in shared.iter().rev() {
+        let from_a = pushed(&fed.a, &device, &group, *seq).unwrap();
+        let on_a = process_in_extension(&fed.a.url, &alice.hooks, &from_a).await;
+        if on_a.should_display {
+            found = Some((*seq, from_a, on_a));
+            break;
+        }
+    }
+    let (both, from_a, on_a) = found.expect("a shown message pushed by a and b");
+    let from_b = pushed(&fed.b, &device, &group, both).unwrap();
+    assert_message_payload(&from_a, &group);
+    assert_eq!(from_b["message_id"], from_a["message_id"]);
+    assert_eq!(from_b["collapse_id"], from_a["collapse_id"]);
+    let on_b = process_in_extension(&fed.a.url, &alice.hooks, &from_b).await;
+    assert_eq!(on_a.kind, NotificationKind::Message, "{on_a:?}");
+    assert!(on_a.body.starts_with("b down"), "{on_a:?}");
+    assert_eq!(on_b.collapse_id, on_a.collapse_id);
+    assert_eq!(on_b.message_id, on_a.message_id);
+    assert_eq!(on_b.body, on_a.body);
+    until_only_b_pushes(&fed, &bob, &carol, &device, &group, "b back").await;
+    let (timeline, _handle) = alice.timeline(&group).await;
+    let items = timeline
+        .wait("the missed message at alice", |items| {
+            messages(items)
+                .iter()
+                .any(|m| text(m) == Some(on_a.body.as_str()))
+        })
+        .await;
+    let copies = messages(&items)
+        .iter()
+        .filter(|m| text(m) == Some(on_a.body.as_str()))
+        .count();
+    assert_eq!(copies, 1, "{items:?}");
+
+    // Signed out: b pushes no more, and neither does a once b is down
+    // again.
+    alice.client.sign_out().await.unwrap();
+    let (new_a, new_b) =
+        send_and_collect(&fed, &bob, &carol, &device, &group, "after sign-out").await;
+    assert!(
+        new_a.is_empty() && new_b.is_empty(),
+        "a {new_a:?}, b {new_b:?}"
+    );
+    let a_before = pushed_seqs(&fed.a, &device, &group);
+    fed.b.stop();
+    let restart = Restart(&fed.b);
+    let window = tokio::time::Instant::now() + failover * 2 + Duration::from_secs(5);
+    let mut i = 0;
+    while tokio::time::Instant::now() < window {
+        i += 1;
+        bob.client
+            .send_text(group.clone(), format!("signed out {i}"), None)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(pushed_seqs(&fed.a, &device, &group), a_before);
+    fed.b.start().await;
+    drop(restart);
 }
 
 /// The users of `claimer`'s KeyPackage claims on the hub at `url`.
