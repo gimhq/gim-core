@@ -117,8 +117,18 @@ user's signed DeviceList. Handles are optional directory entries pointing at a u
   recorded. URLs of the other hubs come from the user's other devices (shared in the hidden self
   group); a URL is used only after `GET /v2/hub` there proves the listed hub id, then the device
   signs in there too. The registry follows the record on every publication and on the hub's
-  `hosting_record.updated` event. All traffic still goes through the hub the client was created
-  with; no API for the app yet.
+  `hosting_record.updated` event. No API for the app yet.
+  - Receiving: while sync runs, the device follows every listed hub with a verified URL, each with
+    its own event stream (long-poll fallback) and persisted cursor; hubs joining or leaving the
+    registry are started or stopped. Every hub delivers the same messages; each is applied once
+    (by chat id and seq, which the owning hub assigns together with the message id), so the
+    timeline is the same whichever hub delivered first, and messages keep arriving through the
+    other hubs while one is down. A missing message is read from the hub that showed the gap,
+    else from another listed hub. A chat invitation is joined once and acknowledged on every hub
+    that holds it. An expired cursor on one hub is recovered from that hub alone. `connectionState`
+    reports the hub the client was created with; the other hubs' failures are retried in the
+    background.
+  - Sending, uploads and all other requests still go through the hub the client was created with.
 - **Federation**: users are addressed by user id everywhere; a remote user may have no handle and is
   shown by display name, else a short user id. A chat is created on the own hub, which owns it (the
   `<hub_id>/` prefix of its id); in chats owned by another hub, messages and member changes of
