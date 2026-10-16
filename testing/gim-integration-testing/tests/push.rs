@@ -169,9 +169,12 @@ async fn pushed_invite_joins_the_group_once() {
         "{shown:?}"
     );
     assert_eq!(shown.sender_user_id.as_deref(), Some(bob.user_id.as_str()));
-    assert_eq!(
-        shown.sender_display_name.as_deref(),
-        Some("Bob"),
+    // The hub keeps no display names: "Bob" comes from his profile
+    // announcement, sent through his outbox after the Commit; until it is on
+    // the hub the directory handle is the best name known.
+    let inviter = shown.sender_display_name.as_deref();
+    assert!(
+        inviter == Some("Bob") || inviter == Some(bob.handle.as_str()),
         "{shown:?}"
     );
 
