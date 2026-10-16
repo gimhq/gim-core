@@ -316,6 +316,11 @@ pub struct HubRecord {
     pub hub_id: String,
     /// Client API base URL, once known.
     pub url: Option<String>,
+    /// `url` came from another own device (the self group), not from this
+    /// device: it is never contacted, so the hub stays unverified, until a
+    /// URL is set on this device. A relay at a wrong URL could otherwise
+    /// obtain this device's session there.
+    pub url_shared: bool,
     /// Priority in the hosting record; lower is preferred.
     pub priority: u8,
     /// The 32-byte root public key `GET /v2/hub` at `url` returned, once
@@ -324,6 +329,19 @@ pub struct HubRecord {
     /// Unix milliseconds of the last successful contact.
     pub last_seen_ms: Option<u64>,
     pub state: HubState,
+}
+
+/// A KeyPackage this device generated for one hub (multi-homing): a
+/// KeyPackage is uploaded to at most one hub, ever, so its `kp_ref` is
+/// recorded with that hub before the upload and never removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyPackageRecord {
+    /// The MLS KeyPackageRef.
+    pub kp_ref: Vec<u8>,
+    pub hub_id: String,
+    pub last_resort: bool,
+    /// Unix milliseconds.
+    pub created_at_ms: u64,
 }
 
 /// A device that left a group (a self-remove proposal, or a hub-side

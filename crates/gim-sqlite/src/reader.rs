@@ -4,9 +4,9 @@
 use std::collections::BTreeSet;
 
 use gim_base::model::{
-    Chat, DepartedMember, GroupCursor, GroupMessage, HubRecord, HubState, MediaCacheEntry,
-    MembershipChangeKind, MembershipEvent, Message, OutboxEntry, OutboxState, PendingCommit,
-    PendingInvite, PendingLeave, UserInfo,
+    Chat, DepartedMember, GroupCursor, GroupMessage, HubRecord, HubState, KeyPackageRecord,
+    MediaCacheEntry, MembershipChangeKind, MembershipEvent, Message, OutboxEntry, OutboxState,
+    PendingCommit, PendingInvite, PendingLeave, UserInfo,
 };
 use gim_base::{StateReader, StoreError};
 use gim_common::{DeviceRef, GroupId, MessageId, UserId};
@@ -320,6 +320,14 @@ impl StateReader for Reader<'_> {
         )
     }
 
+    fn hub_cursor(&self, hub_id: &str) -> StoreResult<Option<u64>> {
+        self.query_one(
+            "SELECT cursor FROM hub_cursors WHERE hub_id = ?1",
+            [hub_id],
+            |row| get(row, 0),
+        )
+    }
+
     fn group_cursor(&self, group_id: &GroupId) -> StoreResult<GroupCursor> {
         Ok(self
             .query_one(
@@ -481,7 +489,7 @@ impl StateReader for Reader<'_> {
 
     fn hubs(&self) -> StoreResult<Vec<HubRecord>> {
         self.query(
-            "SELECT hub_id, url, priority, verified_root_pubkey, last_seen_ms, state \
+            "SELECT hub_id, url, priority, verified_root_pubkey, last_seen_ms, state, url_shared \
              FROM hubs ORDER BY hub_id",
             [],
             |row| {
@@ -492,6 +500,23 @@ impl StateReader for Reader<'_> {
                     verified_root_pubkey: get(row, 3)?,
                     last_seen_ms: get(row, 4)?,
                     state: hub_state(&get::<String>(row, 5)?)?,
+                    url_shared: get(row, 6)?,
+                })
+            },
+        )
+    }
+
+    fn key_package_records(&self) -> StoreResult<Vec<KeyPackageRecord>> {
+        self.query(
+            "SELECT kp_ref, hub_id, last_resort, created_at_ms \
+             FROM key_package_ledger ORDER BY kp_ref",
+            [],
+            |row| {
+                Ok(KeyPackageRecord {
+                    kp_ref: get(row, 0)?,
+                    hub_id: get(row, 1)?,
+                    last_resort: get(row, 2)?,
+                    created_at_ms: get(row, 3)?,
                 })
             },
         )

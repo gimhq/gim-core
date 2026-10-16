@@ -23,6 +23,7 @@ mod invites;
 mod link;
 mod media;
 mod outbox;
+mod routing;
 mod secrets;
 mod self_group;
 mod send;

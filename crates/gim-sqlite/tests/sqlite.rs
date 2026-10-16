@@ -8,9 +8,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use common::{group, key, setup, text, Device, NOW};
 use gim_base::model::{
     Chat, ChatKind, ChatMember, DepartedMember, GroupCursor, GroupMessage, HubRecord, HubState,
-    MediaCacheEntry, Membership, MembershipChangeKind, MembershipEvent, Message, MessageContent,
-    MessageKind, OutboxEntry, OutboxKind, OutboxState, PendingCommit, PendingInvite, PendingLeave,
-    PendingMedia, PendingWelcome, PreparedPayload, SendState, UserInfo,
+    KeyPackageRecord, MediaCacheEntry, Membership, MembershipChangeKind, MembershipEvent, Message,
+    MessageContent, MessageKind, OutboxEntry, OutboxKind, OutboxState, PendingCommit,
+    PendingInvite, PendingLeave, PendingMedia, PendingWelcome, PreparedPayload, SendState,
+    UserInfo,
 };
 use gim_base::{
     BaseError, MemoryStore, StateReader, StateStore, StoreError, StoreTxn, WriteTarget,
@@ -195,6 +196,18 @@ fn reads_match_memory_store() {
         .map(|h| h.hub_id)
         .collect();
     assert_eq!(hubs, ["ha", "hb"]);
+    let ledger = sqlite.key_package_records().unwrap();
+    assert_eq!(ledger.len(), 2);
+    assert!(ledger[1].last_resort);
+    // A KeyPackage belongs to one hub, ever.
+    let mut moved = ledger[0].clone();
+    moved.hub_id = "hc".into();
+    assert!(sqlite
+        .transaction(|txn| Ok(txn.add_key_package_record(&moved)?))
+        .is_err());
+    assert!(memory
+        .transaction(|txn| Ok(txn.add_key_package_record(&moved)?))
+        .is_err());
     let crew = sqlite.membership_events(&group("crew")).unwrap();
     let order: Vec<(u64, &str)> = crew.iter().map(|e| (e.seq, e.user_id.as_str())).collect();
     assert_eq!(order, [(3, "bob"), (3, "carol"), (9, "bob")]);
@@ -366,6 +379,7 @@ fn write_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
     txn.upsert_outbox(&upload)?;
 
     txn.set_global_cursor(42)?;
+    txn.set_hub_cursor("hb", 17)?;
     txn.set_group_cursor(
         &group("crew"),
         &GroupCursor {
@@ -441,6 +455,7 @@ fn write_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
     txn.upsert_hub(&HubRecord {
         hub_id: "hb".into(),
         url: None,
+        url_shared: false,
         priority: 1,
         verified_root_pubkey: None,
         last_seen_ms: None,
@@ -449,11 +464,20 @@ fn write_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
     txn.upsert_hub(&HubRecord {
         hub_id: "ha".into(),
         url: Some("https://a.example".into()),
+        url_shared: false,
         priority: 0,
         verified_root_pubkey: Some(vec![7; 32]),
         last_seen_ms: Some(NOW),
         state: HubState::Verified,
     })?;
+    for (kp_ref, hub_id, last_resort) in [(vec![2, 2], "hb", true), (vec![1], "ha", false)] {
+        txn.add_key_package_record(&KeyPackageRecord {
+            kp_ref,
+            hub_id: hub_id.into(),
+            last_resort,
+            created_at_ms: NOW,
+        })?;
+    }
     for (g, user, dev) in [
         ("crew", "dave", "phone"),
         ("crew", "carol", "laptop"),
@@ -520,6 +544,8 @@ fn update_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
     txn.upsert_outbox(&failed)?;
     txn.remove_outbox(&id("o2"))?;
     txn.set_global_cursor(43)?;
+    txn.set_hub_cursor("hb", 18)?;
+    txn.set_hub_cursor("hc", 1)?;
     txn.unpark_message(&group("crew"), 6)?;
     txn.remove_media("b1")?;
     txn.upsert_user(&UserInfo {
@@ -552,6 +578,7 @@ fn update_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
     txn.upsert_hub(&HubRecord {
         hub_id: "hc".into(),
         url: Some("https://c.example".into()),
+        url_shared: true,
         priority: 255,
         verified_root_pubkey: None,
         last_seen_ms: None,
@@ -633,6 +660,10 @@ fn assert_same_reads(expected: &impl StateReader, actual: &impl StateReader) {
         expected.device_lists().unwrap()
     );
     assert_eq!(actual.hubs().unwrap(), expected.hubs().unwrap());
+    assert_eq!(
+        actual.key_package_records().unwrap(),
+        expected.key_package_records().unwrap()
+    );
     for message_id in ["m1", "m2", "m4", "u1", "u3", "d1", "none"].map(id) {
         assert_eq!(
             actual.message(&message_id).unwrap(),
@@ -661,6 +692,12 @@ fn assert_same_reads(expected: &impl StateReader, actual: &impl StateReader) {
         actual.global_cursor().unwrap(),
         expected.global_cursor().unwrap()
     );
+    for hub_id in ["ha", "hb", "hc"] {
+        assert_eq!(
+            actual.hub_cursor(hub_id).unwrap(),
+            expected.hub_cursor(hub_id).unwrap()
+        );
+    }
     assert_eq!(
         actual.media_entries().unwrap(),
         expected.media_entries().unwrap()

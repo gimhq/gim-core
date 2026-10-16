@@ -19,8 +19,8 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use gim_base::model::{
-    Chat, DepartedMember, GroupCursor, GroupMessage, HubRecord, MediaCacheEntry, MembershipEvent,
-    Message, OutboxEntry, PendingCommit, PendingInvite, PendingLeave, UserInfo,
+    Chat, DepartedMember, GroupCursor, GroupMessage, HubRecord, KeyPackageRecord, MediaCacheEntry,
+    MembershipEvent, Message, OutboxEntry, PendingCommit, PendingInvite, PendingLeave, UserInfo,
 };
 use gim_base::{BaseError, StateReader, StateStore, StoreError, StoreTxn, WriteTarget};
 use gim_common::{DeviceRef, GroupId, MessageId, UserId};
@@ -387,6 +387,11 @@ macro_rules! delegate_reader {
                 Reader($conn).global_cursor()
             }
 
+            fn hub_cursor(&self, hub_id: &str) -> StoreResult<Option<u64>> {
+                let $this = self;
+                Reader($conn).hub_cursor(hub_id)
+            }
+
             fn group_cursor(&self, group_id: &GroupId) -> StoreResult<GroupCursor> {
                 let $this = self;
                 Reader($conn).group_cursor(group_id)
@@ -460,6 +465,11 @@ macro_rules! delegate_reader {
             fn hubs(&self) -> StoreResult<Vec<HubRecord>> {
                 let $this = self;
                 Reader($conn).hubs()
+            }
+
+            fn key_package_records(&self) -> StoreResult<Vec<KeyPackageRecord>> {
+                let $this = self;
+                Reader($conn).key_package_records()
             }
         }
     };
@@ -585,6 +595,14 @@ impl StoreTxn for SqliteTxn<'_> {
             "INSERT INTO sync_state (id, global_cursor) VALUES (1, ?1) \
              ON CONFLICT (id) DO UPDATE SET global_cursor = excluded.global_cursor",
             [cursor],
+        )
+    }
+
+    fn set_hub_cursor(&mut self, hub_id: &str, cursor: u64) -> StoreResult<()> {
+        self.check(WriteTarget::GroupCursor)?;
+        self.execute(
+            "INSERT OR REPLACE INTO hub_cursors (hub_id, cursor) VALUES (?1, ?2)",
+            params![hub_id, cursor],
         )
     }
 
@@ -756,21 +774,35 @@ impl StoreTxn for SqliteTxn<'_> {
     fn upsert_hub(&mut self, hub: &HubRecord) -> StoreResult<()> {
         self.execute(
             "INSERT OR REPLACE INTO hubs \
-             (hub_id, url, priority, verified_root_pubkey, last_seen_ms, state) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (hub_id, url, priority, verified_root_pubkey, last_seen_ms, state, url_shared) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 hub.hub_id,
                 hub.url,
                 hub.priority,
                 hub.verified_root_pubkey,
                 hub.last_seen_ms,
-                hub_state_str(hub.state)
+                hub_state_str(hub.state),
+                hub.url_shared
             ],
         )
     }
 
     fn remove_hub(&mut self, hub_id: &str) -> StoreResult<()> {
         self.execute("DELETE FROM hubs WHERE hub_id = ?1", [hub_id])
+    }
+
+    fn add_key_package_record(&mut self, record: &KeyPackageRecord) -> StoreResult<()> {
+        self.execute(
+            "INSERT INTO key_package_ledger (kp_ref, hub_id, last_resort, created_at_ms) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                record.kp_ref,
+                record.hub_id,
+                record.last_resort,
+                record.created_at_ms
+            ],
+        )
     }
 
     fn clear(&mut self) -> StoreResult<()> {

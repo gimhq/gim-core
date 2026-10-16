@@ -159,16 +159,7 @@ impl<S: StateStore + 'static> Client<S> {
                 Err(err) => return self.record_failure(&base, &id, err).await,
             };
             let posted = self
-                .authed(|t| {
-                    let (gid, client_id) = (group_id.clone(), client_id.clone());
-                    let payload = prepared.payload.clone();
-                    async move {
-                        self.inner
-                            .transport
-                            .post_message(&t, &gid, client_id, payload)
-                            .await
-                    }
-                })
+                .post_routed(&group_id, &client_id, &prepared.payload)
                 .await;
             match posted {
                 Ok(seq) => {
