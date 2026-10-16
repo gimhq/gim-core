@@ -14,7 +14,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use gim_base::model::{MembershipChangeKind, StateChange};
 use gim_base::{MemoryStore, StateReader};
-use gim_common::GroupId;
+use gim_common::{ClientId, GroupId};
 use gim_sdk::testing::{FakeTransport, MemorySecretStorage};
 use gim_sdk::transport::{Transport, TransportError};
 use gim_sdk::{
@@ -642,6 +642,72 @@ async fn garbage_is_invalid_and_undecryptable_gives_generic_content() {
     let content = alice.client.process_push(&missing).await.unwrap();
     assert_eq!(content.kind, NotificationKind::Generic);
     assert!(content.should_display);
+}
+
+/// A message the hub stores but this device cannot decrypt gives generic
+/// content: the push may have been for a text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn undecryptable_message_on_the_hub_gives_generic_content() {
+    let hub = FakeTransport::new();
+    let (alice, bob, group_id) = direct_chat(&hub).await;
+    let epoch = hub.service().epoch(&group_id).unwrap();
+    let seq = hub
+        .service()
+        .post_message(
+            &group_id,
+            &bob.device(),
+            ClientId::new("garbled").unwrap(),
+            epoch,
+            vec![0, 1, 0, 2, 0xde, 0xad],
+        )
+        .unwrap();
+
+    let payload = target_payload("message", &group_id, seq);
+    let content = alice.client.process_push(&payload).await.unwrap();
+    assert_eq!(content.kind, NotificationKind::Generic, "{content:?}");
+    assert_eq!(content.body, GENERIC_BODY);
+    assert!(content.should_display);
+    assert_eq!(content.chat_id.as_ref(), Some(&group_id));
+}
+
+/// Carol's read receipt for Bob's text, which Alice already got: applying
+/// it changes nothing on Alice's device (not her message), and nothing new
+/// is unread, so the push is silent rather than generic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn receipt_push_of_another_member_for_a_shown_text_is_silent() {
+    let hub = FakeTransport::new();
+    let alice = Peer::fake(&hub, "alice").await;
+    let bob = Peer::fake(&hub, "bob").await;
+    let carol = Peer::fake(&hub, "carol").await;
+    let group_id = bob
+        .client
+        .create_group_chat(Some("Regatta".into()), &[alice.user_id(), carol.user_id()])
+        .await
+        .unwrap();
+    alice.client.sync_once().await.unwrap();
+    carol.client.sync_once().await.unwrap();
+    bob.send_text(&group_id, "Lines ashore at Lumbarda").await;
+    let text = latest(&hub, &group_id, MessageKind::Application);
+    let shown = alice
+        .client
+        .process_push(&message_payload(&text, false))
+        .await
+        .unwrap();
+    assert!(shown.should_display, "{shown:?}");
+    carol.client.sync_once().await.unwrap();
+    carol.client.mark_read(&group_id).await.unwrap();
+    let receipt = latest(&hub, &group_id, MessageKind::Application);
+    assert!(receipt.seq > text.seq);
+
+    let content = alice
+        .client
+        .process_push(&message_payload(&receipt, false))
+        .await
+        .unwrap();
+    assert!(!content.should_display, "{content:?}");
+    assert_eq!(content.chat_id.as_ref(), Some(&group_id));
+    alice.client.sync_once().await.unwrap();
+    assert_eq!(alice.texts(&group_id), ["Lines ashore at Lumbarda"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -34,11 +34,12 @@
 //! hub, the same copy the stream delivers.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use gim_base::model::{
     Chat, ChatKind, GroupCursor, GroupMessage, IncomingEvent, Membership, MembershipChangeKind,
-    Message, MessageContent, MessageKind, StateChange,
+    Message, MessageContent, StateChange,
 };
 use gim_base::{BaseError, StateReader, StateStore};
 use gim_common::{now_ms, GroupId, MessageId, UserId};
@@ -66,6 +67,10 @@ const SNAPSHOT_MESSAGES: usize = 100;
 /// A pushed seq further than this past the group's applied history is not
 /// caught up from a push (the stream backfills it).
 const MAX_CATCH_UP: u64 = BACKFILL_PAGE as u64;
+/// Fetches of a pushed message the hub does not serve yet, and the pause
+/// between them.
+const FETCH_ATTEMPTS: u32 = 3;
+const FETCH_RETRY_DELAY: Duration = Duration::from_millis(300);
 
 /// The device's push registration (contract `push.md` §1). Every field is
 /// opaque to the hub, which passes it to the push server.
@@ -436,21 +441,22 @@ impl<R: StateReader + ?Sized> Describe<'_, R> {
     /// What applying the message of `kind` at `(group_id, seq)` changed: a
     /// new message at that seq, a reaction to an earlier message (compared
     /// with `before`), or else something silent (edit, delete, receipt,
-    /// typing, group info, a commit, anything in a self group). An
-    /// application message that changed nothing could not be decrypted:
-    /// generic content.
+    /// typing, group info, a commit, anything in a self group). A message
+    /// that could not be decrypted (`rejected`): generic content. A
+    /// decrypted one may change nothing here, e.g. another member's receipt
+    /// for a message that is not this device's: silent.
     fn applied(
         &self,
         group_id: &GroupId,
         seq: u64,
-        kind: MessageKind,
+        rejected: bool,
         changes: &[StateChange],
         before: &[Message],
     ) -> Result<NotificationContent, BaseError> {
         if self.store.self_groups()?.contains(group_id) {
             return self.base(None, NotificationKind::Generic, false);
         }
-        if changes.is_empty() && kind == MessageKind::Application {
+        if rejected {
             return self.base(Some(group_id), NotificationKind::Generic, true);
         }
         let upserted = changes.iter().filter_map(|change| match change {
@@ -844,10 +850,9 @@ impl<S: StateStore + 'static> Client<S> {
             tracing::info!(%group_id, seq, "pushed message not found");
             return Ok(self.generic(push, true).await);
         };
-        let kind = message.kind;
         let events = vec![IncomingEvent::Message(message)];
         let link = self.home_link();
-        let Some((changes, before)) = self
+        let Some((changes, before, rejected)) = self
             .apply_pushed(session, &link, events, Some(group_id))
             .await?
         else {
@@ -859,7 +864,7 @@ impl<S: StateStore + 'static> Client<S> {
         }
         let gid = group_id.clone();
         self.describe(Some(session), push, move |d| {
-            d.applied(&gid, seq, kind, &changes, &before)
+            d.applied(&gid, seq, rejected, &changes, &before)
         })
         .await
     }
@@ -889,31 +894,41 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// The message at `(group_id, seq)` from the hubs (the home hub first,
-    /// then the other reachable listed hubs).
+    /// then the other reachable listed hubs). A push may outrun the hub
+    /// that serves the message (e.g. another hub of a federated group), so
+    /// a missing message is asked for again a few times.
     async fn fetch_message(&self, group_id: &GroupId, seq: u64) -> Result<Option<GroupMessage>> {
-        let history = self
-            .group_history_from(
-                &self.home_link(),
-                group_id,
-                seq.saturating_sub(1),
-                Some(seq),
-            )
-            .await?;
-        Ok(history.and_then(|messages| messages.into_iter().find(|m| m.seq == seq)))
+        for attempt in 1..=FETCH_ATTEMPTS {
+            let history = self
+                .group_history_from(
+                    &self.home_link(),
+                    group_id,
+                    seq.saturating_sub(1),
+                    Some(seq),
+                )
+                .await?;
+            let found = history.and_then(|messages| messages.into_iter().find(|m| m.seq == seq));
+            if found.is_some() || attempt == FETCH_ATTEMPTS {
+                return Ok(found);
+            }
+            tokio::time::sleep(FETCH_RETRY_DELAY).await;
+        }
+        Ok(None)
     }
 
     /// Applies `events` of the hub of `link` through the sync apply path,
     /// under the group lock, leaving out the groups with an own commit not
-    /// settled yet (which only the stream may resolve). Returns the changes
-    /// and the latest messages of `snapshot` before applying; `None` if
-    /// every event was left out.
+    /// settled yet (which only the stream may resolve). Returns the changes,
+    /// the latest messages of `snapshot` before applying and whether a
+    /// message was skipped as undecryptable; `None` if every event was left
+    /// out.
     async fn apply_pushed(
         &self,
         session: &Session,
         link: &HubLink,
         events: Vec<IncomingEvent>,
         snapshot: Option<&GroupId>,
-    ) -> Result<Option<(Vec<StateChange>, Vec<Message>)>> {
+    ) -> Result<Option<(Vec<StateChange>, Vec<Message>, bool)>> {
         let _guard = self.inner.group_lock.lock().await;
         let snapshot = snapshot.cloned();
         let (pending, before) = self
@@ -943,8 +958,11 @@ impl<S: StateStore + 'static> Client<S> {
         if events.is_empty() {
             return Ok(None);
         }
+        let rejected = &self.inner.rejected_messages;
+        let rejected_before = rejected.load(Ordering::Relaxed);
         let changes = self.apply_group_events(session, link, events).await?;
-        Ok(Some((changes, before)))
+        let rejected = rejected.load(Ordering::Relaxed) != rejected_before;
+        Ok(Some((changes, before, rejected)))
     }
 
     async fn push_welcome(
