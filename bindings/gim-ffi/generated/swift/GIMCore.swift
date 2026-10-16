@@ -847,7 +847,7 @@ public func FfiConverterTypeChatListListener_lower(_ value: ChatListListener) ->
 
 /**
  * Receives connection state changes. The first callback carries the current
- * state.
+ * state. Called on gim-core's callback thread.
  */
 public protocol ConnectionStateListener: AnyObject, Sendable {
     
@@ -856,7 +856,7 @@ public protocol ConnectionStateListener: AnyObject, Sendable {
 }
 /**
  * Receives connection state changes. The first callback carries the current
- * state.
+ * state. Called on gim-core's callback thread.
  */
 open class ConnectionStateListenerImpl: ConnectionStateListener, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -2486,8 +2486,8 @@ public func FfiConverterTypeLinkSession_lower(_ value: LinkSession) -> UInt64 {
 
 /**
  * The local time zone date separators split calendar days in. Implemented
- * in Kotlin/Swift and set with `GimClient::set_local_time_zone`. May be
- * called from any Rust thread; do not call back into `GimClient` from it.
+ * in Kotlin/Swift and set with `GimClient::set_local_time_zone`. Called on
+ * gim-core's callback thread; do not call back into gim-core from it.
  */
 public protocol LocalTimeZone: AnyObject, Sendable {
     
@@ -2500,8 +2500,8 @@ public protocol LocalTimeZone: AnyObject, Sendable {
 }
 /**
  * The local time zone date separators split calendar days in. Implemented
- * in Kotlin/Swift and set with `GimClient::set_local_time_zone`. May be
- * called from any Rust thread; do not call back into `GimClient` from it.
+ * in Kotlin/Swift and set with `GimClient::set_local_time_zone`. Called on
+ * gim-core's callback thread; do not call back into gim-core from it.
  */
 open class LocalTimeZoneImpl: LocalTimeZone, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -2851,7 +2851,8 @@ public func FfiConverterTypePendingApproval_lower(_ value: PendingApproval) -> U
 
 /**
  * Services the native app provides to gim-core. Implemented in Kotlin/Swift
- * and passed to `create_client`. Methods may be called from any Rust thread.
+ * and passed to `create_client`. Called on gim-core's callback thread; do
+ * not call back into gim-core from it.
  */
 public protocol PlatformHooks: AnyObject, Sendable {
     
@@ -2889,7 +2890,8 @@ public protocol PlatformHooks: AnyObject, Sendable {
 }
 /**
  * Services the native app provides to gim-core. Implemented in Kotlin/Swift
- * and passed to `create_client`. Methods may be called from any Rust thread.
+ * and passed to `create_client`. Called on gim-core's callback thread; do
+ * not call back into gim-core from it.
  */
 open class PlatformHooksImpl: PlatformHooks, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -3584,7 +3586,8 @@ public func FfiConverterTypeTimeline_lower(_ value: Timeline) -> UInt64 {
 
 
 /**
- * Receives timeline changes, oldest item first.
+ * Receives timeline changes, oldest item first. Called on gim-core's
+ * callback thread.
  */
 public protocol TimelineListener: AnyObject, Sendable {
     
@@ -3592,7 +3595,8 @@ public protocol TimelineListener: AnyObject, Sendable {
     
 }
 /**
- * Receives timeline changes, oldest item first.
+ * Receives timeline changes, oldest item first. Called on gim-core's
+ * callback thread.
  */
 open class TimelineListenerImpl: TimelineListener, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -3789,7 +3793,8 @@ public func FfiConverterTypeTimelineListener_lower(_ value: TimelineListener) ->
 
 /**
  * Receives the users currently typing in one chat (never the signed-in
- * user). The first callback carries the current set, possibly empty.
+ * user). The first callback carries the current set, possibly empty. Called
+ * on gim-core's callback thread.
  */
 public protocol TypingListener: AnyObject, Sendable {
     
@@ -3798,7 +3803,8 @@ public protocol TypingListener: AnyObject, Sendable {
 }
 /**
  * Receives the users currently typing in one chat (never the signed-in
- * user). The first callback carries the current set, possibly empty.
+ * user). The first callback carries the current set, possibly empty. Called
+ * on gim-core's callback thread.
  */
 open class TypingListenerImpl: TypingListener, @unchecked Sendable {
     fileprivate let handle: UInt64

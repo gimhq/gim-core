@@ -2385,7 +2385,7 @@ public object FfiConverterTypeChatListListener: FfiConverter<ChatListListener, L
 
 /**
  * Receives connection state changes. The first callback carries the current
- * state.
+ * state. Called on gim-core's callback thread.
  */
 public interface ConnectionStateListener {
     
@@ -2396,7 +2396,7 @@ public interface ConnectionStateListener {
 
 /**
  * Receives connection state changes. The first callback carries the current
- * state.
+ * state. Called on gim-core's callback thread.
  */
 open class ConnectionStateListenerImpl: Disposable, AutoCloseable, ConnectionStateListener
 {
@@ -4729,8 +4729,8 @@ public object FfiConverterTypeLinkSession: FfiConverter<LinkSession, Long> {
 
 /**
  * The local time zone date separators split calendar days in. Implemented
- * in Kotlin/Swift and set with `GimClient::set_local_time_zone`. May be
- * called from any Rust thread; do not call back into `GimClient` from it.
+ * in Kotlin/Swift and set with `GimClient::set_local_time_zone`. Called on
+ * gim-core's callback thread; do not call back into gim-core from it.
  */
 public interface LocalTimeZone {
     
@@ -4745,8 +4745,8 @@ public interface LocalTimeZone {
 
 /**
  * The local time zone date separators split calendar days in. Implemented
- * in Kotlin/Swift and set with `GimClient::set_local_time_zone`. May be
- * called from any Rust thread; do not call back into `GimClient` from it.
+ * in Kotlin/Swift and set with `GimClient::set_local_time_zone`. Called on
+ * gim-core's callback thread; do not call back into gim-core from it.
  */
 open class LocalTimeZoneImpl: Disposable, AutoCloseable, LocalTimeZone
 {
@@ -5349,7 +5349,8 @@ public object FfiConverterTypePendingApproval: FfiConverter<PendingApproval, Lon
 
 /**
  * Services the native app provides to gim-core. Implemented in Kotlin/Swift
- * and passed to `create_client`. Methods may be called from any Rust thread.
+ * and passed to `create_client`. Called on gim-core's callback thread; do
+ * not call back into gim-core from it.
  */
 public interface PlatformHooks {
     
@@ -5389,7 +5390,8 @@ public interface PlatformHooks {
 
 /**
  * Services the native app provides to gim-core. Implemented in Kotlin/Swift
- * and passed to `create_client`. Methods may be called from any Rust thread.
+ * and passed to `create_client`. Called on gim-core's callback thread; do
+ * not call back into gim-core from it.
  */
 open class PlatformHooksImpl: Disposable, AutoCloseable, PlatformHooks
 {
@@ -6472,7 +6474,8 @@ public object FfiConverterTypeTimeline: FfiConverter<Timeline, Long> {
 
 
 /**
- * Receives timeline changes, oldest item first.
+ * Receives timeline changes, oldest item first. Called on gim-core's
+ * callback thread.
  */
 public interface TimelineListener {
     
@@ -6482,7 +6485,8 @@ public interface TimelineListener {
 }
 
 /**
- * Receives timeline changes, oldest item first.
+ * Receives timeline changes, oldest item first. Called on gim-core's
+ * callback thread.
  */
 open class TimelineListenerImpl: Disposable, AutoCloseable, TimelineListener
 {
@@ -6790,7 +6794,8 @@ public object FfiConverterTypeTimelineListener: FfiConverter<TimelineListener, L
 
 /**
  * Receives the users currently typing in one chat (never the signed-in
- * user). The first callback carries the current set, possibly empty.
+ * user). The first callback carries the current set, possibly empty. Called
+ * on gim-core's callback thread.
  */
 public interface TypingListener {
     
@@ -6801,7 +6806,8 @@ public interface TypingListener {
 
 /**
  * Receives the users currently typing in one chat (never the signed-in
- * user). The first callback carries the current set, possibly empty.
+ * user). The first callback carries the current set, possibly empty. Called
+ * on gim-core's callback thread.
  */
 open class TypingListenerImpl: Disposable, AutoCloseable, TypingListener
 {
