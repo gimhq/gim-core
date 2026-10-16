@@ -432,9 +432,12 @@ before wiping the device. With `ClientConfig.mode` `Extension`, `registerPush` a
 through the push server) and returns within about 15 s; it does not open event streams, top up
 KeyPackages or download media. What it does depends on the payload type:
 
-- a message: decrypts the inline MLS message, or fetches it from the hub by its seq, and applies
-  it like sync does. A message the stream (or another hub's push) already applied is not applied
-  again; the stored message is described instead.
+- a message: fetches it from the hub by its seq and applies it like sync does. The inline MLS
+  message is ignored: the push server and the platform only relay the payload, and the bytes are
+  not bound to the seq, so a relay could otherwise suppress or replay messages. A message the
+  stream (or another hub's push) already applied is not applied again; the stored message is
+  described instead. If the fetch fails, the content is generic and the stream applies the
+  message later.
 - a chat invitation: joins the chat through the pending invitations, as sync does.
 - a member change: catches the chat up; silent.
 - a wake-up (minimal mode) or an unknown type: reads the pending events once, without moving the

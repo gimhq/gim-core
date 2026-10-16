@@ -19,24 +19,29 @@
 //! (hub-side gate); duplicates from several hubs share the `collapse_id`.
 //!
 //! [`Client::process_push`] does one bounded unit of work: it applies the
-//! pushed message (inline or fetched by `from_seq`), joins the pushed
+//! pushed message (fetched by `from_seq`), joins the pushed
 //! Welcome, catches up one group, or reads one page of events, always
 //! through the same apply path as sync, so a message applied from a push is
 //! skipped when the stream delivers it (and the other way round, per
 //! `(gid, seq)`). It never moves event cursors, never commits, never tops
 //! up KeyPackages and never downloads media: the app's sync does all that.
+//!
+//! The inline `mls_message` of a push is ignored. The push server and the
+//! platform only relay the payload, and nothing in an MLS ciphertext binds
+//! it to the hub-assigned seq; decrypting it would consume its ratchet
+//! secret, and a failure would mark the seq applied, so a relay could
+//! suppress or replay messages. The message is always fetched from the
+//! hub, the same copy the stream delivers.
 
 use std::collections::{BTreeSet, HashSet};
 use std::time::Duration;
 
-use base64::engine::general_purpose::STANDARD;
-use base64::Engine;
 use gim_base::model::{
     Chat, ChatKind, GroupMessage, IncomingEvent, Membership, MembershipChangeKind, Message,
     MessageContent, MessageKind, StateChange,
 };
 use gim_base::{BaseError, StateReader, StateStore};
-use gim_common::{now_ms, DeviceRef, GroupId, MessageId, UserId};
+use gim_common::{now_ms, GroupId, MessageId, UserId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -213,8 +218,6 @@ enum PushKind {
     Message {
         group_id: GroupId,
         seq: u64,
-        /// The inline MLS message, if present and decodable.
-        mls_message: Option<Vec<u8>>,
     },
     Welcome {
         group_id: GroupId,
@@ -245,11 +248,9 @@ impl Push {
         };
         let version = object.get("v").and_then(Value::as_u64);
         let kind = match (version, text("type")) {
-            (Some(1), Some("message")) => target().map(|(group_id, seq)| PushKind::Message {
-                group_id,
-                seq,
-                mls_message: text("mls_message").and_then(|m| STANDARD.decode(m).ok()),
-            }),
+            (Some(1), Some("message")) => {
+                target().map(|(group_id, seq)| PushKind::Message { group_id, seq })
+            }
             (Some(1), Some("welcome")) => {
                 target().map(|(group_id, seq)| PushKind::Welcome { group_id, seq })
             }
@@ -271,16 +272,6 @@ impl Push {
             | PushKind::Membership { group_id, .. } => Some(group_id),
             PushKind::Wake => None,
         }
-    }
-}
-
-/// The MLS message kind from the framing (`version`, `wire_format`):
-/// PublicMessage (Commit or Proposal) or PrivateMessage (application).
-fn wire_kind(bytes: &[u8]) -> Option<MessageKind> {
-    match bytes.get(..4)? {
-        [0, 1, 0, 1] => Some(MessageKind::Commit),
-        [0, 1, 0, 2] => Some(MessageKind::Application),
-        _ => None,
     }
 }
 
@@ -664,10 +655,10 @@ impl<S: StateStore + 'static> Client<S> {
     /// Processes a push payload (contract `push.md` §3, the JSON object the
     /// push server delivered) within `timeout`, and returns what to show:
     ///
-    /// - `message`: the message at `(gid, seq)`, decrypted from the inline
-    ///   `mls_message` or fetched with `GET
-    ///   /v2/groups/{gid}/messages?from_seq={seq}` (through the hubs), and
-    ///   applied like sync applies it. If it was applied before (the stream
+    /// - `message`: the message at `(gid, seq)`, fetched with `GET
+    ///   /v2/groups/{gid}/messages?from_seq={seq}` (the inline
+    ///   `mls_message` is ignored, see the module docs), and applied like
+    ///   sync applies it. If it was applied before (the stream
     ///   or another push), the stored message is described and nothing is
     ///   applied again. New text and media are shown (not own ones, nor
     ///   read ones), a new reaction as `reacted <emoji>`; edits, deletes,
@@ -708,13 +699,8 @@ impl<S: StateStore + 'static> Client<S> {
     async fn handle_push(&self, push: &Push) -> Result<NotificationContent> {
         let session = self.require_session()?;
         match &push.kind {
-            PushKind::Message {
-                group_id,
-                seq,
-                mls_message,
-            } => {
-                self.push_message(&session, push, group_id, *seq, mls_message.clone())
-                    .await
+            PushKind::Message { group_id, seq } => {
+                self.push_message(&session, push, group_id, *seq).await
             }
             PushKind::Welcome { group_id, seq } => {
                 self.push_welcome(&session, push, group_id, *seq).await
@@ -792,7 +778,6 @@ impl<S: StateStore + 'static> Client<S> {
         push: &Push,
         group_id: &GroupId,
         seq: u64,
-        inline: Option<Vec<u8>>,
     ) -> Result<NotificationContent> {
         let (applied, contiguous) = self.applied_seq(group_id, seq).await?;
         if applied {
@@ -802,14 +787,7 @@ impl<S: StateStore + 'static> Client<S> {
             tracing::info!(%group_id, seq, contiguous, "pushed message too far ahead; left to the stream");
             return Ok(self.generic(push, true).await);
         }
-        let mut message = None;
-        if let Some(payload) = inline {
-            message = self.inline_message(session, group_id, seq, payload).await?;
-        }
-        if message.is_none() {
-            message = self.fetch_message(group_id, seq).await?;
-        }
-        let Some(message) = message else {
+        let Some(message) = self.fetch_message(group_id, seq).await? else {
             tracing::info!(%group_id, seq, "pushed message not found");
             return Ok(self.generic(push, true).await);
         };
@@ -855,49 +833,6 @@ impl<S: StateStore + 'static> Client<S> {
             }
         })
         .await
-    }
-
-    /// The inline MLS message as a group message. The payload does not
-    /// name the sender (it is inside the ciphertext): another member that
-    /// is not revoked stands in, which the apply path only uses before
-    /// decrypting (own messages are skipped, revoked senders dropped);
-    /// everything after decryption uses the authenticated sender. `None`
-    /// if the framing is not a PublicMessage or PrivateMessage, or the
-    /// chat has no such member: the message is fetched then.
-    async fn inline_message(
-        &self,
-        session: &Session,
-        group_id: &GroupId,
-        seq: u64,
-        payload: Vec<u8>,
-    ) -> Result<Option<GroupMessage>> {
-        let Some(kind) = wire_kind(&payload) else {
-            return Ok(None);
-        };
-        let (gid, own) = (group_id.clone(), session.device.clone());
-        let sender: Option<DeviceRef> = self
-            .run(move |store, engine| {
-                let Some(chat) = store.chat(&gid)? else {
-                    return Ok(None);
-                };
-                if chat.membership == Membership::Left {
-                    return Ok(None);
-                }
-                Ok(chat
-                    .members
-                    .into_iter()
-                    .map(|m| m.device)
-                    .find(|d| *d != own && !engine.is_revoked(d)))
-            })
-            .await?;
-        Ok(sender.map(|sender| GroupMessage {
-            group_id: group_id.clone(),
-            seq,
-            sender,
-            kind,
-            payload,
-            client_id: None,
-        }))
     }
 
     /// The message at `(group_id, seq)` from the hubs (the home hub first,
@@ -1210,14 +1145,9 @@ mod tests {
         let push = Push::parse(&message).unwrap();
         assert_eq!(push.collapse_id.as_deref(), Some("m1"));
         match push.kind {
-            PushKind::Message {
-                group_id,
-                seq,
-                mls_message,
-            } => {
+            PushKind::Message { group_id, seq } => {
                 assert_eq!(group_id.as_str(), gid);
                 assert_eq!(seq, 42);
-                assert_eq!(mls_message, Some(vec![0, 1, 0, 2]));
             }
             kind => panic!("{kind:?}"),
         }
@@ -1249,13 +1179,5 @@ mod tests {
                 "{garbage:?}"
             );
         }
-    }
-
-    #[test]
-    fn the_framing_tells_handshakes_from_application_messages() {
-        assert_eq!(wire_kind(&[0, 1, 0, 1, 9]), Some(MessageKind::Commit));
-        assert_eq!(wire_kind(&[0, 1, 0, 2]), Some(MessageKind::Application));
-        assert_eq!(wire_kind(&[0, 1, 0, 3]), None);
-        assert_eq!(wire_kind(&[0, 1]), None);
     }
 }

@@ -2,7 +2,8 @@
 //! (also hubs added later, and again after a 401 renewal) and is removed
 //! from all of them; `process_push` turns every payload shape of §3 into
 //! notification content through the sync apply path, so the stream does
-//! not apply a pushed message again.
+//! not apply a pushed message again. Inline MLS bytes from the (untrusted)
+//! push relay are never applied: the message is fetched from the hub.
 
 mod mock_server;
 
@@ -234,7 +235,7 @@ async fn registration_stored_before_onboarding_reaches_the_hub_after_it() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn inline_message_is_applied_once_whoever_delivers_it_first() {
+async fn pushed_message_is_applied_once_whoever_delivers_it_first() {
     let hub = FakeTransport::new();
     let (alice, bob, group_id) = direct_chat(&hub).await;
 
@@ -448,14 +449,16 @@ async fn garbage_is_invalid_and_undecryptable_gives_generic_content() {
 
     bob.send_text(&group_id, "Real one").await;
     alice.client.sync_once().await.unwrap();
-    let mut delivered = latest(&hub, &group_id, MessageKind::Application);
-    // A ciphertext nobody can decrypt, at the next seq.
-    delivered.seq += 1;
-    let last = delivered.payload.len() - 1;
-    delivered.payload[last] ^= 0xff;
+    let real = latest(&hub, &group_id, MessageKind::Application);
+    // Corrupted inline bytes at the next seq, not on the hub yet: generic
+    // content, and the seq is not taken.
+    let mut corrupted = real.clone();
+    corrupted.seq += 1;
+    let last = corrupted.payload.len() - 1;
+    corrupted.payload[last] ^= 0xff;
     let content = alice
         .client
-        .process_push(&message_payload(&delivered, true))
+        .process_push(&message_payload(&corrupted, true))
         .await
         .unwrap();
     assert_eq!(content.kind, NotificationKind::Generic);
@@ -465,11 +468,79 @@ async fn garbage_is_invalid_and_undecryptable_gives_generic_content() {
     assert_eq!(content.sender_user_id, None);
     assert_eq!(alice.texts(&group_id), ["Real one"]);
 
+    // The real message lands at that seq: the same corrupted push now
+    // shows it (fetched from the hub) ...
+    bob.send_text(&group_id, "Second").await;
+    assert_eq!(
+        latest(&hub, &group_id, MessageKind::Application).seq,
+        corrupted.seq
+    );
+    let content = alice
+        .client
+        .process_push(&message_payload(&corrupted, true))
+        .await
+        .unwrap();
+    assert_eq!(content.kind, NotificationKind::Message);
+    assert_eq!(content.body, "Second");
+    assert_eq!(alice.texts(&group_id), ["Real one", "Second"]);
+    // ... and a third one, pushed corrupted, still reaches the stream.
+    bob.send_text(&group_id, "Third").await;
+    let mut third = latest(&hub, &group_id, MessageKind::Application);
+    third.payload = vec![0, 1, 0, 2, 0xde, 0xad];
+    let _ = alice
+        .client
+        .process_push(&message_payload(&third, true))
+        .await
+        .unwrap();
+    alice.client.sync_once().await.unwrap();
+    assert_eq!(alice.texts(&group_id), ["Real one", "Second", "Third"]);
+
     // A message the hub does not have.
-    let missing = target_payload("message", &group_id, delivered.seq + 1);
+    let missing = target_payload("message", &group_id, third.seq + 1);
     let content = alice.client.process_push(&missing).await.unwrap();
     assert_eq!(content.kind, NotificationKind::Generic);
     assert!(content.should_display);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replayed_ciphertext_under_a_new_seq_is_not_applied() {
+    let hub = FakeTransport::new();
+    let (alice, bob, group_id) = direct_chat(&hub).await;
+    bob.send_text(&group_id, "Departing Valletta").await;
+    let old = latest(&hub, &group_id, MessageKind::Application);
+    alice.client.sync_once().await.unwrap();
+
+    // The relay replays the old ciphertext under seqs the hub has not
+    // assigned yet: nothing is applied and the seqs stay free.
+    let mut replay = old.clone();
+    replay.seq = old.seq + 1;
+    let content = alice
+        .client
+        .process_push(&message_payload(&replay, true))
+        .await
+        .unwrap();
+    assert_eq!(content.kind, NotificationKind::Generic);
+    assert_eq!(alice.texts(&group_id), ["Departing Valletta"]);
+
+    // The hub assigns that seq to a new message: the replayed push shows
+    // and applies the hub's message, not the old ciphertext.
+    bob.send_text(&group_id, "Arrived in Syracuse").await;
+    assert_eq!(
+        latest(&hub, &group_id, MessageKind::Application).seq,
+        replay.seq
+    );
+    let content = alice
+        .client
+        .process_push(&message_payload(&replay, true))
+        .await
+        .unwrap();
+    assert_eq!(content.kind, NotificationKind::Message);
+    assert_eq!(content.body, "Arrived in Syracuse");
+    alice.client.sync_once().await.unwrap();
+    assert_eq!(
+        alice.texts(&group_id),
+        ["Departing Valletta", "Arrived in Syracuse"]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
