@@ -513,6 +513,7 @@ async fn key_packages_are_disjoint_per_hub_and_never_claimed_twice() {
         }
     }
     assert_eq!(last_resort_claims, 2, "b handed out the last resort twice");
+    let uploaded = ledger(&[&phone]).len();
     // The last resort still lets the phone join.
     let g = carol
         .client
@@ -523,8 +524,8 @@ async fn key_packages_are_disjoint_per_hub_and_never_claimed_twice() {
         joined(d, &g)
     })
     .await;
-    // `keypackages.low` on b: the phone tops b up with fresh ones.
-    let uploaded = ledger(&[&phone]).len();
+    // `keypackages.low` on b: the phone tops b up with fresh ones (no
+    // later than the sync that joins the group above).
     sync_until("the phone topped b up", &phone, |d| {
         ledger(&[d]).len() > uploaded
     })
