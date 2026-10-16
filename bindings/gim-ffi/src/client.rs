@@ -17,7 +17,7 @@ use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 use url::Url;
 
-use crate::callbacks::{Callbacks, DRAIN_TIMEOUT};
+use crate::callbacks::{on_callback_thread, Callbacks, Foreign, DRAIN_TIMEOUT};
 use crate::error::parse_id;
 use crate::hooks::HookSecrets;
 use crate::timeline::PlatformTimeZone;
@@ -35,14 +35,15 @@ pub struct ClientConfig {
 }
 
 /// Receives connection state changes. The first callback carries the current
-/// state.
+/// state. Called on gim-core's callback thread.
 #[uniffi::export(with_foreign)]
 pub trait ConnectionStateListener: Send + Sync {
     fn on_change(&self, state: ConnectionState);
 }
 
 /// Receives the users currently typing in one chat (never the signed-in
-/// user). The first callback carries the current set, possibly empty.
+/// user). The first callback carries the current set, possibly empty. Called
+/// on gim-core's callback thread.
 #[uniffi::export(with_foreign)]
 pub trait TypingListener: Send + Sync {
     fn on_update(&self, user_ids: Vec<String>);
@@ -159,7 +160,7 @@ impl Drop for SyncTasks {
 #[derive(uniffi::Object)]
 pub struct GimClient {
     sdk: Sdk,
-    hooks: Arc<dyn PlatformHooks>,
+    hooks: Arc<Foreign<dyn PlatformHooks>>,
     data_dir: PathBuf,
     local_state_reset: bool,
     signed_out: AtomicBool,
@@ -191,8 +192,9 @@ impl GimClient {
         hooks: Arc<dyn PlatformHooks>,
         transport: impl FnOnce(&Url) -> Result<Arc<dyn Transport>, GimError>,
     ) -> Result<Self, GimError> {
+        let hooks = Arc::new(Foreign::new(hooks));
         let server_url = parse_server_url(&config.server_url)?;
-        let data_dir = PathBuf::from(hooks.data_dir());
+        let data_dir = PathBuf::from(hooks.call(|hooks| hooks.data_dir()));
         if !data_dir.is_absolute() {
             return Err(GimError::InvalidInput {
                 reason: format!("data_dir must be absolute: {}", data_dir.display()),
@@ -219,7 +221,7 @@ impl GimClient {
         let sdk = builder.data_dir(&data_dir).build()?;
         sdk.restore_session().await?;
         let shared = Arc::new(Shared {
-            network_reachable: AtomicBool::new(hooks.is_network_reachable()),
+            network_reachable: AtomicBool::new(hooks.call(|hooks| hooks.is_network_reachable())),
             connection: watch::channel(ConnectionState::Offline).0,
         });
         Ok(Self {
@@ -274,9 +276,10 @@ impl Drop for GimClient {
     fn drop(&mut self) {
         self.callbacks.close();
         self.stop_sync_tasks();
-        // Never block a runtime thread (the client may be released from a
-        // task or a callback): a callback in flight may need it.
-        if tokio::runtime::Handle::try_current().is_err() {
+        // Never block a runtime thread or the callback thread (the client
+        // may be released from a task or a callback): a callback in flight
+        // may need it.
+        if tokio::runtime::Handle::try_current().is_err() && !on_callback_thread() {
             self.callbacks.drain(DRAIN_TIMEOUT);
         }
     }
@@ -569,8 +572,7 @@ impl GimClient {
         let hooks = self.hooks.clone();
         let data_dir = self.data_dir.clone();
         // On a blocking-pool thread: the wait must not hold a runtime thread
-        // a callback in flight may need, and the keystore hooks below then
-        // never run nested inside a foreign frame on the caller's thread.
+        // a callback in flight may need.
         tokio::task::spawn_blocking(move || {
             // Bounded: a callback that never returns does not hang sign-out.
             callbacks.drain(DRAIN_TIMEOUT);
@@ -580,7 +582,7 @@ impl GimClient {
                 ROOT_KEY_SECRET_KEY,
                 ClientBuilder::<SqliteStore>::DB_KEY_SECRET_KEY,
             ] {
-                hooks.secure_store_delete(key.to_string());
+                hooks.call(move |hooks| hooks.secure_store_delete(key.to_string()));
             }
             for suffix in ["", "-wal", "-shm", "-journal"] {
                 remove_if_exists(&data_dir.join(format!("{DATABASE_FILE_NAME}{suffix}")))?;
@@ -633,7 +635,7 @@ impl GimClient {
         let mut local = self.local_time.lock().unwrap_or_else(|e| e.into_inner());
         local.zone = zone.map(|zone| {
             Arc::new(PlatformTimeZone {
-                zone,
+                zone: Foreign::new(zone),
                 callbacks: self.callbacks.clone(),
             }) as Arc<dyn gim_ui::TimeZone>
         });
@@ -928,6 +930,7 @@ impl GimClient {
         &self,
         listener: Arc<dyn ChatListListener>,
     ) -> Result<Arc<TaskHandle>, GimError> {
+        let listener = Foreign::new(listener);
         let service = gim_ui::ChatListService::new(self.sdk()?).await?;
         let (values, stream) = service.entries();
         let callbacks = self.callbacks.clone();
@@ -937,13 +940,19 @@ impl GimClient {
             let reset = vec![ChatListDiff::Reset {
                 values: values.into_iter().map(Into::into).collect(),
             }];
-            if callbacks.call(|| listener.on_update(reset)).is_none() {
+            if callbacks
+                .call(|| listener.call(move |l| l.on_update(reset)))
+                .is_none()
+            {
                 return;
             }
             let mut stream = std::pin::pin!(stream);
             while let Some(diffs) = stream.next().await {
                 let diffs = diffs.into_iter().map(Into::into).collect();
-                if callbacks.call(|| listener.on_update(diffs)).is_none() {
+                if callbacks
+                    .call(|| listener.call(move |l| l.on_update(diffs)))
+                    .is_none()
+                {
                     return;
                 }
             }
@@ -985,16 +994,23 @@ impl GimClient {
         &self,
         listener: Arc<dyn ConnectionStateListener>,
     ) -> Result<Arc<TaskHandle>, GimError> {
+        let listener = Foreign::new(listener);
         let mut states = self.shared.connection.subscribe();
         let callbacks = self.callbacks.clone();
         Ok(Arc::new(TaskHandle::spawn(&self.callbacks, async move {
             let state = *states.borrow_and_update();
-            if callbacks.call(|| listener.on_change(state)).is_none() {
+            if callbacks
+                .call(|| listener.call(move |l| l.on_change(state)))
+                .is_none()
+            {
                 return;
             }
             while states.changed().await.is_ok() {
                 let state = *states.borrow_and_update();
-                if callbacks.call(|| listener.on_change(state)).is_none() {
+                if callbacks
+                    .call(|| listener.call(move |l| l.on_change(state)))
+                    .is_none()
+                {
                     return;
                 }
             }
@@ -1007,6 +1023,7 @@ impl GimClient {
         chat_id: String,
         listener: Arc<dyn TypingListener>,
     ) -> Result<Arc<TaskHandle>, GimError> {
+        let listener = Foreign::new(listener);
         let group_id: GroupId = parse_id("chat_id", chat_id)?;
         let typing = gim_ui::TypingNotifications::new(self.sdk()?, group_id)?;
         let (current, stream) = typing.subscribe();
@@ -1015,7 +1032,10 @@ impl GimClient {
         Ok(Arc::new(TaskHandle::spawn(&self.callbacks, async move {
             let _typing = typing;
             if callbacks
-                .call(|| listener.on_update(to_strings(current)))
+                .call(|| {
+                    let users = to_strings(current);
+                    listener.call(move |l| l.on_update(users))
+                })
                 .is_none()
             {
                 return;
@@ -1023,7 +1043,10 @@ impl GimClient {
             let mut stream = std::pin::pin!(stream);
             while let Some(users) = stream.next().await {
                 if callbacks
-                    .call(|| listener.on_update(to_strings(users)))
+                    .call(|| {
+                        let users = to_strings(users);
+                        listener.call(move |l| l.on_update(users))
+                    })
                     .is_none()
                 {
                     return;

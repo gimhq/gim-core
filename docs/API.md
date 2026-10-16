@@ -144,8 +144,8 @@ user's signed DeviceList. Handles are optional directory entries pointing at a u
 
 ## Platform hooks
 
-`PlatformHooks` is implemented by the app and may be called from any Rust thread; keep the
-implementations fast and thread-safe.
+`PlatformHooks` is implemented by the app and called on gim-core's callback thread (see
+*Threading of platform callbacks*); keep the implementations fast and thread-safe.
 
 | Method | Contract |
 |---|---|
@@ -245,7 +245,7 @@ zone changes (Android `ACTION_TIMEZONE_CHANGED`, iOS `NSSystemTimeZoneDidChange`
 timeline moves its date separators to the new days through its listener, as ordinary diffs
 (separators removed and inserted; message items stay). Offsets are asked once per UTC hour of the
 item timestamps (at the start of that hour) and cached until the zone is replaced, so it is
-called from a Rust background thread and must not call back into `GimClient`. The chat list does
+called on gim-core's callback thread and must not call back into `GimClient`. The chat list does
 not bucket by day; format its timestamps natively.
 
 ## Listeners and threading
@@ -253,7 +253,7 @@ not bucket by day; format its timestamps natively.
 `ChatListListener`, `TimelineListener`, `ConnectionStateListener` and `TypingListener` are
 implemented by the app.
 
-- **Callbacks arrive on a Rust background thread.** Hop to the main thread (Kotlin:
+- **Callbacks arrive on gim-core's callback thread** (see *Threading of platform callbacks*). Hop to the main thread (Kotlin:
   `withContext(Dispatchers.Main)` / `Handler(Looper.getMainLooper())`; Swift:
   `Task { @MainActor in ... }` / `DispatchQueue.main.async`) before touching UI state, and keep
   the order of callbacks.
@@ -263,6 +263,37 @@ implemented by the app.
   has ended.
 - `ConnectionStateListener.onChange` and `TypingListener.onUpdate` first deliver the current value.
 
+### Threading of platform callbacks
+
+Applies to every interface the app implements: `PlatformHooks`, `LocalTimeZone`,
+`ChatListListener`, `TimelineListener`, `ConnectionStateListener` and `TypingListener`.
+
+- **One thread.** gim-core calls all of them, for every client, on a single long-lived native
+  thread named `gim-callbacks`, one call at a time, in order. The Rust code that needs the
+  result waits for it. A callback is therefore never called on a tokio worker or blocking
+  thread, never inside a UniFFI future poll or continuation, and never on a thread that is about
+  to exit. Releasing the objects passed in (UniFFI's `free` when gim-core drops its last
+  reference) also happens on that thread.
+- **Keep callbacks short and non-blocking.** All callbacks share the thread: a slow keystore read
+  delays listener updates, and the Rust side waiting for the result (possibly a sync call such as
+  `setLocalTimeZone`) waits too. Copy the data and return; hop to the main thread or your own
+  executor for anything else.
+- **Never call into gim-core from inside a callback.** That means no `GimClient` call, no
+  `close()` / `destroy()` of a gim-core object, no `runBlocking` / semaphore around a suspend
+  call, and no waiting on a thread that is itself waiting for gim-core. Such a call runs nested on
+  the callback thread. A nested callback deadlocks or, on Android, makes JNA detach the thread
+  while the outer callback is still running (ART aborts with `attempting to detach while still
+  running code`). Post the work to another thread instead.
+- **Call suspend functions from a real dispatcher (Android).** UniFFI resumes a suspended call
+  from a continuation callback on the Rust thread that completed the work. With a
+  `CoroutineDispatcher` (`Dispatchers.Main`, `Dispatchers.IO`, `Dispatchers.Default`,
+  `viewModelScope`) the coroutine continues on that dispatcher. A context without one resumes
+  inline on the Rust thread: `Dispatchers.Unconfined`, `UnconfinedTestDispatcher`, and Compose
+  test frame-clock interceptors (`ApplyingContinuationInterceptor`, e.g. a `LaunchedEffect`
+  under `createComposeRule`). UniFFI then reports completion with a callback nested in that
+  frame, with the same ART abort. Wrap such call sites in `withContext(Dispatchers.IO)` (or
+  `Default`). iOS has no JVM attach step; Swift `async` calls are unaffected.
+
 ### Teardown
 
 - **`signOut()` returns only after every callback in flight returned** (listeners,
@@ -270,18 +301,10 @@ implemented by the app.
   callback that does not return. Once it returned, no listener, `LocalTimeZone` or
   `PlatformHooks` method is called for that client any more, and its `TaskHandle`s are finished.
 - **Releasing the client** (Kotlin: `close()` / garbage collection; Swift: releasing the last
-  reference) does the same without deleting anything. Released on a gim-core thread (from inside
-  a callback) it does not wait, so it cannot deadlock on that callback.
-- UniFFI may still release the native objects passed in (listeners, hooks, time zone) later, from
-  a Rust thread; that only drops gim-core's reference.
-- **Never call into gim-core synchronously from inside a callback** (no `GimClient` call, no
-  `close()` / `destroy()` of a gim-core object, no `runBlocking` around a suspend call), and do
-  not resume coroutines on the callback thread (`Dispatchers.Unconfined`,
-  `UnconfinedTestDispatcher`): hop to your own thread first. Callbacks run on Rust threads that
-  JNA attaches to the JVM for the duration of one callback; a second callback nested on the same
-  thread detaches it when it returns, while the outer callback is still running, and ART aborts
-  with `attempting to detach while still running code`. iOS has no attach step, but the same rule
-  keeps callbacks from deadlocking on the client's locks.
+  reference) does the same without deleting anything. Released on a gim-core thread (a runtime
+  thread or the callback thread) it does not wait, so it cannot deadlock on a callback.
+- The objects passed in (listeners, hooks, time zone) may still be released later, on the
+  callback thread; that only drops gim-core's reference.
 
 ### Diff semantics
 
