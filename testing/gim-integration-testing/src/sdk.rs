@@ -17,8 +17,9 @@ use gim_common::{ClientId, DeviceRef, GroupId, UserId};
 use gim_sdk::testing::MemorySecretStorage;
 use gim_sdk::transport::{
     AccessToken, Challenge, ClaimedKeyPackage, CommitAccepted, EventBatch, EventStream, GroupInfo,
-    HostingEntryGrant, KeyPackageClaim, KeyPackageCount, OutgoingCommit, PostError, SessionError,
-    SessionToken, StoredHostingRecord, Transport, TransportError, TransportResult, UserRecord,
+    HostingEntryGrant, HubIdentity, KeyPackageClaim, KeyPackageCount, OutgoingCommit, PostError,
+    SessionError, SessionToken, StoredHostingRecord, Transport, TransportError, TransportResult,
+    UserRecord,
 };
 use gim_sdk::{Client, ClientBuilder, HttpTransport, SecretStorage, SyncSettings};
 use tempfile::TempDir;
@@ -103,6 +104,14 @@ impl FaultyHub {
 
 #[async_trait]
 impl Transport for FaultyHub {
+    fn base_url(&self) -> Option<String> {
+        self.inner.base_url()
+    }
+
+    async fn hub_info(&self, nonce: Option<&[u8; 32]>) -> TransportResult<HubIdentity> {
+        self.inner.hub_info(nonce).await
+    }
+
     async fn put_device_list(&self, u: &UserId, list: Vec<u8>) -> TransportResult<()> {
         self.inner.put_device_list(u, list).await
     }

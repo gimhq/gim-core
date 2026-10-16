@@ -491,6 +491,7 @@ fn auth_response_cases(cases: &mut Vec<Value>) {
     let challenge_for = |issued_at: u64, expires_at: u64| {
         AuthChallenge {
             audience: audience.clone(),
+            audience_url: None,
             nonce: seed(NONCE),
             issued_at,
             expires_at,
@@ -656,6 +657,7 @@ fn run(case: &Value) -> Result<(), IdentityError> {
             let list = SignedDeviceList::from_bytes(&unhex(&context["device_list"]))?;
             AuthResponse::from_bytes(&input)?.verify(
                 context["audience"].as_str().unwrap(),
+                None,
                 now(context),
                 &list,
             )?;

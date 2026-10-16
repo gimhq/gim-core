@@ -1,0 +1,29 @@
+{
+  "description": "gim hub proof of possession test vectors, see docs/identity.md \"Hub proof of possession\": proof = Ed25519(hub root key, \"gim-hub-proof-v1\" || 0x00 || nonce(32) || u16be(len(hub_id)) || hub_id || u16be(len(public_url)) || public_url), UTF-8, lengths in bytes; `message` is the exact signed input. public_url is already normalized (public-url.json).",
+  "cases": [
+    {
+      "root_seed": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+      "hub_root_pubkey": "174553b456dddfc6908ecab1c101fe6ab21e2baa0617795b7d43a63482993fd5",
+      "hub_root_pubkey_base64": "F0VTtFbd38aQjsqxwQH+arIeK6oGF3lbfUOmNIKZP9U=",
+      "hub_id": "hciqgrcknldyy6lbu2splf5frcdqeftipgfikjxbzeq6x6y55lggapay",
+      "public_url": "https://hub-a.example.eu",
+      "nonce": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+      "nonce_base64url": "oKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr8",
+      "message": "67696d2d6875622d70726f6f662d763100a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf0038686369716772636b6e6c647979366c62753273706c6635667263647165667469706766696b6a78627a65713678367935356c676761706179001868747470733a2f2f6875622d612e6578616d706c652e6575",
+      "proof": "c430b85de06a3556a0e39f4e737700fc3712380a0970e0ada1ee825ce88554ff92857d6d563226baf8757e9ea511c54c6d649d7c0572a7242c46895c79394805",
+      "proof_base64url": "xDC4XeBqNVag459Oc3cA_DcSOAoJcOCtoe6CXOiFVP-ShX1tVjImuvh1fp6lEcVMbWSdfAVypyQsRolceTlIBQ"
+    },
+    {
+      "root_seed": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "hub_root_pubkey": "cd14b37f956e953194ff7fb73b3d81dcc561d61a7538094b7c3e1a643ee5f3aa",
+      "hub_root_pubkey_base64": "zRSzf5VulTGU/3+3Oz2B3MVh1hp1OAlLfD4aZD7l86o=",
+      "hub_id": "hciqfdhfosputvuar26ctkweuibpnr6ubmldoksw2cm53w3n3smw7k6y",
+      "public_url": "http://hub-b:8080",
+      "nonce": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+      "nonce_base64url": "EBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8",
+      "message": "67696d2d6875622d70726f6f662d763100101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f003868636971666468666f7370757476756172323663746b7765756962706e723675626d6c646f6b737732636d353377336e33736d77376b36790011687474703a2f2f6875622d623a38303830",
+      "proof": "be4fd82682170c534bdb2287d4bf759b6a96ccc78a7a62e5b60916be39f30842b5e268ad4a358e0d64b8690dae58217e38eb07cf3eb68c38e513735142342400",
+      "proof_base64url": "vk_YJoIXDFNL2yKH1L91m2qWzMeKemLltgkWvjnzCEK14mitSjWODWS4aQ2uWCF-OOsHzz62jDjlE3NRQjQkAA"
+    }
+  ]
+}

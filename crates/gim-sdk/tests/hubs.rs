@@ -1,9 +1,9 @@
 //! The hub registry (multi-homing, contract `multihoming.md` §4.1, §4.5,
 //! Q2): the home hub is bootstrapped with `GET /v2/hub`, listed hubs come
 //! from the hosting record, their URLs from `set_hub_url` or the self
-//! group, every URL is checked against the listed `hub_id` before the
-//! device signs in there, and the registry and the per-hub sessions
-//! survive a restart.
+//! group, every URL must prove the listed `hub_id` at that URL (hub proof
+//! of possession) before the device signs in there with a challenge bound
+//! to it, and the registry and the per-hub sessions survive a restart.
 
 mod common;
 mod mock_server;
@@ -28,6 +28,9 @@ use tempfile::TempDir;
 
 const SEED_B: [u8; 32] = [0x62; 32];
 const SEED_C: [u8; 32] = [0x63; 32];
+const B_URL: &str = "https://hub-b.example.eu";
+const C_URL: &str = "https://hub-c.example.eu";
+const RELAY_URL: &str = "https://relay.example.eu";
 
 struct Account {
     client: Client<MemoryStore>,
@@ -241,8 +244,8 @@ async fn second_hub_over_http_is_verified_signed_in_and_restored() {
 #[tokio::test]
 async fn hosting_record_updates_and_the_self_group_spread_the_hubs() {
     let hub_a = FlakyTransport::new();
-    let hub_b = FlakyTransport::over(FakeTransport::with_hub_seed(SEED_B));
-    let urls = connector(&[("fake://a", &hub_a), ("fake://b", &hub_b)]);
+    let hub_b = FlakyTransport::over(FakeTransport::with_hub_seed(SEED_B).with_public_url(B_URL));
+    let urls = connector(&[(B_URL, &hub_b)]);
     let alice = Account::register(Arc::new(hub_a.clone()), Some(urls.clone())).await;
     let user_id = alice.user_id();
     let tablet = link(&alice).await;
@@ -268,10 +271,11 @@ async fn hosting_record_updates_and_the_self_group_spread_the_hubs() {
     assert_eq!(hub_b.faults.challenges.load(Ordering::SeqCst), 0);
 
     // Alice learns B's URL; the tablet gets it through the self group,
-    // checks it and signs in on B too.
+    // checks it with the hub proof and then uses B: it signs in there and
+    // uploads KeyPackages.
     alice
         .client
-        .set_hub_url(&hub_id(&hub_b.inner), "fake://b")
+        .set_hub_url(&hub_id(&hub_b.inner), B_URL)
         .await
         .unwrap();
     assert!(status(&alice.client.hubs().await.unwrap(), &hub_b.inner).signed_in);
@@ -280,7 +284,29 @@ async fn hosting_record_updates_and_the_self_group_spread_the_hubs() {
     let hubs = tablet.client.hubs().await.unwrap();
     let b = status(&hubs, &hub_b.inner);
     assert_eq!(b.hub.state, HubState::Verified);
-    assert_eq!(b.hub.url.as_deref(), Some("fake://b"));
+    assert_eq!(b.hub.url.as_deref(), Some(B_URL));
+    assert!(b.hub.url_shared);
+    assert!(b.signed_in);
+    assert_eq!(
+        b.hub.verified_root_pubkey.as_deref(),
+        Some(hub_b.inner.hub_root_key().public().as_bytes().as_slice())
+    );
+    let tablet_device = tablet.client.session().unwrap().device;
+    assert_eq!(hub_b.faults.challenges.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        hub_b.inner.service().key_package_count(&tablet_device),
+        gim_sdk::KEY_PACKAGE_BATCH as usize
+    );
+    // The same URL set on the tablet: checked again, no new sign-in.
+    tablet
+        .client
+        .set_hub_url(&hub_id(&hub_b.inner), B_URL)
+        .await
+        .unwrap();
+    let hubs = tablet.client.hubs().await.unwrap();
+    let b = status(&hubs, &hub_b.inner);
+    assert_eq!(b.hub.state, HubState::Verified);
+    assert!(!b.hub.url_shared);
     assert!(b.signed_in);
     assert_eq!(hub_b.faults.challenges.load(Ordering::SeqCst), 2);
 
@@ -295,38 +321,174 @@ async fn hosting_record_updates_and_the_self_group_spread_the_hubs() {
 }
 
 #[tokio::test]
-async fn a_shared_url_serving_another_hub_stays_unverified() {
+async fn shared_urls_that_do_not_prove_the_hub_get_one_request_only() {
     let hub_a = FlakyTransport::new();
-    let hub_b = FlakyTransport::over(FakeTransport::with_hub_seed(SEED_B));
-    let hub_c = FlakyTransport::over(FakeTransport::with_hub_seed(SEED_C));
-    let urls = connector(&[("fake://b", &hub_b), ("fake://c", &hub_c)]);
+    let fake_b = FakeTransport::with_hub_seed(SEED_B).with_public_url(B_URL);
+    let hub_b = FlakyTransport::over(fake_b.clone());
+    let hub_c = FlakyTransport::over(FakeTransport::with_hub_seed(SEED_C).with_public_url(C_URL));
+    // A relay in front of B: B's identity and proofs, for B's URL.
+    let relay = FlakyTransport::over(fake_b);
+    let urls = connector(&[(B_URL, &hub_b), (C_URL, &hub_c), (RELAY_URL, &relay)]);
     let alice = Account::register(Arc::new(hub_a.clone()), Some(urls)).await;
     let user_id = alice.user_id();
     let tablet = link(&alice).await;
     let record = alice.record(2, &[(&hub_a.inner, 0), (&hub_b.inner, 1)]);
     hub_a.inner.set_hosting_record(&user_id, Some(record));
     tablet.client.refresh_hubs().await.unwrap();
-
-    // Another own device shares a wrong URL for B.
-    let wrong = gim_proto::envelope::Content::SelfHubs {
-        hubs: vec![gim_proto::envelope::HubLocation {
-            hub_id: hub_id(&hub_b.inner),
-            url: "fake://c".into(),
-            priority: 1,
-        }],
-    };
     let self_group = gim_base::StateReader::self_groups(&*alice.store)
         .unwrap()
         .pop()
         .unwrap();
-    alice.client.send(&self_group, wrong).await.unwrap();
-    tablet.client.sync_once().await.unwrap();
-    let hubs = tablet.client.hubs().await.unwrap();
-    let b = status(&hubs, &hub_b.inner);
+    let tablet_device = tablet.client.session().unwrap().device;
+
+    // Another own device shares a wrong URL for B, then a relay's.
+    for (url, wrong) in [(C_URL, &hub_c), (RELAY_URL, &relay)] {
+        let shared = gim_proto::envelope::Content::SelfHubs {
+            hubs: vec![gim_proto::envelope::HubLocation {
+                hub_id: hub_id(&hub_b.inner),
+                url: url.into(),
+                priority: 1,
+            }],
+        };
+        alice.client.send(&self_group, shared).await.unwrap();
+        tablet.client.sync_once().await.unwrap();
+        tablet.client.refresh_hubs().await.unwrap();
+        tablet.client.replenish_key_packages().await.unwrap();
+        let note = gim_proto::envelope::Content::Text {
+            body: "ahoy".into(),
+        };
+        let self_group = gim_base::StateReader::self_groups(&*tablet.store)
+            .unwrap()
+            .pop()
+            .unwrap();
+        tablet.client.send(&self_group, note).await.unwrap();
+        let hubs = tablet.client.hubs().await.unwrap();
+        let b = status(&hubs, &hub_b.inner);
+        assert_eq!(b.hub.state, HubState::Unverified, "{url}");
+        assert_eq!(b.hub.url.as_deref(), Some(url));
+        assert!(b.hub.url_shared);
+        assert!(!b.signed_in);
+        // The hub proof only, once: no sign-in, KeyPackages or posts.
+        assert_eq!(wrong.faults.hub_infos.load(Ordering::SeqCst), 1, "{url}");
+        assert_eq!(wrong.faults.challenges.load(Ordering::SeqCst), 0);
+        assert!(wrong.faults.message_posts.lock().unwrap().is_empty());
+        assert!(wrong.faults.commit_posts.lock().unwrap().is_empty());
+    }
+    assert_eq!(hub_b.inner.service().key_package_count(&tablet_device), 0);
+    assert_eq!(hub_b.faults.hub_infos.load(Ordering::SeqCst), 0);
+    assert_eq!(hub_b.faults.challenges.load(Ordering::SeqCst), 0);
+}
+
+/// Registers a new device at `url`; the client's own transport is the home
+/// hub.
+async fn register_at(url: &str) -> (Client<MemoryStore>, Result<(), ClientError>) {
+    let transport = Arc::new(HttpTransport::new(url.parse().unwrap()).unwrap());
+    let account = Account::new(transport, None);
+    let result = account.client.register("alice", "Alice").await.map(drop);
+    (account.client, result)
+}
+
+fn not_verified(result: &Result<(), ClientError>) -> bool {
+    matches!(
+        result,
+        Err(ClientError::Transport(TransportError::HubNotVerified(_)))
+    )
+}
+
+#[tokio::test]
+async fn a_relay_gets_no_session() {
+    let hub_a = FakeTransport::new();
+    let server_a = MockServer::start(hub_a.clone()).await;
+    let relay = MockServer::relay(hub_a.clone()).await;
+
+    // The home hub behind a relay: the proof names the hub's URL.
+    let (client, result) = register_at(&relay.url).await;
+    assert!(not_verified(&result), "{result:?}");
+    assert!(client.session().is_none());
+    assert_eq!(relay.controls.hub_infos.load(Ordering::SeqCst), 1);
+    for controls in [&relay.controls, &server_a.controls] {
+        assert_eq!(controls.challenges.load(Ordering::SeqCst), 0);
+        assert_eq!(controls.sessions.load(Ordering::SeqCst), 0);
+    }
+
+    // A listed hub behind a relay.
+    let hub_b = FakeTransport::with_hub_seed(SEED_B);
+    let server_b = MockServer::start(hub_b.clone()).await;
+    let relay_b = MockServer::relay(hub_b.clone()).await;
+    let transport = Arc::new(HttpTransport::new(server_a.url.parse().unwrap()).unwrap());
+    let alice = Account::register(transport, None).await;
+    alice.copy_device_list(&hub_a, &hub_b).await;
+    let record = alice.record(2, &[(&hub_a, 0), (&hub_b, 1)]);
+    hub_a.set_hosting_record(&alice.user_id(), Some(record));
+    alice.client.refresh_hubs().await.unwrap();
+    let result = alice
+        .client
+        .set_hub_url(&hub_id(&hub_b), &relay_b.url)
+        .await;
+    assert!(
+        matches!(result, Err(ClientError::InvalidInput(_))),
+        "{result:?}"
+    );
+    let b = status(&alice.client.hubs().await.unwrap(), &hub_b).clone();
     assert_eq!(b.hub.state, HubState::Unverified);
-    assert_eq!(b.hub.url.as_deref(), Some("fake://c"));
     assert!(!b.signed_in);
-    assert_eq!(hub_c.faults.challenges.load(Ordering::SeqCst), 0);
+    for controls in [&relay_b.controls, &server_b.controls] {
+        assert_eq!(controls.challenges.load(Ordering::SeqCst), 0);
+        assert_eq!(controls.sessions.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn the_home_hub_must_prove_itself_at_the_typed_url() {
+    let hub = FakeTransport::new();
+    let server = MockServer::start(hub.clone()).await;
+    let controls = &server.controls;
+    let refused = |result: &Result<(), ClientError>| {
+        assert!(not_verified(result), "{result:?}");
+        assert_eq!(controls.challenges.load(Ordering::SeqCst), 0);
+        assert_eq!(controls.sessions.load(Ordering::SeqCst), 0);
+    };
+
+    // The hub signs another public URL than the one contacted.
+    hub.set_public_url(Some("https://elsewhere.example.eu"));
+    refused(&register_at(&server.url).await.1);
+    hub.set_public_url(Some(&server.url));
+
+    // A bad signature.
+    controls.corrupt_proof.store(true, Ordering::SeqCst);
+    refused(&register_at(&server.url).await.1);
+    controls.corrupt_proof.store(false, Ordering::SeqCst);
+
+    // A proof replayed for an old nonce.
+    *controls.replay_nonce.lock().unwrap() = Some([9; 32]);
+    refused(&register_at(&server.url).await.1);
+    *controls.replay_nonce.lock().unwrap() = None;
+
+    let (client, result) = register_at(&server.url).await;
+    result.unwrap();
+    assert!(client.session().is_some());
+    assert_eq!(controls.sessions.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn challenges_must_be_bound_to_the_proven_url() {
+    let hub = FakeTransport::new();
+    let server = MockServer::start(hub.clone()).await;
+    let controls = &server.controls;
+
+    // A v1 challenge from a hub that proved a public URL.
+    controls.challenge_v1.store(true, Ordering::SeqCst);
+    let (client, result) = register_at(&server.url).await;
+    assert!(not_verified(&result), "{result:?}");
+    assert!(client.session().is_none());
+    controls.challenge_v1.store(false, Ordering::SeqCst);
+
+    // A v2 challenge for another URL.
+    *controls.challenge_url.lock().unwrap() = Some(RELAY_URL.into());
+    let (client, result) = register_at(&server.url).await;
+    assert!(not_verified(&result), "{result:?}");
+    assert!(client.session().is_none());
+    assert_eq!(controls.sessions.load(Ordering::SeqCst), 0);
 }
 
 fn inject_update(hub: &FlakyTransport, user_id: &UserId, seq: u64) {

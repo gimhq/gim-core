@@ -283,7 +283,11 @@ impl<S: StateStore + 'static> Client<S> {
             if !claim.key_packages.is_empty() {
                 tracing::info!(%group_id, users = ?outcome.claimed, "adding pending invitees");
                 if let Err(err) = self
-                    .commit(session, group_id, CommitOp::Add(claim.key_packages))
+                    .commit(
+                        session,
+                        group_id,
+                        CommitOp::Add(claim.key_packages, claim.hub),
+                    )
                     .await
                 {
                     // A commit of unknown outcome stays pending with them;

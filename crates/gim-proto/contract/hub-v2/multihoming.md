@@ -482,8 +482,8 @@ pushing at most ~30 s after the primary stops, and stops when it sees the primar
 for messages that arrived while the primary was down but before the failover delay elapsed are not
 sent late; the devices still receive the messages from their streams.
 
-Every push carries `collapse_id = message_id` (APNs `apns-collapse-id`, FCM `collapse_key`), and
-the client (NSE / Android service) dedups by `message_id`. That bounds the effect of a split view
+Every push carries `collapse_id = message_id` (the push server maps it to the platform's collapse
+key), and the client (NSE / Android service) dedups by `message_id`. That bounds the effect of a split view
 (the primary is up but a fallback cannot reach it, so both push): the device shows one
 notification.
 
