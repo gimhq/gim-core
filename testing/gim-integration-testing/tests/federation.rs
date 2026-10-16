@@ -12,7 +12,7 @@ use std::time::Duration;
 use gim_base::model::Membership;
 use gim_base::StateReader;
 use gim_common::{ClientId, DeviceRef, GroupId, UserId};
-use gim_core::{GimError, MediaRef, MessageContent, TimelineItem};
+use gim_core::{ChatState, GimError, MediaRef, MessageContent, TimelineItem};
 use gim_integration_testing::federation::{Federation, Hub, FED_TIMEOUT};
 use gim_integration_testing::sdk::{FaultyHub, SdkDevice};
 use gim_integration_testing::{
@@ -316,11 +316,16 @@ async fn cross_hub_group() {
         })
         .await;
     }
+    // Dave's own client turns Leaving into Left only when it syncs the
+    // removal commit, which nothing above waits for.
     assert!(matches!(
         dave.client
             .send_text(chat.clone(), "still here?".to_string(), None)
             .await,
-        Err(GimError::InvalidInput { .. })
+        Err(GimError::ChatNotActive {
+            state: ChatState::Leaving | ChatState::Left,
+            ..
+        })
     ));
 
     // Alice removes Bob: later messages reach Carol, not Bob or Dave.
