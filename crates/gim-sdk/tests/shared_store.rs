@@ -411,19 +411,16 @@ async fn extension_processes_pushes_beside_the_app() {
     let bob = Device::register(&transport, "bob").await;
     let g = app.create_group_chat(None, &[bob.user_id()]).await.unwrap();
     bob.sync().await;
-    let extension = Builder::open_extension(
-        Arc::new(transport.clone()),
-        alice.secrets.clone(),
-        |key| {
+    let extension =
+        Builder::open_extension(Arc::new(transport.clone()), alice.secrets.clone(), |key| {
             SqliteStore::open_for_extension(alice.dir.path(), &DbKey::new(*key))
                 .map_err(BaseError::from)
-        },
-    )
-    .unwrap()
-    .data_dir(alice.dir.path())
-    .store_lock_timeout(Duration::from_millis(200))
-    .build()
-    .unwrap();
+        })
+        .unwrap()
+        .data_dir(alice.dir.path())
+        .store_lock_timeout(Duration::from_millis(200))
+        .build()
+        .unwrap();
     assert!(extension.restore_session().await.unwrap());
 
     // The extension leaves the registration to the app.
