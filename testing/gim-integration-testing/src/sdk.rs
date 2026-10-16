@@ -2,8 +2,11 @@
 //! boundary for the cases the hub cannot be made to produce on demand: a
 //! lost reply to an accepted post (the client re-posts and the hub answers
 //! with its idempotent result), and an expired event cursor (410; the hub's
-//! event retention is at least one day).
+//! event retention is at least one day). With multi-homing, every other hub
+//! a device opens goes through a [`FaultyHub`] too (see [`SdkDevice::hub`]),
+//! so a test sees which hub got each request.
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -11,17 +14,19 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use gim_base::model::{ChatKind, GroupMessage, Message, MessageContent};
+use gim_base::model::{ChatKind, GroupMessage, IncomingEvent, Message, MessageContent};
 use gim_base::{MemoryStore, StateReader};
 use gim_common::{ClientId, DeviceRef, GroupId, UserId};
 use gim_sdk::testing::MemorySecretStorage;
 use gim_sdk::transport::{
     AccessToken, Challenge, ClaimedKeyPackage, CommitAccepted, EventBatch, EventStream, GroupInfo,
-    HostingEntryGrant, HubIdentity, KeyPackageClaim, KeyPackageCount, OutgoingCommit, PostError,
-    SessionError, SessionToken, StoredHostingRecord, Transport, TransportError, TransportResult,
-    UserRecord,
+    HostingEntryGrant, HubEvent, HubIdentity, KeyPackageClaim, KeyPackageCount, OutgoingCommit,
+    PostError, SessionError, SessionToken, StoredHostingRecord, Transport, TransportError,
+    TransportResult, UserRecord,
 };
-use gim_sdk::{Client, ClientBuilder, HttpTransport, SecretStorage, SyncSettings};
+use gim_sdk::{
+    Client, ClientBuilder, HttpTransport, HubConnector, RecoveryCode, SecretStorage, SyncSettings,
+};
 use tempfile::TempDir;
 use url::Url;
 
@@ -51,6 +56,13 @@ pub struct Faults {
     pub peer_failures: Mutex<Vec<TransportError>>,
     /// Every user a KeyPackage claim reported `unavailable`, in order.
     pub unavailable_claims: Mutex<Vec<UserId>>,
+    /// Every KeyPackage the hub handed out to claims, in order.
+    pub claimed: Mutex<Vec<ClaimedKeyPackage>>,
+    /// The `(group, seq)` of every group message the hub delivered in the
+    /// device's events, in order.
+    pub delivered: Mutex<Vec<(GroupId, u64)>>,
+    /// Sign-in challenges the device asked the hub for.
+    pub sign_ins: AtomicU32,
 }
 
 impl Faults {
@@ -117,6 +129,7 @@ impl Transport for FaultyHub {
     }
 
     async fn auth_challenge(&self, d: &DeviceRef) -> TransportResult<Challenge> {
+        self.faults.sign_ins.fetch_add(1, Ordering::SeqCst);
         self.inner.auth_challenge(d).await
     }
 
@@ -209,7 +222,13 @@ impl Transport for FaultyHub {
         t: &AccessToken,
         users: &[UserId],
     ) -> TransportResult<Vec<ClaimedKeyPackage>> {
-        self.inner.claim_key_packages(t, users).await
+        let claimed = self.inner.claim_key_packages(t, users).await?;
+        self.faults
+            .claimed
+            .lock()
+            .unwrap()
+            .extend(claimed.iter().cloned());
+        Ok(claimed)
     }
 
     async fn claim_key_packages_federated(
@@ -223,6 +242,11 @@ impl Transport for FaultyHub {
             .lock()
             .unwrap()
             .extend(claim.unavailable.iter().cloned());
+        self.faults
+            .claimed
+            .lock()
+            .unwrap()
+            .extend(claim.key_packages.iter().cloned());
         Ok(claim)
     }
 
@@ -289,7 +313,16 @@ impl Transport for FaultyHub {
             let head = self.head(t, cursor).await?;
             return Err(TransportError::Gone { cursor: head });
         }
-        self.inner.fetch_events(t, cursor, wait).await
+        let batch = self.inner.fetch_events(t, cursor, wait).await?;
+        self.faults
+            .delivered
+            .lock()
+            .unwrap()
+            .extend(batch.events.iter().filter_map(|event| match event {
+                HubEvent::Group(IncomingEvent::Message(m)) => Some((m.group_id.clone(), m.seq)),
+                _ => None,
+            }));
+        Ok(batch)
     }
 
     async fn open_stream(
@@ -357,20 +390,46 @@ impl Transport for FaultyHub {
     }
 }
 
+/// The [`FaultyHub`]s a device opened for other hubs, by URL.
+pub type HubTransports = Arc<Mutex<HashMap<String, FaultyHub>>>;
+
 /// A gim-sdk client with an in-memory store on its own [`FaultyHub`],
 /// driven by explicit [`Self::sync`] calls (no sync loop). Pending invites
 /// are due again after one second (see [`Client::retry_pending_invites`]).
+/// Other hubs are opened as [`FaultyHub`]s too (see [`Self::hub`]).
 pub struct SdkDevice {
     pub client: Client<MemoryStore>,
     pub store: Arc<MemoryStore>,
     pub hub: FaultyHub,
+    /// The hubs other than `hub` the client opened, by URL.
+    pub hubs: HubTransports,
+    pub recovery_code: Option<RecoveryCode>,
     _data_dir: TempDir,
 }
 
 impl SdkDevice {
     /// Creates a fresh identity on this device.
     pub async fn create(server_url: &str, display_name: &str) -> Self {
+        let mut device = Self::open(server_url);
+        let code = device.client.create_identity(display_name).await.unwrap();
+        device.recovery_code = Some(code);
+        device
+    }
+
+    /// A client on `server_url` without an identity yet.
+    pub fn open(server_url: &str) -> Self {
         let hub = FaultyHub::new(server_url);
+        let hubs = HubTransports::default();
+        let opened = hubs.clone();
+        let connector: HubConnector = Arc::new(move |url: &str| {
+            let hub = opened
+                .lock()
+                .unwrap()
+                .entry(url.to_string())
+                .or_insert_with(|| FaultyHub::new(url))
+                .clone();
+            Ok(Arc::new(hub) as Arc<dyn Transport>)
+        });
         let store = Arc::new(MemoryStore::new());
         let data_dir = tempfile::tempdir().unwrap();
         let client = ClientBuilder::new(
@@ -379,19 +438,54 @@ impl SdkDevice {
             Arc::new(MemorySecretStorage::new()) as Arc<dyn SecretStorage>,
         )
         .data_dir(data_dir.path())
+        .hub_connector(connector)
         .sync_settings(SyncSettings {
             invite_retry: Duration::from_secs(1),
             ..SyncSettings::default()
         })
         .build()
         .unwrap();
-        client.create_identity(display_name).await.unwrap();
         Self {
             client,
             store,
             hub,
+            hubs,
+            recovery_code: None,
             _data_dir: data_dir,
         }
+    }
+
+    /// A second device of this user on a fresh client at `server_url` (this
+    /// device's hub, which relays the bundle), linked with both sides
+    /// accepting the SAS.
+    pub async fn link(&self, server_url: &str) -> Self {
+        let device = Self::open(server_url);
+        let link = device
+            .client
+            .start_link(vec![server_url.to_string()])
+            .unwrap();
+        let (waited, approval) = tokio::join!(device.client.wait_link(&link), async {
+            self.client.approve_link(&link.qr_string).await.unwrap()
+        });
+        assert_eq!(waited.unwrap().sas, approval.sas);
+        device.client.confirm_link(true).await.unwrap();
+        self.client.confirm_approval(&approval, true).await.unwrap();
+        assert_eq!(device.user_id(), self.user_id());
+        device
+    }
+
+    /// The transport the device uses for the hub at `url`: [`Self::hub`]
+    /// for its own hub, else the one it opened (panics if it did not).
+    pub fn hub(&self, url: &str) -> FaultyHub {
+        if self.hub.base_url().as_deref() == Some(url) {
+            return self.hub.clone();
+        }
+        self.hubs
+            .lock()
+            .unwrap()
+            .get(url)
+            .unwrap_or_else(|| panic!("the device did not open {url}"))
+            .clone()
     }
 
     pub fn user_id(&self) -> UserId {
