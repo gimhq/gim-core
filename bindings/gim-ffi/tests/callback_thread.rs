@@ -190,8 +190,24 @@ async fn every_callback_runs_on_the_callback_thread() {
     client.set_local_time_zone(Some(platform()));
     tokio::time::sleep(Duration::from_millis(200)).await;
     client.sign_out().await.unwrap();
-    for handle in [chats, states, hubs, typing, items] {
-        assert!(handle.is_finished());
+    // sign_out aborts the listener tasks and guarantees no callback runs
+    // afterwards; a task only reports finished once a runtime worker has
+    // processed the abort, which may lag under load.
+    for (name, handle) in [
+        ("chat list", chats),
+        ("connection state", states),
+        ("hub list", hubs),
+        ("typing", typing),
+        ("timeline", items),
+    ] {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !handle.is_finished() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{name} listener task still running 5 s after sign_out"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
     drop(timeline);
     drop(client);
