@@ -3,15 +3,21 @@
 //! validation and revocation checks use.
 
 use std::collections::BTreeSet;
+use std::sync::atomic::Ordering;
 
 use gim_base::model::UserInfo;
-use gim_base::{BaseClient, StateReader, StateStore, StoreTxn};
+use gim_base::{BaseClient, StateReader, StateStore, StoreError, StoreTxn};
 use gim_common::{now_ms, DeviceId, DeviceRef, UserId};
+use gim_crypto::CryptoStore;
 use gim_identity::recovery::{seal_root_key_backup, RecoveryCode};
 use gim_identity::{DeviceList, DeviceSigningKey, RootKey, SignedDeviceCert, SignedDeviceList};
 use zeroize::Zeroizing;
 
-use crate::client::{Session, DEVICE_KEY_SECRET_KEY, KEY_PACKAGE_BATCH, ROOT_KEY_SECRET_KEY};
+use crate::client::{
+    Session, DEVICE_KEY_SECRET_KEY, ENROLLMENT_SECRET_KEY, KEY_PACKAGE_BATCH, ROOT_KEY_SECRET_KEY,
+    SESSION_SECRET_KEY,
+};
+use crate::hosting::Publish;
 use crate::transport::{TransportError, UserRecord};
 use crate::{Client, ClientError, Result};
 
@@ -43,14 +49,32 @@ impl<S: StateStore + 'static> Client<S> {
     /// creates the self group (the MLS group of the user's devices). The
     /// keys stay in [`crate::SecretStorage`]; the display name is kept
     /// locally and shared through the self group and with chats (the hub
-    /// has no profiles).
+    /// has no profiles). Publishes the user's hosting record; a failure
+    /// there is only logged (the sync loop retries).
     ///
     /// Returns the recovery code. It is stored nowhere: show it to the user
     /// once.
+    ///
+    /// On failure everything the call stored is discarded (or, if that
+    /// fails too, by the next onboarding call or [`Client::restore_session`],
+    /// see [`crate::ENROLLMENT_SECRET_KEY`]): calling it again creates
+    /// another user from scratch. What the failed attempt uploaded belongs
+    /// to a user id nobody holds the root key of. Fails with
+    /// [`ClientError::AlreadyLoggedIn`] once an identity was completed on
+    /// this client (its session restored or not).
     pub async fn create_identity(&self, display_name: &str) -> Result<RecoveryCode> {
-        if self.session().is_some() {
-            return Err(ClientError::AlreadyLoggedIn);
-        }
+        self.create_user(display_name, None).await
+    }
+
+    /// [`Client::create_identity`] and [`Client::claim_handle`]: returns the
+    /// recovery code. A failed claim discards the new identity like any
+    /// other failed step.
+    pub async fn register(&self, handle: &str, display_name: &str) -> Result<RecoveryCode> {
+        self.create_user(display_name, Some(handle)).await
+    }
+
+    async fn create_user(&self, display_name: &str, handle: Option<&str>) -> Result<RecoveryCode> {
+        self.check_onboarding()?;
         let root_seed = random_seed()?;
         let root = RootKey::from_seed(&root_seed);
         let user_id = root.public().user_id();
@@ -67,29 +91,111 @@ impl<S: StateStore + 'static> Client<S> {
             .await
             .map_err(|e| ClientError::Task(e.to_string()))?
             .map_err(ClientError::identity)?;
-        self.enroll(Enrollment {
-            root_seed,
-            device_seed,
-            cert,
-            device_list,
-            backup: Some(backup),
-            me: UserInfo {
-                user_id,
-                handle: String::new(),
-                display_name: display_name.to_string(),
-            },
-        })
-        .await?;
-        self.create_self_group().await?;
+        self.begin_enrollment(&DeviceRef::new(user_id.clone(), device.device_id()))
+            .await?;
+        let enrolled = async {
+            self.enroll(Enrollment {
+                root_seed,
+                device_seed,
+                cert,
+                device_list,
+                backup: Some(backup),
+                me: UserInfo {
+                    user_id,
+                    handle: String::new(),
+                    display_name: display_name.to_string(),
+                },
+            })
+            .await?;
+            self.publish_hosting_record_logged(Publish::Now).await;
+            self.create_self_group().await?;
+            if let Some(handle) = handle {
+                self.claim_handle(handle).await?;
+            }
+            Ok(())
+        }
+        .await;
+        self.end_enrollment(enrolled).await?;
         Ok(code)
     }
 
-    /// [`Client::create_identity`] and [`Client::claim_handle`]: returns the
-    /// recovery code.
-    pub async fn register(&self, handle: &str, display_name: &str) -> Result<RecoveryCode> {
-        let code = self.create_identity(display_name).await?;
-        self.claim_handle(handle).await?;
-        Ok(code)
+    /// Fails with [`ClientError::AlreadyLoggedIn`] if the client holds a
+    /// session, in memory or in [`crate::SecretStorage`], not of an
+    /// unfinished enrollment; an unfinished enrollment may be replaced.
+    /// Keys left without a session (the store was reset) are overwritten.
+    pub(crate) fn check_onboarding(&self) -> Result<()> {
+        let secrets = &self.inner.secrets;
+        if secrets.get(ENROLLMENT_SECRET_KEY)?.is_some() {
+            return Ok(());
+        }
+        if self.session().is_some() || secrets.get(SESSION_SECRET_KEY)?.is_some() {
+            return Err(ClientError::AlreadyLoggedIn);
+        }
+        Ok(())
+    }
+
+    /// The device of the unfinished enrollment, if any (and readable).
+    pub(crate) fn enrolling_device(&self) -> Result<Option<DeviceRef>> {
+        let Some(marker) = self.inner.secrets.get(ENROLLMENT_SECRET_KEY)? else {
+            return Ok(None);
+        };
+        Ok(serde_json::from_slice(&marker)
+            .inspect_err(|err| tracing::warn!(error = %err, "unreadable enrollment marker"))
+            .ok())
+    }
+
+    /// Discards an unfinished enrollment, then records a new one of
+    /// `device`, before anything else of it is stored or uploaded. Fails
+    /// like [`Self::check_onboarding`], and with
+    /// [`ClientError::AlreadyLoggedIn`] if the store holds a device identity
+    /// not of an unfinished enrollment: that is never discarded.
+    pub(crate) async fn begin_enrollment(&self, device: &DeviceRef) -> Result<()> {
+        self.check_onboarding()?;
+        if !self.discard_enrollment().await? {
+            let identity = self
+                .run(|store, _| {
+                    store.transaction(|txn| {
+                        Ok(txn.load_identity().map_err(StoreError::new)?.is_some())
+                    })
+                })
+                .await?;
+            if identity {
+                return Err(ClientError::AlreadyLoggedIn);
+            }
+        }
+        let marker = serde_json::to_vec(device).expect("a device ref serializes");
+        Ok(self.inner.secrets.set(ENROLLMENT_SECRET_KEY, &marker)?)
+    }
+
+    /// Completes the enrollment if `enrolled` succeeded. Otherwise, or if
+    /// completing fails, discards it (a failure there is only logged: the
+    /// next onboarding call or [`Client::restore_session`] discards it
+    /// again) and returns the error.
+    pub(crate) async fn end_enrollment(&self, enrolled: Result<()>) -> Result<()> {
+        let ended = enrolled.and_then(|()| Ok(self.inner.secrets.delete(ENROLLMENT_SECRET_KEY)?));
+        if let Err(err) = &ended {
+            tracing::warn!(error = %err, "enrollment failed; discarding it");
+            if let Err(err) = self.discard_enrollment().await {
+                tracing::warn!(error = %err, "cannot discard the failed enrollment");
+            }
+        }
+        ended
+    }
+
+    /// Deletes the keys, the session and all local state of an unfinished
+    /// enrollment. Keeps the marker, so a retried restore can revoke the
+    /// device. Returns whether there was one.
+    pub(crate) async fn discard_enrollment(&self) -> Result<bool> {
+        if self.inner.secrets.get(ENROLLMENT_SECRET_KEY)?.is_none() {
+            return Ok(false);
+        }
+        self.clear_session()?;
+        self.inner.secrets.delete(ROOT_KEY_SECRET_KEY)?;
+        self.inner.secrets.delete(DEVICE_KEY_SECRET_KEY)?;
+        self.run(|store, _| store.transaction(|txn| Ok(txn.clear()?)))
+            .await?;
+        self.inner.link_pending.store(false, Ordering::SeqCst);
+        Ok(true)
     }
 
     /// Stores the device's keys and MLS identity, uploads the DeviceList,

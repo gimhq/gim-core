@@ -76,6 +76,27 @@ user's signed DeviceList. Handles are optional directory entries pointing at a u
   on a bundle that does not verify; a `LinkSession` accepts one bundle, so start a new one. If
   the old device approved but the link was abandoned, revoke the new device with
   `revokeDevice(approval.deviceId())`. See `docs/identity.md`, "Device link flow".
+- **Retrying onboarding**: a failed `createIdentity`, `restoreFromRecovery` or `waitLink` never
+  blocks a retry; no `signOut()` or new client is needed. Each of them first records in the
+  keystore that an enrollment is in progress (`gim.enrollment.v1`), and only removes that record
+  once every step succeeded (`createIdentity`: DeviceList upload, sign-in, recovery backup,
+  KeyPackages, self group; `restoreFromRecovery`: the same without the backup; `waitLink`: the
+  same without backup and self group). On failure, the call deletes what the attempt stored (root
+  and device key, session, local database contents) before returning the error; if the process
+  dies first, the next `createClient` (its session restore) or onboarding call does it. A
+  completed identity is never discarded this way: onboarding calls fail with `InvalidInput`
+  (already logged in) once one exists, until `signOut()`.
+  - `createIdentity`: call it again; it creates a new user (new user id and recovery code, show
+    only the code of the call that succeeded). What the failed attempt uploaded belongs to a user
+    nobody holds the root key of.
+  - `restoreFromRecovery`: call it again with the same arguments. It uses a new device key; if
+    the failed attempt's device made it into the hub's DeviceList, the new list revokes it.
+  - `waitLink`: if no bundle arrived (network error, timeout), call it again with the same
+    `LinkSession`. If it failed after the bundle arrived, the session is used up: start a new link
+    (new QR code) and approve it on the old device again; the old device should reject the first
+    approval with `confirmApproval(firstApproval, false)`, which revokes the device of the failed
+    attempt (it stays listed otherwise; `revokeDevice` works too). The new device shows the QR
+    code again; the old device shows a second SAS for the new offer.
 - **Restore** after losing every device: `restoreFromRecovery(userId, recoveryCode,
   revokeOthers)` on a fresh client. It reads the user's current DeviceList from the hub (a public
   read, no session needed), verifies it against the recovered root key and publishes the next one
@@ -83,6 +104,32 @@ user's signed DeviceList. Handles are optional directory entries pointing at a u
   (they can no longer sign in and peers remove them), `false` keeps them all active. A list that
   lands concurrently is read and rebuilt once. Chats are not rejoined automatically; other members
   (or another own device) must add this device again.
+- **Hosting record** (federation): gim-core keeps the user's hosting record, signed with the root
+  key, on the hub without any app call. `createIdentity` and `restoreFromRecovery` publish one,
+  `waitLink` only if the hub has no valid one; while sync runs it is renewed (7-day lifetime,
+  renewed with less than 3 days left: at `startSync`, daily, and when the hub announces the expiry).
+  Publication failures never fail these calls and are retried by sync. A federated request the
+  hub rejects with 403 `hosting_record_required` publishes the record and is retried once; only if
+  that fails does the call fail with `Server(403, …)`.
+- **Federation**: users are addressed by user id everywhere; a remote user may have no handle and is
+  shown by display name, else a short user id. A chat is created on the own hub, which owns it (the
+  `<hub_id>/` prefix of its id); in chats owned by another hub, messages and member changes of
+  others arrive once the owner has sequenced and delivered them (seconds normally, longer during
+  an outage), and the history starts where the own hub joined.
+  - Invitees whose hub is unreachable when a chat is created or members are added (`unavailable`
+    KeyPackage claims) do not fail the call: the reachable ones are added at once, the others stay
+    pending and are claimed again by sync with backoff (30 s doubling to 15 min) and added when
+    their hub answers. A chat or direct chat with only unreachable invitees is created with the
+    invites pending. After 24 h a pending invite is dropped and reported as a
+    `MembershipChanged(Removed)` change for that user (not stored). Pending invites live in memory:
+    they are lost when the app restarts.
+  - 502 `peer_refused` and 503 `peer_unavailable` on sending to a chat owned by another hub are
+    retried with the same message (same `client_id`): queued messages wait for the hub's
+    `Retry-After` (at most 5 min) instead of the usual backoff. A member change is resubmitted
+    as the very same Commit, within the call when `Retry-After` is at most 10 s; otherwise the call
+    fails (`RetryLater(503, …)` or `Server(502|503, …)`), the Commit stays pending and is
+    resubmitted unchanged before the next sync, send or member change of that chat. Until it is
+    settled, incoming messages of that chat are held back; other chats sync normally.
 - **Devices**: `devices()` lists the user's devices, `userDevices(userId)` another user's, and
   `revokeDevice(deviceId)` revokes another own device (it is removed from every chat and can no
   longer sign in).
@@ -127,7 +174,8 @@ implementations fast and thread-safe.
 | `createDirectChat(userId)` | chat id | Returns the existing direct chat if there is one. |
 | `createGroupChat(name, memberUserIds)` | chat id | The name is shared with the members (and with members added later) in an encrypted group info message. |
 | `chatMembers(chatId)` | `[UserProfile]` | Current members, one entry per user (not per device), including the signed-in user. Names come from the local user directory, filled by `findUser`, registration, and directory lookups the client makes for members of created or joined chats, added members and unknown senders; until a lookup succeeds a user shows as its user id. Resolved names arrive as `ChatListDiff`s and timeline `Set`s. No members listener in M1: re-query when a `ChatListDiff` touches that chat or a `TimelineItem.MembershipChange` arrives. |
-| `addMembers(chatId, userIds)`, `removeMember(chatId, userId)`, `leaveChat(chatId)` | | |
+| `addMembers(chatId, userIds)`, `removeMember(chatId, userId)` | | |
+| `leaveChat(chatId)` | | Submits a leave Proposal and returns once the hub accepted it; another member commits it, then the chat shows the own `Left` change. Until then (also across restarts) sends to the chat fail with `InvalidInput`. |
 | `setGroupInfo(chatId, name?, avatarFilePath?)` | | `null`/`nil` leaves a field unchanged; at least one must be set. The avatar is encrypted and uploaded before the call returns (MIME type from the file extension), then the change is applied locally and sent to the members. `InvalidInput` for direct chats. |
 | `sendText(chatId, body, replyTo?)` | message id | The message appears in the timeline immediately with `SendState.Pending`. |
 | `sendMedia(chatId, filePath, mime, caption?, replyTo?)` | message id | The file is copied before the call returns. |
@@ -141,6 +189,7 @@ implementations fast and thread-safe.
 | `fetchThumbnail(chatId, messageId, destPath)` | file path? | `null`/`nil` if the media has no thumbnail. |
 | `chatList(listener)` | `TaskHandle` | |
 | `timeline(chatId)` | `Timeline` | |
+| `setLocalTimeZone(zone?)` | | Synchronous, never throws. Date separators follow `zone`; `null`/`nil` is UTC (the default). See *Local time zone*. |
 | `connectionState(listener)` | `TaskHandle` | `Offline` until `startSync` and after a failure while waiting to retry; `Connecting` → `Syncing` (catching up) → `Connected`. |
 | `typing(chatId, listener)` | `TaskHandle` | Reports user ids other than the signed-in user. |
 
@@ -163,8 +212,8 @@ Encryption keys and blob ids never leave Rust; pass the ids to `fetchMedia` / `f
   diffs) and returns whether more history exists.
 - `chatId()`.
 
-`TimelineItem` is a `Message` (`MessageItem`), a `DateSeparator` (start of a calendar day; in M1
-days are UTC days, not local ones) or a `MembershipChange` (`Added`, `Removed`, `Left`; group chats
+`TimelineItem` is a `Message` (`MessageItem`), a `DateSeparator` (`dayStartMs`: start of a local
+calendar day, see *Local time zone*) or a `MembershipChange` (`Added`, `Removed`, `Left`; group chats
 only, in seq order among the messages, at the time the change was applied on this device).
 `paginateBackwards` pages through locally stored history first, then through the server history:
 messages this device cannot decrypt (sent before it joined, or already read once and removed
@@ -172,6 +221,24 @@ locally) are skipped, and it returns `false` once nothing older is readable. `Me
 messages: `Pending → Sent → Delivered → Read`, or `Failed(reason)`. `Delivered` and `Read` are
 group ticks: they need a receipt from **every** device of **every** other member, so one
 recipient device that has not reported keeps the message at `Sent` (or `Delivered`).
+
+### Local time zone
+
+Date separators split calendar days in the time zone set with
+`setLocalTimeZone(zone)`; `null` / `nil` (the default) is UTC. `LocalTimeZone` is implemented by
+the app and answers `utcOffsetSecs(atMs)`: the offset from UTC in seconds in effect at that
+instant, DST included, so each item is bucketed with the offset valid at its own time:
+
+- Kotlin: `TimeZone.getDefault().getOffset(atMs) / 1000`
+- Swift: `Int32(TimeZone.current.secondsFromGMT(for: Date(timeIntervalSince1970: Double(atMs) / 1000)))`
+
+Set it once after `createClient`, before opening timelines. Call it again when the system time
+zone changes (Android `ACTION_TIMEZONE_CHANGED`, iOS `NSSystemTimeZoneDidChange`): every open
+timeline moves its date separators to the new days through its listener, as ordinary diffs
+(separators removed and inserted; message items stay). Offsets are asked once per UTC hour of the
+item timestamps (at the start of that hour) and cached until the zone is replaced, so it is
+called from a Rust background thread and must not call back into `GimClient`. The chat list does
+not bucket by day; format its timestamps natively.
 
 ## Listeners and threading
 
@@ -218,8 +285,8 @@ The chat list is ordered most recently updated first; a timeline oldest first.
 | `NotFound(reason)` | Unknown chat, message, user or media. | Refresh the screen. |
 | `Crypto(reason)` | MLS or media decryption failure. | Report; show placeholder. |
 | `Storage(reason)` | Local database or file system failure. | Report; may need disk space. |
-| `Server(status, reason)` | Non-success HTTP status from the hub. | Show generic error. |
-| `RetryLater(status, retryAfterSecs, reason)` | The hub throttles a public read (429 `rate_limited`) or a remote hub is unavailable (503 `peer_unavailable`), and gim-core's bounded retries (2 retries, at most 60 s of waiting) are used up. | Retry after `retryAfterSecs`. |
+| `Server(status, reason)` | Non-success HTTP status from the hub; 502 `peer_refused` or 503 `peer_unavailable` (no `Retry-After`) when a remote hub failed. | Show generic error; peer failures are retried by gim-core. |
+| `RetryLater(status, retryAfterSecs, reason)` | The hub throttles a public read (429 `rate_limited`) or a remote hub is unavailable (503 `peer_unavailable`), and gim-core's bounded retries (2 retries, at most 60 s of waiting for reads; see *Federation* for sends and member changes) are used up. | Retry after `retryAfterSecs`. |
 | `Cancelled` | Cancelled by `stopSync`, `signOut` or `cancelSend`. | Ignore. |
 | `NotImplemented` | In the contract but not implemented in this build. | Development builds only. |
 | `Internal(reason)` | Bug, or an unexpected exception thrown by a platform hook. | Report. |

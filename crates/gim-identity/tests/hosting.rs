@@ -456,3 +456,20 @@ fn regenerate() {
     let text = serde_json::to_string_pretty(&compute()).unwrap() + "\n";
     std::fs::write(PATH, text).unwrap();
 }
+
+#[test]
+fn entry_bytes_round_trip() {
+    let root = user_root();
+    let entry = HostingEntry::sign(&hub(0), &root.public().user_id(), 3);
+    let bytes = entry.to_bytes();
+    assert_eq!(cbor(&bytes), entry_value(&entry, &root));
+    assert_eq!(HostingEntry::from_bytes(&bytes).unwrap(), entry);
+
+    let mut tampered = cbor(&bytes);
+    let Cbor::Array(items) = &mut tampered else {
+        panic!("not an array")
+    };
+    items[1] = Cbor::Integer(256.into());
+    assert!(HostingEntry::from_bytes(&cbor_bytes(&tampered)).is_err());
+    assert!(HostingEntry::from_bytes(&bytes[..bytes.len() - 1]).is_err());
+}

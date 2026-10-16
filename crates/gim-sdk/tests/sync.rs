@@ -121,21 +121,21 @@ async fn seq_gap_is_backfilled_before_later_events() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn proposal_and_unknown_kinds_are_skipped() {
+async fn unknown_kinds_are_skipped() {
     let s = setup().await;
     let first = s.next_seq();
-    // m2 arrives as an event of kind proposal, m3 only in the history with
-    // an unknown kind.
-    let relabel = |seq, kind| {
+    // m2 arrives as an event of an unknown kind, m3 only in the history
+    // with an unknown kind.
+    let relabel = |seq| {
         s.server
             .controls
             .relabeled
             .lock()
             .unwrap()
-            .insert((s.group_id.clone(), seq), kind);
+            .insert((s.group_id.clone(), seq), v2::MessageKind::Unknown);
     };
-    relabel(first + 1, v2::MessageKind::Proposal);
-    relabel(first + 2, v2::MessageKind::Unknown);
+    relabel(first + 1);
+    relabel(first + 2);
     s.hide(first + 2);
     for text in ["m1", "m2", "m3", "m4"] {
         s.alice.send_text(&s.group_id, text).await;

@@ -8,6 +8,7 @@ set -euo pipefail
 usage() {
     cat <<'EOF'
 Usage: gim-hub-dev.sh <start|stop|ip|url|status|commit|logs> [name]
+       gim-hub-dev.sh <fed-start|fed-stop> <run>
 
 Commands:
   start   Build the image (unless GIM_HUB_BUILD=0), start the container
@@ -21,18 +22,35 @@ Commands:
   commit  Print the hub commit the image was built from.
   logs    Pass through to docker logs.
 
+Closed federation (multi-hub mode):
+  fed-start  Build the image (unless GIM_HUB_BUILD=0) and start GIM_FED_HUBS
+             hubs (a, b and with 3 also c) allowing each other, plus hub x
+             that no other hub allows (its own allowlist lists hub a), on a
+             new network ai-agent-gim-fed-<run>. Each hub has its own root
+             key in a named volume (kept across `docker stop`/`start`); all
+             share a generated libp2p PSK (TCP only), so x is refused by the
+             allowlist rather than by the network. Waits for every hub's
+             /healthz and for a, b (and c) to have bound each other, then
+             prints KEY=VALUE lines on stdout: GIM_FED_NETWORK,
+             GIM_FED_HUB_<X>=http://hub-<x>:8080 (reachable on that network),
+             GIM_FED_CONTAINER_<X> and GIM_FED_HUB_ID_<X>.
+  fed-stop   Remove the run's containers, network, volumes and config dir
+             (everything labelled ai-agent-run=gim-fed-<run>).
+
 Arguments:
   name    Container name; overrides GIM_HUB_NAME. Prefixed with "ai-agent-"
           if it does not already start with it.
+  run     Id of a federation run, unique per concurrent run.
 
 Env:
   GIM_HUB_SRC      gim-hub git checkout (default /srv/gimhq/im-client/hub)
-  GIM_HUB_REV      commit to build (default e11ad00); exported with
+  GIM_HUB_REV      commit to build (default 9608f34); exported with
                    `git archive`, so local changes in the checkout are ignored
   GIM_HUB_NAME     container name (default ai-agent-gim-hub-dev)
   GIM_HUB_IMAGE    image tag (default ai-agent/gim-hub)
   GIM_HUB_NETWORK  docker network (default traefik)
   GIM_HUB_BUILD    1 = build image on start (default), 0 = reuse image
+  GIM_FED_HUBS     federation: 2 (default) or 3 allowlisted hubs
 
 Containers on the same network can also reach the hub by name:
   http://<name>:8080
@@ -41,7 +59,7 @@ EOF
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 GIM_HUB_SRC=${GIM_HUB_SRC:-/srv/gimhq/im-client/hub}
-GIM_HUB_REV=${GIM_HUB_REV:-e11ad00}
+GIM_HUB_REV=${GIM_HUB_REV:-9608f34}
 GIM_HUB_IMAGE=${GIM_HUB_IMAGE:-ai-agent/gim-hub}
 GIM_HUB_NETWORK=${GIM_HUB_NETWORK:-traefik}
 GIM_HUB_BUILD=${GIM_HUB_BUILD:-1}
@@ -52,13 +70,21 @@ case "$cmd" in
         usage
         exit 0
         ;;
-    start | stop | ip | url | status | commit | logs) ;;
+    start | stop | ip | url | status | commit | logs | fed-start | fed-stop) ;;
     *)
         usage >&2
         exit 2
         ;;
 esac
 
+case "$cmd" in
+    fed-*)
+        if [ -z "${2:-}" ]; then
+            usage >&2
+            exit 2
+        fi
+        ;;
+esac
 name=${2:-${GIM_HUB_NAME:-ai-agent-gim-hub-dev}}
 case "$name" in
     ai-agent-*) ;;
@@ -143,8 +169,126 @@ start() {
     echo "http://$ip:8080"
 }
 
+
+# Closed federation: hubs a, b (c) allow each other; x is allowed by nobody.
+fed_prefix=ai-agent-gim-fed-${2:-}
+fed_label=ai-agent-run=gim-fed-${2:-}
+fed_dir=$repo/.tmp/gim-fed-${2:-}
+
+fed_hubs() {
+    case "${GIM_FED_HUBS:-2}" in
+        2) echo a b ;;
+        3) echo a b c ;;
+        *)
+            echo "GIM_FED_HUBS must be 2 or 3" >&2
+            return 1
+            ;;
+    esac
+}
+
+fed_stop() {
+    docker ps -aq --filter "label=$fed_label" | xargs -r docker rm -f >/dev/null
+    docker network ls -q --filter "label=$fed_label" | xargs -r docker network rm >/dev/null
+    docker volume ls -q --filter "label=$fed_label" | xargs -r docker volume rm >/dev/null
+    rm -rf "$fed_dir"
+}
+
+# Waits until hub $1's log shows a binding of every hub id in $2...
+fed_wait_bound() {
+    local hub=$1 _ id missing
+    shift
+    for _ in $(seq 1 60); do
+        missing=
+        for id in "$@"; do
+            docker logs "$fed_prefix-$hub" 2>&1 | grep "peer hub bound" | grep -q "$id" ||
+                missing=$id
+        done
+        [ -z "$missing" ] && return 0
+        sleep 1
+    done
+    echo "hub-$hub did not bind $missing" >&2
+    return 1
+}
+
+fed_start() {
+    local hubs hub id labels=(--label ai-agent=true --label "$fed_label")
+    hubs=$(fed_hubs)
+    declare -A hub_id
+    if [ "$GIM_HUB_BUILD" != 0 ]; then
+        build
+    fi
+    fed_stop
+    mkdir -p "$fed_dir"
+    {
+        echo "/key/swarm/psk/1.0.0/"
+        echo "/base16/"
+        od -An -tx1 -N32 /dev/urandom | tr -d ' \n'
+        echo
+    } >"$fed_dir/swarm.key"
+    docker network create "${labels[@]}" "$fed_prefix" >/dev/null
+    for hub in $hubs x; do
+        docker volume create "${labels[@]}" "$fed_prefix-$hub" >/dev/null
+        # Creates the hub root key in the volume and prints its hub_id.
+        hub_id[$hub]=$(docker run --rm "${labels[@]}" -v "$fed_prefix-$hub:/data" \
+            "$image" gim-hub hub-id | tr -d '\r\n')
+        echo "hub-$hub hub_id ${hub_id[$hub]}" >&2
+    done
+    for hub in $hubs; do
+        echo "${hub_id[$hub]} /dns4/hub-$hub/tcp/4001"
+    done >"$fed_dir/allowlist"
+    echo "${hub_id[a]} /dns4/hub-a/tcp/4001" >"$fed_dir/allowlist-x"
+    chmod 0755 "$fed_dir"
+    chmod 0644 "$fed_dir"/*
+
+    local allowlist
+    for hub in $hubs x; do
+        allowlist=allowlist
+        [ "$hub" = x ] && allowlist=allowlist-x
+        docker run -d "${labels[@]}" --name "$fed_prefix-$hub" \
+            --network "$fed_prefix" --network-alias "hub-$hub" \
+            -v "$fed_prefix-$hub:/data" -v "$fed_dir:/config:ro" \
+            -e RUST_LOG=info \
+            -e GIM_HUB_FEDERATION=true \
+            -e GIM_HUB_P2P_LISTEN=/ip4/0.0.0.0/tcp/4001 \
+            -e "GIM_HUB_P2P_EXTERNAL_ADDRS=/dns4/hub-$hub/tcp/4001" \
+            -e "GIM_HUB_FEDERATION_ALLOWLIST=/config/$allowlist" \
+            -e GIM_HUB_P2P_PSK_FILE=/config/swarm.key \
+            -e GIM_HUB_S2S_TIMEOUT_SECONDS=3 \
+            -e GIM_HUB_OUTBOX_BACKOFF_MAX_SECONDS=2 \
+            "$image" >/dev/null
+    done
+    for hub in $hubs x; do
+        name=$fed_prefix-$hub
+        echo "waiting for $name /healthz" >&2
+        if ! wait_healthy; then
+            echo "$name did not become healthy" >&2
+            docker logs "$name" >&2 || true
+            return 1
+        fi
+    done
+    local others
+    for hub in $hubs; do
+        others=()
+        for id in $hubs; do
+            [ "$id" != "$hub" ] && others+=("${hub_id[$id]}")
+        done
+        fed_wait_bound "$hub" "${others[@]}" || return 1
+    done
+    echo "gim-hub commit: $(image_commit)" >&2
+
+    echo "GIM_FED_NETWORK=$fed_prefix"
+    for hub in $hubs x; do
+        local upper=${hub^^}
+        echo "GIM_FED_HUB_$upper=http://hub-$hub:8080"
+        echo "GIM_FED_CONTAINER_$upper=$fed_prefix-$hub"
+        echo "GIM_FED_HUB_ID_$upper=${hub_id[$hub]}"
+    done
+}
+
 case "$cmd" in
     start) start ;;
+    fed-start) fed_start ;;
+    fed-stop) fed_stop ;;
     stop) docker stop "$name" >/dev/null 2>&1 || true ;;
     ip) container_ip ;;
     url)

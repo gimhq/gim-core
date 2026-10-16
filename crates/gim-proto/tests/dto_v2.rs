@@ -20,21 +20,17 @@ const GID: &str =
 const CLIENT: &str = "9f1c2a7e-0b44-4d0e-9a51-3c8f1e2d6b70";
 const TS: i64 = 1_760_479_200_000;
 
-/// Federation additions of the contract (hosting records, H3) that
-/// `gim_proto::v2` does not model yet; the federation client (C3) adds them.
-const DEFERRED_SCHEMAS: [&str; 6] = [
-    "CreateHostingEntryRequest",
-    "HostingEntry",
-    "HostingRecord",
-    "HostingRecordExpiring",
-    "HostingRecordExpiringEvent",
-    "PutHostingRecordRequest",
+/// Multi-homing additions of the contract (H4) that `gim_proto::v2` does
+/// not model yet; C4 adds them. Also deferred there: the error codes
+/// `duplicate_key_package` and `kp_not_claimed`.
+const DEFERRED_SCHEMAS: [&str; 4] = [
+    "HostingRecordHub",
+    "HostingRecordUpdated",
+    "HostingRecordUpdatedEvent",
+    "HubInfo",
 ];
-const DEFERRED_EVENTS: [&str; 1] = ["hosting_record.expiring"];
-const DEFERRED_ROUTES: [&str; 2] = [
-    "/v2/users/{user_id}/hosting-entry",
-    "/v2/users/{user_id}/hosting-record",
-];
+const DEFERRED_EVENTS: [&str; 1] = ["hosting_record.updated"];
+const DEFERRED_ROUTES: [&str; 1] = ["/v2/hub"];
 
 fn spec() -> Value {
     serde_json::from_str(include_str!("../contract/hub-v2/openapi.json"))
@@ -58,8 +54,8 @@ fn reencode<T: Serialize + DeserializeOwned>(json: Value) -> Result<Value, Strin
 fn message_json() -> Value {
     json!({
         "gid": GID, "seq": 7, "sender_user_id": USER, "sender_device_id": DEVICE,
-        "client_id": CLIENT, "kind": "application", "epoch": 3, "mls_message": "AAEC",
-        "created_at": TS,
+        "client_id": CLIENT, "message_id": "m-01HZX3", "kind": "application", "epoch": 3,
+        "mls_message": "AAEC", "created_at": TS,
     })
 }
 
@@ -193,6 +189,31 @@ fn cases() -> Vec<Case> {
             json!({"link_id": "lnk", "sealed_bundle": b()}),
             json!({"link_id": "lnk", "sealed_bundle": b()}),
         ),
+        case::<CreateHostingEntryRequest>(
+            "CreateHostingEntryRequest",
+            json!({"priority": 3}),
+            json!({}),
+        ),
+        case::<HostingEntry>(
+            "HostingEntry",
+            json!({"hub_id": HUB, "hub_root_pubkey": b(), "priority": 0, "entry": b()}),
+            json!({"hub_id": HUB, "hub_root_pubkey": b(), "priority": 0, "entry": b()}),
+        ),
+        case::<PutHostingRecordRequest>(
+            "PutHostingRecordRequest",
+            json!({"hosting_record": b()}),
+            json!({"hosting_record": b()}),
+        ),
+        case::<HostingRecord>(
+            "HostingRecord",
+            json!({"user_id": USER, "hosting_record": b(), "seq": 2, "expires_at": TS, "hosted": true}),
+            json!({"user_id": USER, "hosting_record": b(), "seq": 2, "expires_at": TS, "hosted": false}),
+        ),
+        case::<HostingRecordExpiring>(
+            "HostingRecordExpiring",
+            json!({"user_id": USER, "expires_at": TS, "seq": 2}),
+            json!({"user_id": USER, "expires_at": TS, "seq": 2}),
+        ),
         case::<UploadKeyPackagesRequest>(
             "UploadKeyPackagesRequest",
             json!({"key_packages": ["AAEC"], "last_resort": true}),
@@ -313,6 +334,19 @@ fn cases() -> Vec<Case> {
                 json!({"user_id": USER, "device_list": b()}),
             ),
         ),
+        case::<Event>(
+            "HostingRecordExpiringEvent",
+            event_json(
+                7,
+                "hosting_record.expiring",
+                json!({"user_id": USER, "expires_at": TS, "seq": 2}),
+            ),
+            event_json(
+                7,
+                "hosting_record.expiring",
+                json!({"user_id": USER, "expires_at": TS, "seq": 2}),
+            ),
+        ),
         case::<EventList>(
             "EventList",
             json!({"events": [event_json(5, "keypackages.low", json!({"available": 1}))], "next_cursor": 5}),
@@ -341,7 +375,10 @@ fn cases() -> Vec<Case> {
         ),
         case::<PushRegistration>(
             "PushRegistration",
-            json!({"provider": "apns", "token": "ab12", "app_id": "im.g.apps", "sandbox": true}),
+            json!({
+                "provider": "unifiedpush", "token": "https://push.example/x", "app_id": "im.g.apps",
+                "sandbox": true, "p256dh": "BCVx", "auth": "BTBZ",
+            }),
             json!({"provider": "unifiedpush", "token": "https://push.example/x"}),
         ),
         case::<BlobCreated>(
@@ -381,7 +418,11 @@ fn enums() -> Vec<(&'static str, Vec<Value>)> {
         ("GroupKind", values(&[GroupKind::Direct, GroupKind::Group])),
         (
             "MessageKind",
-            values(&[MessageKind::Commit, MessageKind::Application]),
+            values(&[
+                MessageKind::Commit,
+                MessageKind::Application,
+                MessageKind::Proposal,
+            ]),
         ),
         (
             "PushProvider",
@@ -517,6 +558,10 @@ fn event_types_match() {
         (EventData::WELCOME, "WelcomeEvent"),
         (EventData::KEY_PACKAGES_LOW, "KeyPackagesLowEvent"),
         (EventData::DEVICE_LIST_UPDATED, "DeviceListUpdatedEvent"),
+        (
+            EventData::HOSTING_RECORD_EXPIRING,
+            "HostingRecordExpiringEvent",
+        ),
     ];
     assert_eq!(
         keys(mapping),
@@ -537,7 +582,7 @@ fn event_types_match() {
 }
 
 /// Every route in openapi.json but [`DEFERRED_ROUTES`] is covered by
-/// `paths` (34 operations, 3 of them deferred).
+/// `paths` (35 operations, 1 of them deferred).
 #[test]
 fn paths_cover_openapi() {
     let spec = spec();
@@ -548,7 +593,7 @@ fn paths_cover_openapi() {
         .values()
         .map(|item| item.as_object().unwrap().len())
         .sum();
-    assert_eq!(operations, 34);
+    assert_eq!(operations, 35);
 
     // Builders called with the template names reproduce the spec's paths
     // once the escaped braces are restored.
@@ -556,6 +601,8 @@ fn paths_cover_openapi() {
         paths::user("{user_id}"),
         paths::user_device_list("{user_id}"),
         paths::user_recovery_backup("{user_id}"),
+        paths::user_hosting_entry("{user_id}"),
+        paths::user_hosting_record("{user_id}"),
         paths::handle("{handle}"),
         paths::link_bundle("{link_id}"),
         paths::group("{gid}"),
@@ -653,6 +700,14 @@ fn path_parameters_are_percent_encoded() {
     assert_eq!(paths::group_messages("a/b"), "/v2/groups/a%2Fb/messages");
     assert_eq!(paths::welcome_ack("a/b"), "/v2/welcomes/a%2Fb/ack");
     assert_eq!(paths::user(USER), format!("/v2/users/{USER}"));
+    assert_eq!(
+        paths::user_hosting_record("a/b"),
+        "/v2/users/a%2Fb/hosting-record"
+    );
+    assert_eq!(
+        paths::user_hosting_entry("a/b"),
+        "/v2/users/a%2Fb/hosting-entry"
+    );
     assert_eq!(paths::handle("a b?#%"), "/v2/handles/a%20b%3F%23%25");
     assert_eq!(paths::blob("x-._~"), "/v2/blobs/x-._~");
     assert_eq!(paths::link_bundle("é"), "/v2/link-bundles/%C3%A9");
@@ -725,8 +780,9 @@ fn known_events() {
             event_json(4, "welcome", welcome_json(true)),
             event_json(5, "keypackages.low", json!({"available": 2})),
             event_json(6, "device_list.updated", json!({"user_id": USER, "device_list": "AAEC"})),
+            event_json(7, "hosting_record.expiring", json!({"user_id": USER, "expires_at": TS, "seq": 3})),
         ],
-        "next_cursor": 6
+        "next_cursor": 7
     }));
     let events = list.events;
     assert!(matches!(&events[0].data, EventData::Message(m) if m.kind == MessageKind::Application));
@@ -754,6 +810,15 @@ fn known_events() {
         })
     );
     assert_eq!(events[5].data.event_type(), "device_list.updated");
+    assert_eq!(
+        events[6].data,
+        EventData::HostingRecordExpiring(HostingRecordExpiring {
+            user_id: USER.into(),
+            expires_at: TS,
+            seq: 3,
+        })
+    );
+    assert_eq!(events[6].data.event_type(), "hosting_record.expiring");
 }
 
 #[test]
@@ -775,6 +840,28 @@ fn unknown_event_type_does_not_fail_the_list() {
     );
     assert_eq!(list.events[1].data.event_type(), "presence");
     assert!(matches!(list.events[2].data, EventData::KeyPackagesLow(_)));
+}
+
+#[test]
+fn proposal_message_event() {
+    let mut proposal = message_json();
+    proposal["kind"] = json!("proposal");
+    proposal["message_id"] = json!("m-2");
+    let event: Event = round_trip(event_json(1, "message", proposal));
+    assert!(matches!(
+        &event.data,
+        EventData::Message(m) if m.message_id == "m-2" && m.kind == MessageKind::Proposal
+    ));
+}
+
+#[test]
+fn proposal_commit_result_keeps_the_epoch() {
+    // A Proposal is sequenced without an epoch change; a resubmit is a
+    // duplicate with the original result.
+    let first: CommitResult = round_trip(json!({"seq": 8, "epoch": 3, "duplicate": false}));
+    let again: CommitResult = round_trip(json!({"seq": 8, "epoch": 3, "duplicate": true}));
+    assert_eq!((first.seq, first.epoch), (again.seq, again.epoch));
+    assert!(again.duplicate && !first.duplicate);
 }
 
 #[test]

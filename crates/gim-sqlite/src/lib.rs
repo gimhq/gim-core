@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use gim_base::model::{
     Chat, DepartedMember, GroupCursor, GroupMessage, MediaCacheEntry, MembershipEvent, Message,
-    OutboxEntry, PendingCommit, UserInfo,
+    OutboxEntry, PendingCommit, PendingInvite, PendingLeave, UserInfo,
 };
 use gim_base::{BaseError, StateReader, StateStore, StoreError, StoreTxn, WriteTarget};
 use gim_common::{DeviceRef, GroupId, MessageId, UserId};
@@ -34,7 +34,7 @@ pub use migrations::{APPLICATION_ID, SCHEMA_VERSION};
 use reader::{bound, membership_kind_str, outbox_state_str, sql_err, Reader};
 use rows::{
     encode, ChatData, MemberRow, MessageData, OutboxData, OutboxKindRow, ParkedData,
-    PendingCommitData,
+    PendingCommitData, PendingLeaveData,
 };
 
 type StoreResult<T> = Result<T, StoreError>;
@@ -422,6 +422,21 @@ macro_rules! delegate_reader {
                 Reader($conn).pending_commits()
             }
 
+            fn pending_leave(&self, group_id: &GroupId) -> StoreResult<Option<PendingLeave>> {
+                let $this = self;
+                Reader($conn).pending_leave(group_id)
+            }
+
+            fn pending_leaves(&self) -> StoreResult<Vec<PendingLeave>> {
+                let $this = self;
+                Reader($conn).pending_leaves()
+            }
+
+            fn pending_invites(&self) -> StoreResult<Vec<PendingInvite>> {
+                let $this = self;
+                Reader($conn).pending_invites()
+            }
+
             fn departed_members(&self) -> StoreResult<Vec<DepartedMember>> {
                 let $this = self;
                 Reader($conn).departed_members()
@@ -477,6 +492,8 @@ impl StoreTxn for SqliteTxn<'_> {
             "group_cursors",
             "parked_messages",
             "pending_commits",
+            "pending_leaves",
+            "pending_invites",
             "departed_members",
             "membership_events",
             "self_groups",
@@ -640,6 +657,45 @@ impl StoreTxn for SqliteTxn<'_> {
         )
     }
 
+    fn upsert_pending_leave(&mut self, leave: &PendingLeave) -> StoreResult<()> {
+        self.execute(
+            "INSERT OR REPLACE INTO pending_leaves (group_id, data) VALUES (?1, ?2)",
+            params![
+                leave.group_id.as_str(),
+                encode(&PendingLeaveData::from(leave))?
+            ],
+        )
+    }
+
+    fn remove_pending_leave(&mut self, group_id: &GroupId) -> StoreResult<()> {
+        self.execute(
+            "DELETE FROM pending_leaves WHERE group_id = ?1",
+            [group_id.as_str()],
+        )
+    }
+
+    fn upsert_pending_invite(&mut self, invite: &PendingInvite) -> StoreResult<()> {
+        self.execute(
+            "INSERT OR REPLACE INTO pending_invites \
+             (group_id, user_id, created_at_ms, next_retry_at_ms, attempts) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                invite.group_id.as_str(),
+                invite.user_id.as_str(),
+                invite.created_at_ms,
+                invite.next_retry_at_ms,
+                invite.attempts
+            ],
+        )
+    }
+
+    fn remove_pending_invite(&mut self, group_id: &GroupId, user_id: &UserId) -> StoreResult<()> {
+        self.execute(
+            "DELETE FROM pending_invites WHERE group_id = ?1 AND user_id = ?2",
+            [group_id.as_str(), user_id.as_str()],
+        )
+    }
+
     fn add_departed_member(&mut self, member: &DepartedMember) -> StoreResult<()> {
         self.execute(
             "INSERT OR IGNORE INTO departed_members (group_id, user_id, device_id) \
@@ -690,6 +746,32 @@ impl StoreTxn for SqliteTxn<'_> {
             "INSERT OR IGNORE INTO self_groups (group_id) VALUES (?1)",
             [group_id.as_str()],
         )
+    }
+
+    fn clear(&mut self) -> StoreResult<()> {
+        // Every table but SQLite's own and the OpenMLS migration history,
+        // so the OpenMLS tables are covered without naming them.
+        let tables = self
+            .txn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'table' \
+                 AND name NOT LIKE 'sqlite_%' \
+                 AND name <> 'openmls_sqlite_storage_migrations'",
+            )
+            .and_then(|mut stmt| {
+                stmt.query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .map_err(sql_err)?;
+        self.txn
+            .pragma_update(None, "defer_foreign_keys", true)
+            .map_err(sql_err)?;
+        for table in tables {
+            self.txn
+                .execute(&format!("DELETE FROM \"{table}\""), [])
+                .map_err(sql_err)?;
+        }
+        Ok(())
     }
 }
 

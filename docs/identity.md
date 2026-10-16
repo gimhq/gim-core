@@ -290,6 +290,17 @@ Verification of a `SignedHostingRecord` at time `now`:
 A verifier that looked the record up by user id MUST also check that the
 record's `user_id` is the one it looked up.
 
+### Publication
+
+The client builds and signs the record; the hub never holds the user root
+key. It asks its hub for an entry (`HostingEntry` CBOR as above, with the
+hub's `hub_id` and `hub_root_pubkey` alongside), checks that the entry's key
+is the one named and derives that `hub_id`, and builds the record: `seq` one
+above the hub's current record (1 without one), `expires_at` seven days
+ahead, the hub signature checked by the builder. Renewals keep the entries
+and take the next `seq`. On a `seq` conflict the client reads the current
+record, verifies it and rebuilds once.
+
 ### Ordering and primary hub
 
 - Replacing a stored record follows *Update and seq rules*.

@@ -249,6 +249,19 @@ impl HostingEntry {
         self.priority
     }
 
+    /// `[hub_root_pubkey, priority, hub_sig]`, as a hub hands the entry to
+    /// the user.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        cbor::encode(&self.encode())
+    }
+
+    /// Parses an entry. The hub signature covers the user id, so it is
+    /// checked when the entry is put into a record
+    /// ([`UserHostingRecord::new`]).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, IdentityError> {
+        Self::decode(cbor::decode(bytes)?)
+    }
+
     /// Canonical record order: `priority`, then `hub_root_pubkey` bytes.
     fn sort_key(&self) -> (u8, [u8; 32]) {
         (self.priority, *self.hub_root_public_key.as_bytes())

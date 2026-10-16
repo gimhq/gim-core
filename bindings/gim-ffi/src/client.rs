@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use futures_util::StreamExt;
 use gim_base::model::{ChatKind as BaseChatKind, Membership, MessageContent as BaseContent};
@@ -19,9 +19,10 @@ use url::Url;
 
 use crate::error::parse_id;
 use crate::hooks::HookSecrets;
+use crate::timeline::PlatformTimeZone;
 use crate::{
     ChatListDiff, ChatListListener, ConnectionState, DeviceInfo, GimError, LinkSession,
-    PendingApproval, PlatformHooks, Session, TaskHandle, Timeline, UserProfile,
+    LocalTimeZone, PendingApproval, PlatformHooks, Session, TaskHandle, Timeline, UserProfile,
 };
 
 type Sdk = Client<SqliteStore>;
@@ -163,6 +164,23 @@ pub struct GimClient {
     signed_out: AtomicBool,
     shared: Arc<Shared>,
     sync: Mutex<Option<SyncTasks>>,
+    local_time: Mutex<LocalTime>,
+}
+
+/// The local time zone and the open timelines that follow it.
+#[derive(Default)]
+struct LocalTime {
+    /// `None` is UTC.
+    zone: Option<Arc<dyn gim_ui::TimeZone>>,
+    timelines: Vec<Weak<gim_ui::Timeline>>,
+}
+
+impl LocalTime {
+    fn zone(&self) -> Arc<dyn gim_ui::TimeZone> {
+        self.zone
+            .clone()
+            .unwrap_or_else(|| Arc::new(gim_ui::FixedOffset(0)))
+    }
 }
 
 impl GimClient {
@@ -206,6 +224,7 @@ impl GimClient {
             signed_out: AtomicBool::new(false),
             shared,
             sync: Mutex::new(None),
+            local_time: Mutex::default(),
         })
     }
 
@@ -364,6 +383,10 @@ impl GimClient {
     /// its signed DeviceList, recovery backup and KeyPackages to the hub,
     /// signs in and persists the session. Returns the recovery code, which
     /// is not stored and must be shown to the user once.
+    ///
+    /// On failure nothing of the attempt is kept: call it again (it creates
+    /// a new user), also after the app restarted. `InvalidInput` once an
+    /// identity exists.
     pub async fn create_identity(&self, display_name: String) -> Result<String, GimError> {
         let code = self.sdk()?.create_identity(&display_name).await?;
         Ok(code.to_string())
@@ -379,6 +402,10 @@ impl GimClient {
     /// it they all stay active. Fails with `NotFound` if the hub has no
     /// DeviceList of the user, and with `RetryLater` while the hub keeps
     /// throttling the read.
+    ///
+    /// On failure nothing of the attempt is kept: call it again, also after
+    /// the app restarted. If the failed attempt's device was published, the
+    /// retry revokes it.
     pub async fn restore_from_recovery(
         &self,
         user_id: String,
@@ -407,6 +434,12 @@ impl GimClient {
     /// the link, then signs in as a new device of that user. Returns the
     /// SAS to compare with the one the old device shows; finish with
     /// `confirm_link`.
+    ///
+    /// If no bundle arrived (network error, timeout), call it again with
+    /// the same `link`. A failure after the bundle arrived keeps nothing of
+    /// the attempt and uses `link` up: start a new link and approve it on
+    /// the old device again (rejecting the first approval there revokes the
+    /// failed attempt's device).
     pub async fn wait_link(&self, link: Arc<LinkSession>) -> Result<String, GimError> {
         let linked = self.sdk()?.wait_link(&link.0).await?;
         Ok(linked.sas.to_string())
@@ -561,6 +594,23 @@ impl GimClient {
         if reachable && !was {
             self.sdk.network_reachable();
         }
+    }
+
+    /// Sets the local time zone that timeline date separators split
+    /// calendar days in; `None` (the default) is UTC. Call it again when
+    /// the system time zone changes: open timelines move their date
+    /// separators through their listeners.
+    pub fn set_local_time_zone(&self, zone: Option<Arc<dyn LocalTimeZone>>) {
+        let mut local = self.local_time.lock().unwrap_or_else(|e| e.into_inner());
+        local.zone = zone.map(|zone| Arc::new(PlatformTimeZone(zone)) as Arc<dyn gim_ui::TimeZone>);
+        let zone = local.zone();
+        local.timelines.retain(|timeline| match timeline.upgrade() {
+            Some(timeline) => {
+                timeline.set_time_zone(zone.clone());
+                true
+            }
+            None => false,
+        });
     }
 
     /// Looks up a user by handle; `None` if no such user exists.
@@ -862,7 +912,30 @@ impl GimClient {
     /// The timeline of one chat. Cheap; listeners are added on the result.
     pub async fn timeline(&self, chat_id: String) -> Result<Arc<Timeline>, GimError> {
         let group_id: GroupId = parse_id("chat_id", chat_id)?;
-        let inner = gim_ui::Timeline::new(self.sdk()?, group_id).await?;
+        let zone = self
+            .local_time
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .zone
+            .clone();
+        let options = gim_ui::TimelineOptions {
+            time_zone: zone.clone(),
+            ..gim_ui::TimelineOptions::default()
+        };
+        let inner = Arc::new(gim_ui::Timeline::with_options(self.sdk()?, group_id, options).await?);
+        let mut local = self.local_time.lock().unwrap_or_else(|e| e.into_inner());
+        // The zone may have changed while the timeline opened.
+        let same = match (&zone, &local.zone) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (a, b) => a.is_none() && b.is_none(),
+        };
+        if !same {
+            inner.set_time_zone(local.zone());
+        }
+        local
+            .timelines
+            .retain(|timeline| timeline.strong_count() > 0);
+        local.timelines.push(Arc::downgrade(&inner));
         Ok(Arc::new(Timeline::new(inner)))
     }
 

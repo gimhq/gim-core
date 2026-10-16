@@ -15,8 +15,10 @@ mod auth;
 mod client;
 mod error;
 mod history;
+mod hosting;
 pub mod http;
 mod identity;
+mod invites;
 mod link;
 mod media;
 mod outbox;
@@ -30,13 +32,18 @@ pub mod testing;
 pub mod transport;
 
 pub use client::{
-    Client, ClientBuilder, Session, COMMIT_POST_ATTEMPTS, DEVICE_KEY_SECRET_KEY, KEY_PACKAGE_BATCH,
-    MAX_COMMIT_RETRIES, ROOT_KEY_SECRET_KEY, SESSION_SECRET_KEY,
+    Client, ClientBuilder, Session, COMMIT_POST_ATTEMPTS, DEVICE_KEY_SECRET_KEY,
+    ENROLLMENT_SECRET_KEY, KEY_PACKAGE_BATCH, MAX_COMMIT_RETRIES, ROOT_KEY_SECRET_KEY,
+    SESSION_SECRET_KEY,
 };
 pub use error::{ClientError, Result};
 pub use gim_identity::recovery::RecoveryCode;
 pub use history::Backfill;
+pub use hosting::{
+    HOSTING_RECORD_CHECK_INTERVAL, HOSTING_RECORD_LIFETIME, HOSTING_RECORD_RENEW_BEFORE,
+};
 pub use http::{HttpConfig, HttpTransport};
+pub use invites::INVITE_RETRY_MAX;
 pub use link::{LinkResult, LinkSession, PendingApproval, Sas, LINK_BUNDLE_LIFETIME, LINK_TIMEOUT};
 pub use media::{DOWNLOAD_PIECE, OUTGOING_DIR};
 pub use outbox::OutboxSender;

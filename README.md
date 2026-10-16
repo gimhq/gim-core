@@ -41,7 +41,7 @@ docker run --rm --label ai-agent=true -v "$PWD:$PWD" -w "$PWD" \
 ## Integration tests
 
 `scripts/integration-test.sh` builds gim-hub from `GIM_HUB_SRC` (default
-`/srv/gimhq/im-client/hub`) at `GIM_HUB_REV` (default `e11ad00`, exported with
+`/srv/gimhq/im-client/hub`) at `GIM_HUB_REV` (default `9608f34`, exported with
 `git archive`, so local changes in the checkout are ignored) as
 `ai-agent/gim-hub`, runs it on the `traefik` network, waits for `/healthz`,
 prints the hub commit and runs `testing/gim-integration-testing` in a `rust:1`
@@ -59,17 +59,14 @@ stays offline. Scenarios, several clients in one process:
 - `tests/scenario.rs`, gim-ffi clients: identity creation, handle claim and
   sign-in after restart; direct chat (receipts, typing, reply, edit,
   reaction, delete, reconnect, restart); file and image (blob) send and fetch;
-  group add and remove; group leave (`group_leave`, see below); linking a second device with the SAS, which
+  group add and remove; group leave (see below); linking a second device with the SAS, which
   then reads and writes in an existing chat, and revoking it (its credential
   is rejected); restoring from the recovery code.
-- `group_leave` is skipped (it prints `group_leave skipped: needs gim-hub
-  H3-FX3 ...`) unless `GIM_HUB_FX3=1`: gim-hub `e11ad00` rejects the
-  PublicMessage self-Remove Proposal a leaving member sends ("mls_message is
-  not a Commit"); gim-hub H3-FX3 fixes it. Once the harness is pinned to a hub
-  with FX3, the flag goes away. Run it against such a hub with
-  `GIM_HUB_URL=... GIM_HUB_FX3=1 cargo test -p gim-integration-testing --test
-  scenario group_leave -- --include-ignored` (`scripts/integration-test.sh`
-  does not forward the flag).
+- `group_leave`: a member leaves with a self-Remove Proposal, the remaining
+  member commits it by reference, the leaver ends `Left` and gets no later
+  messages. `tests/faults.rs` `group_leave_three_members`: of the two
+  remaining members the one with the lowest device id commits at once, the
+  other waits its 5-15 s delay and finds it committed (one epoch change).
 - `tests/faults.rs`, gim-sdk clients over the hub's HTTP API with faults
   injected at the transport (`src/sdk.rs`): a lost reply to an accepted
   Commit and to an application message (the re-post gets the hub's
@@ -79,6 +76,42 @@ stays offline. Scenarios, several clients in one process:
   a cursor on demand (`GIM_HUB_EVENT_RETENTION_DAYS` is at least 1), so the
   410 is injected at the hub's head cursor; the recovery itself runs against
   the hub.
+
+### Federation suite
+
+`GIM_FEDERATION=1 scripts/integration-test.sh` runs `tests/federation.rs`
+against a closed federation started by `scripts/gim-hub-dev.sh fed-start`:
+`GIM_FED_HUBS` (2, default, or 3) hubs `hub-a`, `hub-b` (`hub-c`) that allow
+each other, plus `hub-x` that nobody allows (its own allowlist lists
+`hub-a`), on a network created for the run. Each hub has its own root key in
+a named volume, all share a generated libp2p PSK (TCP only, so `hub-x` is
+refused by the allowlist, not by the network), and the script waits until the
+allowed hubs have bound each other. The tests run one at a time in a
+`rust:1` container on that network with the Docker socket mounted (they stop
+and start `hub-b`); hub logs are printed on failure and the run's
+containers, network, volumes and config are always removed (label
+`ai-agent-run=gim-fed-<run>`). Without `GIM_FED_HUB_A` the tests are skipped.
+
+```sh
+GIM_FEDERATION=1 scripts/integration-test.sh
+GIM_FEDERATION=1 GIM_FED_HUBS=3 scripts/integration-test.sh peer_outage
+```
+
+Users on different hubs, real gim-core clients: hosting records published at
+onboarding resolve on the peer hub; a cross-hub DM with text both ways and an
+image each way; a group owned by `hub-a` with members on both hubs (add from
+either hub, messages both ways, leave by Proposal from `hub-b`, remove);
+concurrent Commits from both hubs (one 409, catch up, recommit); `hub-b`
+down: a post to a `hub-b`-owned group (503) and an invite of a `hub-b` user
+(claim `unavailable`) go through once it is back; `hub-x` refused (`hub-a`
+logs `Hello refused`, nothing reaches either side). `cross_hub_image_fetch`
+fails against gim-hub `9608f34`: blobs stay on the hub they were uploaded to
+(hub-v2 multihoming.md Q6) and the receiver's hub answers 404.
+
+`GIM_FEDERATION=1 testing/gim-cli-interop.sh` runs the cross-hub CLI variant
+(`cli_to_cli_interop_across_hubs`): profiles on `hub-a` and `hub-b`, naming
+each other by user id (handles are per hub; every `<handle>` argument also
+takes a user id).
 
 ## CLI (gim)
 

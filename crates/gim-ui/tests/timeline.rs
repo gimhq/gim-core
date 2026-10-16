@@ -1,6 +1,7 @@
 mod common;
 
 use std::pin::pin;
+use std::sync::Arc;
 
 use common::{apply, day_start, next, seed, wait_until, Device, DAY_MS, HOUR_MS, JAN_1_MS};
 use gim_base::BaseClient;
@@ -8,8 +9,8 @@ use gim_common::{now_ms, GroupId};
 use gim_proto::envelope::Content;
 use gim_sdk::testing::FakeTransport;
 use gim_ui::{
-    MessageContent, MessageItem, ReactionGroup, SendState, Timeline, TimelineItem, TimelineOptions,
-    Vector, VectorDiff,
+    FixedOffset, MessageContent, MessageItem, ReactionGroup, SendState, TimeZone, Timeline,
+    TimelineItem, TimelineOptions, Vector, VectorDiff,
 };
 
 fn messages(items: &Vector<TimelineItem>) -> Vec<&MessageItem> {
@@ -320,6 +321,87 @@ async fn date_separators_follow_utc_offset() {
     let items = local.items().0;
     assert_eq!(items.len(), 3);
     assert_eq!(items[0], separator(JAN_1_MS + DAY_MS - 3 * HOUR_MS));
+}
+
+/// UTC+1, and UTC+2 from `transition_ms` on.
+struct Dst {
+    transition_ms: i64,
+}
+
+impl TimeZone for Dst {
+    fn utc_offset_secs(&self, at_ms: i64) -> i32 {
+        if at_ms < self.transition_ms {
+            3600
+        } else {
+            7200
+        }
+    }
+}
+
+#[tokio::test]
+async fn date_separators_follow_dst_and_time_zone_changes() {
+    let transport = FakeTransport::new();
+    let (alice, bob, _) = direct_chat(&transport).await;
+    let g = GroupId::new("dst").unwrap();
+    let sender = alice.device();
+    // Jan 11 00:00 UTC; the clocks go forward at 01:00 UTC.
+    let d = JAN_1_MS + 10 * DAY_MS;
+    let zone = Arc::new(Dst {
+        transition_ms: (d + HOUR_MS) as i64,
+    });
+    // 23:30 local on Jan 10 (+1).
+    seed(&bob.store, &g, &sender, 1, d - 3 * HOUR_MS / 2, "before");
+    // 00:30 local on Jan 11 (+1), the transition day.
+    seed(
+        &bob.store,
+        &g,
+        &sender,
+        2,
+        d - HOUR_MS / 2,
+        "transition day",
+    );
+    // 00:30 local on Jan 12 (+2).
+    seed(
+        &bob.store,
+        &g,
+        &sender,
+        3,
+        d + 22 * HOUR_MS + HOUR_MS / 2,
+        "after",
+    );
+
+    let options = TimelineOptions {
+        time_zone: Some(zone),
+        ..TimelineOptions::default()
+    };
+    let timeline = Timeline::with_options(&bob.client, g.clone(), options)
+        .await
+        .unwrap();
+    let (mut items, stream) = timeline.items();
+    let mut stream = pin!(stream);
+    assert_eq!(items.len(), 6);
+    assert_eq!(items[0], separator(d - DAY_MS - HOUR_MS));
+    assert_eq!(body(&items[1]), "before");
+    assert_eq!(items[2], separator(d - HOUR_MS));
+    assert_eq!(body(&items[3]), "transition day");
+    assert_eq!(items[4], separator(d + DAY_MS - 2 * HOUR_MS));
+    assert_eq!(body(&items[5]), "after");
+
+    // Back to UTC: the first two share Jan 10.
+    timeline.set_time_zone(Arc::new(FixedOffset(0)));
+    let diffs = next(&mut stream).await;
+    assert!(diffs
+        .iter()
+        .all(|d| !matches!(d, VectorDiff::Reset { .. } | VectorDiff::Set { .. })));
+    apply(&mut items, diffs);
+    let expected = timeline.items().0;
+    assert_eq!(items, expected);
+    assert_eq!(items.len(), 5);
+    assert_eq!(items[0], separator(d - DAY_MS));
+    assert_eq!(body(&items[1]), "before");
+    assert_eq!(body(&items[2]), "transition day");
+    assert_eq!(items[3], separator(d));
+    assert_eq!(body(&items[4]), "after");
 }
 
 #[tokio::test]

@@ -52,14 +52,27 @@ pub enum ProcessedMessage {
         epoch: u64,
         added: Vec<DeviceRef>,
         removed: Vec<DeviceRef>,
+        /// The removed devices that proposed their own removal (left by
+        /// themselves).
+        left: Vec<DeviceRef>,
         self_removed: bool,
     },
+    /// A Proposal of the group's current epoch, stored as pending until a
+    /// Commit covers it (or the epoch advances).
     Proposal {
         sender: DeviceRef,
         /// The device a Remove proposal removes; the sender itself when it
         /// leaves the group.
         removed: Option<DeviceRef>,
     },
+}
+
+/// A Proposal of another member stored for the group's current epoch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingProposal {
+    pub sender: DeviceRef,
+    /// The device a Remove (or SelfRemove) proposal removes.
+    pub removed: Option<DeviceRef>,
 }
 
 /// Stateless MLS operations. Every call borrows a [`CryptoStore`] for its
@@ -370,6 +383,88 @@ impl MlsEngine {
         serialize(&proposal)
     }
 
+    /// The Proposals of other members stored for the group's current epoch.
+    pub fn pending_proposals(
+        &self,
+        store: &impl CryptoStore,
+        group_id: &GroupId,
+    ) -> Result<Vec<PendingProposal>> {
+        let group = load_group(store, group_id)?;
+        group
+            .pending_proposals()
+            .map(|proposal| {
+                let sender = match proposal.sender() {
+                    Sender::Member(leaf) => member_device(&group, *leaf)?,
+                    _ => return Err(CryptoError::mls("proposal sender is not a member")),
+                };
+                let removed = removed_leaf(proposal)
+                    .map(|leaf| member_device(&group, leaf))
+                    .transpose()?;
+                Ok(PendingProposal { sender, removed })
+            })
+            .collect()
+    }
+
+    /// Creates a pending commit covering every pending Proposal by
+    /// reference; `None` if there is none. Proposals adding devices make it
+    /// carry a Welcome for them.
+    pub fn commit_pending_proposals(
+        &self,
+        store: &impl CryptoStore,
+        group_id: &GroupId,
+    ) -> Result<Option<CommitOutput>> {
+        let account = self.account(store)?;
+        let mut group = load_group(store, group_id)?;
+        if group.pending_proposals().next().is_none() {
+            return Ok(None);
+        }
+        let epoch = group.epoch().as_u64();
+        let (commit, welcome, _group_info) = group
+            .commit_to_pending_proposals(&self.provider(store), &account.signer)
+            .map_err(CryptoError::mls)?;
+        let staged = group
+            .pending_commit()
+            .ok_or_else(|| CryptoError::mls("the commit was not staged"))?;
+        let added = staged
+            .add_proposals()
+            .map(|p| device_of(p.add_proposal().key_package().leaf_node().credential()))
+            .collect::<Result<Vec<_>>>()?;
+        let (removed, _) = removals(&group, staged.queued_proposals())?;
+        Ok(Some(CommitOutput {
+            commit: serialize(&commit)?,
+            welcome: welcome.as_ref().map(serialize).transpose()?,
+            epoch,
+            added,
+            removed,
+        }))
+    }
+
+    /// Drops the group's pending Proposals (e.g. after the hub refused a
+    /// commit covering them).
+    pub fn clear_pending_proposals(
+        &self,
+        store: &impl CryptoStore,
+        group_id: &GroupId,
+    ) -> Result<()> {
+        load_group(store, group_id)?
+            .clear_pending_proposals(store.mls_storage())
+            .map_err(CryptoError::store)
+    }
+
+    /// The devices the pending commit removes that proposed their own
+    /// removal; empty without a pending commit.
+    pub fn pending_commit_leavers(
+        &self,
+        store: &impl CryptoStore,
+        group_id: &GroupId,
+    ) -> Result<Vec<DeviceRef>> {
+        let group = load_group(store, group_id)?;
+        match group.pending_commit() {
+            Some(staged) => Ok(removals(&group, staged.queued_proposals())?.1),
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// Merges the pending commit after the hub accepted it; returns the
     /// new epoch.
     pub fn merge_pending_commit(
@@ -462,6 +557,12 @@ impl MlsEngine {
         if message_epoch > current_epoch {
             return Err(wrong_epoch(message_epoch, current_epoch));
         }
+        // A Proposal can only be committed in its own epoch.
+        if message.content_type() == ContentType::Proposal && message_epoch < current_epoch {
+            return Err(CryptoError::invalid(format!(
+                "proposal of past epoch {message_epoch}"
+            )));
+        }
         let provider = self.provider(store);
         let processed = group.process_message(&provider, message).map_err(|e| {
             if message_epoch != current_epoch {
@@ -493,6 +594,12 @@ impl MlsEngine {
             }
             ProcessedMessageContent::ProposalMessage(proposal)
             | ProcessedMessageContent::ExternalJoinProposalMessage(proposal) => {
+                // The sender's leaf, as for a commit without a path: a
+                // revoked device cannot propose.
+                let leaf = sender_leaf
+                    .and_then(|index| group.members().find(|m| m.index == index))
+                    .ok_or_else(|| CryptoError::mls("proposal sender is not a member"))?;
+                credential::validate(&leaf.credential, &leaf.signature_key, &*self.device_lists)?;
                 let removed = match proposal.proposal() {
                     Proposal::Add(add) => {
                         self.validate_leaf(add.key_package().leaf_node())?;
@@ -522,15 +629,7 @@ impl MlsEngine {
                     .add_proposals()
                     .map(|p| device_of(p.add_proposal().key_package().leaf_node().credential()))
                     .collect::<Result<Vec<_>>>()?;
-                let removed = commit
-                    .remove_proposals()
-                    .map(|p| {
-                        group
-                            .member(p.remove_proposal().removed())
-                            .ok_or_else(|| CryptoError::mls("removed leaf is not a member"))
-                            .and_then(device_of)
-                    })
-                    .collect::<Result<Vec<_>>>()?;
+                let (removed, left) = removals(&group, commit.queued_proposals())?;
                 let self_removed = commit.self_removed();
                 let epoch = commit.group_context().epoch().as_u64();
                 group
@@ -544,6 +643,7 @@ impl MlsEngine {
                     epoch,
                     added,
                     removed,
+                    left,
                     self_removed,
                 })
             }
@@ -722,6 +822,42 @@ fn delete(store: &impl CryptoStore, group: &mut MlsGroup, group_id: &GroupId) ->
         .delete(store.mls_storage())
         .map_err(CryptoError::store)?;
     store.remove_group_id(group_id).map_err(CryptoError::store)
+}
+
+/// The leaf a Remove or SelfRemove proposal removes.
+fn removed_leaf(proposal: &QueuedProposal) -> Option<LeafNodeIndex> {
+    match (proposal.proposal(), proposal.sender()) {
+        (Proposal::Remove(remove), _) => Some(remove.removed()),
+        (Proposal::SelfRemove, Sender::Member(leaf)) => Some(*leaf),
+        _ => None,
+    }
+}
+
+fn member_device(group: &MlsGroup, leaf: LeafNodeIndex) -> Result<DeviceRef> {
+    group
+        .member(leaf)
+        .ok_or_else(|| CryptoError::mls("leaf is not a member"))
+        .and_then(device_of)
+}
+
+/// The devices removed by `proposals`, and those of them that proposed
+/// their own removal.
+fn removals<'a>(
+    group: &MlsGroup,
+    proposals: impl Iterator<Item = &'a QueuedProposal>,
+) -> Result<(Vec<DeviceRef>, Vec<DeviceRef>)> {
+    let (mut removed, mut left) = (Vec::new(), Vec::new());
+    for proposal in proposals {
+        let Some(leaf) = removed_leaf(proposal) else {
+            continue;
+        };
+        let device = member_device(group, leaf)?;
+        if matches!(proposal.sender(), Sender::Member(sender) if *sender == leaf) {
+            left.push(device.clone());
+        }
+        removed.push(device);
+    }
+    Ok((removed, left))
 }
 
 /// Maps a leaf credential to its certified device.
