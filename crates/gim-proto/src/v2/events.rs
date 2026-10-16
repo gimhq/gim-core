@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{DeviceList, ErrorBody, HostingRecordExpiring, Message};
+use super::{DeviceList, ErrorBody, HostingRecordExpiring, HostingRecordUpdated, Message};
 
 /// WebSocket close code after a `cursor_expired` error frame.
 pub const STREAM_CLOSE_CURSOR_EXPIRED: u16 = 4410;
@@ -40,6 +40,8 @@ pub enum EventData {
     DeviceListUpdated(DeviceList),
     /// `hosting_record.expiring` (`HostingRecordExpiringEvent`).
     HostingRecordExpiring(HostingRecordExpiring),
+    /// `hosting_record.updated` (`HostingRecordUpdatedEvent`).
+    HostingRecordUpdated(HostingRecordUpdated),
     /// Any other `type`, kept verbatim.
     Unknown { event_type: String, data: Value },
 }
@@ -52,6 +54,7 @@ impl EventData {
     pub const KEY_PACKAGES_LOW: &'static str = "keypackages.low";
     pub const DEVICE_LIST_UPDATED: &'static str = "device_list.updated";
     pub const HOSTING_RECORD_EXPIRING: &'static str = "hosting_record.expiring";
+    pub const HOSTING_RECORD_UPDATED: &'static str = "hosting_record.updated";
 
     /// The wire `type` of this event.
     pub fn event_type(&self) -> &str {
@@ -63,6 +66,7 @@ impl EventData {
             Self::KeyPackagesLow(_) => Self::KEY_PACKAGES_LOW,
             Self::DeviceListUpdated(_) => Self::DEVICE_LIST_UPDATED,
             Self::HostingRecordExpiring(_) => Self::HOSTING_RECORD_EXPIRING,
+            Self::HostingRecordUpdated(_) => Self::HOSTING_RECORD_UPDATED,
             Self::Unknown { event_type, .. } => event_type,
         }
     }
@@ -143,6 +147,9 @@ impl TryFrom<RawEvent> for Event {
             EventData::HOSTING_RECORD_EXPIRING => {
                 EventData::HostingRecordExpiring(serde_json::from_value(raw.data)?)
             }
+            EventData::HOSTING_RECORD_UPDATED => {
+                EventData::HostingRecordUpdated(serde_json::from_value(raw.data)?)
+            }
             _ => EventData::Unknown {
                 event_type: raw.event_type,
                 data: raw.data,
@@ -169,6 +176,7 @@ impl From<Event> for RawEvent {
             EventData::KeyPackagesLow(data) => serde_json::to_value(data),
             EventData::DeviceListUpdated(data) => serde_json::to_value(data),
             EventData::HostingRecordExpiring(data) => serde_json::to_value(data),
+            EventData::HostingRecordUpdated(data) => serde_json::to_value(data),
             EventData::Unknown { data, .. } => Ok(data),
         }
         .expect("event data serializes to JSON");

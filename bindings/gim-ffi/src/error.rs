@@ -102,6 +102,10 @@ impl From<gim_sdk::TransportError> for GimError {
                 status: 500,
                 reason,
             },
+            E::Rejected {
+                status: 400 | 422, ..
+            } => Self::InvalidInput { reason },
+            E::Rejected { status, .. } => Self::Server { status, reason },
             E::TooLarge(_) => Self::InvalidInput { reason },
             E::DeviceNotActive(_) => Self::NotRegistered,
             E::HostingRecordRequired(_) => Self::Server {
@@ -236,6 +240,23 @@ mod tests {
         assert!(matches!(
             GimError::from(ClientError::Transport(refused)),
             GimError::Server { status: 502, .. }
+        ));
+    }
+
+    #[test]
+    fn rejections() {
+        let rejected = |status: u16| {
+            GimError::from(ClientError::Transport(TransportError::Rejected {
+                status,
+                code: "validation_failed".into(),
+                message: "bad".into(),
+            }))
+        };
+        assert!(matches!(rejected(400), GimError::InvalidInput { .. }));
+        assert!(matches!(rejected(422), GimError::InvalidInput { .. }));
+        assert!(matches!(
+            rejected(403),
+            GimError::Server { status: 403, .. }
         ));
     }
 }

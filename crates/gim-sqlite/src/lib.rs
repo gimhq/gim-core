@@ -19,8 +19,8 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use gim_base::model::{
-    Chat, DepartedMember, GroupCursor, GroupMessage, MediaCacheEntry, MembershipEvent, Message,
-    OutboxEntry, PendingCommit, PendingInvite, PendingLeave, UserInfo,
+    Chat, DepartedMember, GroupCursor, GroupMessage, HubRecord, MediaCacheEntry, MembershipEvent,
+    Message, OutboxEntry, PendingCommit, PendingInvite, PendingLeave, UserInfo,
 };
 use gim_base::{BaseError, StateReader, StateStore, StoreError, StoreTxn, WriteTarget};
 use gim_common::{DeviceRef, GroupId, MessageId, UserId};
@@ -31,7 +31,7 @@ use zeroize::Zeroizing;
 
 pub use migrations::{APPLICATION_ID, SCHEMA_VERSION};
 
-use reader::{bound, membership_kind_str, outbox_state_str, sql_err, Reader};
+use reader::{bound, hub_state_str, membership_kind_str, outbox_state_str, sql_err, Reader};
 use rows::{
     encode, ChatData, MemberRow, MessageData, OutboxData, OutboxKindRow, ParkedData,
     PendingCommitData, PendingLeaveData,
@@ -456,6 +456,11 @@ macro_rules! delegate_reader {
                 let $this = self;
                 Reader($conn).self_groups()
             }
+
+            fn hubs(&self) -> StoreResult<Vec<HubRecord>> {
+                let $this = self;
+                Reader($conn).hubs()
+            }
         }
     };
 }
@@ -746,6 +751,26 @@ impl StoreTxn for SqliteTxn<'_> {
             "INSERT OR IGNORE INTO self_groups (group_id) VALUES (?1)",
             [group_id.as_str()],
         )
+    }
+
+    fn upsert_hub(&mut self, hub: &HubRecord) -> StoreResult<()> {
+        self.execute(
+            "INSERT OR REPLACE INTO hubs \
+             (hub_id, url, priority, verified_root_pubkey, last_seen_ms, state) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                hub.hub_id,
+                hub.url,
+                hub.priority,
+                hub.verified_root_pubkey,
+                hub.last_seen_ms,
+                hub_state_str(hub.state)
+            ],
+        )
+    }
+
+    fn remove_hub(&mut self, hub_id: &str) -> StoreResult<()> {
+        self.execute("DELETE FROM hubs WHERE hub_id = ?1", [hub_id])
     }
 
     fn clear(&mut self) -> StoreResult<()> {
