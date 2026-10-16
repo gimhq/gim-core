@@ -446,11 +446,33 @@ KeyPackages or download media. What it does depends on the payload type:
   not bound to the seq, so a relay could otherwise suppress or replay messages. A message the
   stream (or another hub's push) already applied is not applied again; the stored message is
   described instead. If the fetch fails, the content is generic and the stream applies the
-  message later.
+  message later. In a chat this device has not joined yet (the hub keeps one pending push per
+  device, so the invitation's push may have been replaced by a later message's) it joins through
+  the pending invitations first and shows the invitation unless the message itself is shown.
 - a chat invitation: joins the chat through the pending invitations, as sync does.
-- a member change: catches the chat up; silent.
-- a wake-up (minimal mode) or an unknown type: reads the pending events once, without moving the
-  sync position (the app's stream reads them again), and shows the newest unread message.
+- a member change: catches the chat up. If the change added this device (its invitation's push
+  was replaced by this one), it joins through the pending invitations and shows the invitation
+  instead.
+- a wake-up (minimal mode) or an unknown type: joins pending invitations and reads the pending
+  events once, without moving the sync position (the app's stream reads them again).
+
+When an invitation or member change push joins a chat, it also applies the messages the hub
+already has after the join (as sync does), so the invitation names the group and the inviter.
+The hub keeps no display names: the inviter's name comes from their profile announcement in the
+chat, which their device sends right after the invitation. If it is not on the hub yet,
+`senderDisplayName` is the inviter's handle (or user id) until the profile is known;
+`senderUserId` is always set.
+
+The hub keeps one pending push per device: a later push replaces an earlier one, keeps the
+higher priority and carries the newest payload, so an alert may arrive for a read receipt, a
+display name announcement or a member change that followed a text or an invitation. The pushes of
+one write (e.g. a Commit's message and member changes) always coalesce into one; separate writes
+may still arrive as separate pushes. The payload does not carry the priority, so `processPush`
+handles every type the same way at any priority. Whenever the pushed item itself shows nothing (and
+for member changes and wake-ups), `processPush` catches the chat up to the pushed position and
+shows the newest unread text or media from someone else it obtained, else the invitation of a chat
+it joined, else nothing (`shouldDisplay = false`). Unread is the stored read state: a message read
+on this or another own device is not shown again.
 
 `NotificationContent` is `chatId?`, `chatTitle?` (the group name, or the other user's name in a
 direct chat), `senderUserId?`, `senderDisplayName?`, `body` (text, caption, `Photo`,
@@ -468,10 +490,23 @@ direct chat), `senderUserId?`, `senderDisplayName?`, `body` (text, caption, `Pho
 Show the notification only if `shouldDisplay`. It is `false` for own messages, edits, deletes,
 receipts, member changes and messages already read. If the push cannot be decrypted or processed
 in time (also when the other process holds the store lock too long), the call still succeeds with
-`Generic` content: body `New message`, `shouldDisplay = true`, and `chatId` / `chatTitle` when the
-chat is known locally. An iOS Notification Service Extension can therefore always display the
+`Generic` content: body `New message`, `shouldDisplay = true` (`false` only for a member change
+that did not add this device), and `chatId` / `chatTitle` when the chat is known locally. An iOS Notification Service Extension can therefore always display the
 result. Use `collapseId` as the platform collapse key
 (`apns-collapse-id`, FCM `tag`): every hub of the user may push the same message.
+
+#### Testing push
+
+A test hub records pushes instead of sending them: register with provider `log` (any token), and
+start the hub with `GIM_HUB_PUSH_LOG_ENDPOINT=true` (test deployments only;
+`scripts/gim-hub-dev.sh` does). `GET <hub>/v2/debug/push-log?device_id=<device id>` (no auth)
+then lists the last pushes as `{"notifications": [{user_id, device_id, token, payload,
+sent_at}]}`, oldest first; pass each `payload` as JSON to `processPush`. The hub keeps one pending
+push per device, so a later event's push may replace an earlier one (e.g. an invitation's by the
+inviter's next message, or a text's by the member change right after it); process every push the
+device got. `GIM_HUB_PUSH_MEMBER_EVENTS=true`
+adds pushes for member changes, `GIM_HUB_PUSH_MINIMAL=true` sends wake-up payloads only. See
+`testing/gim-integration-testing/tests/push.rs` and contract `push.md` §5.
 
 ## Listeners and threading
 

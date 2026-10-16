@@ -1194,6 +1194,9 @@ impl<S: StateStore + 'static> Client<S> {
                 retry = true;
             }
         }
+        self.inner
+            .rejected_messages
+            .fetch_add(strict.rejected() + lenient.rejected(), Ordering::Relaxed);
         Ok(changes)
     }
 

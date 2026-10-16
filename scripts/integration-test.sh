@@ -6,7 +6,10 @@
 # with GIM_HUB_PUBLIC_URL http://<container>:8080, the URL the tests use,
 # waits for /healthz and runs the tests in a rust:1 container on the same
 # network. The hub container is always stopped on exit; its logs are printed
-# on failure. The hub commit is printed before the tests run.
+# on failure. The hub commit is printed before the tests run. The hub
+# pushes membership events (GIM_HUB_PUSH_MEMBER_EVENTS=true); a second hub
+# from the same image sends minimal push payloads (GIM_HUB_PUSH_MINIMAL=true,
+# GIM_HUB_MINIMAL_URL in the tests). Both serve the test push log.
 #
 # With GIM_FEDERATION=1 it runs the federation suite
 # (tests/federation.rs) instead: `gim-hub-dev.sh fed-start` starts a closed
@@ -80,24 +83,30 @@ if [ "${GIM_FEDERATION:-0}" = 1 ] || [ "${GIM_MULTIHOMING:-0}" = 1 ]; then
 fi
 
 hub=ai-agent-gim-hub-it-$SUBTASK_ID
+minimal_hub=$hub-minimal
 network=${GIM_HUB_NETWORK:-traefik}
 status=1
 
 cleanup() {
-    if [ "$status" != 0 ]; then
-        echo "--- logs of $hub" >&2
-        "$repo/scripts/gim-hub-dev.sh" logs "$hub" 2>&1 | tail -n 200 >&2 || true
-    fi
-    "$repo/scripts/gim-hub-dev.sh" stop "$hub"
+    for h in "$hub" "$minimal_hub"; do
+        if [ "$status" != 0 ]; then
+            echo "--- logs of $h" >&2
+            "$repo/scripts/gim-hub-dev.sh" logs "$h" 2>&1 | tail -n 200 >&2 || true
+        fi
+        "$repo/scripts/gim-hub-dev.sh" stop "$h"
+    done
 }
 trap cleanup EXIT
 
-"$repo/scripts/gim-hub-dev.sh" start "$hub" >/dev/null
+GIM_HUB_PUSH_MEMBER_EVENTS=true "$repo/scripts/gim-hub-dev.sh" start "$hub" >/dev/null
+GIM_HUB_BUILD=0 GIM_HUB_PUSH_MINIMAL=true \
+    "$repo/scripts/gim-hub-dev.sh" start "$minimal_hub" >/dev/null
 echo "gim-hub commit under test: $("$repo/scripts/gim-hub-dev.sh" commit "$hub")"
 
 docker run --rm --label ai-agent=true --network "$network" \
     -v "$repo:$repo" -w "$repo" \
     -v "$cargo_cache:/cache/cargo" -e CARGO_HOME=/cache/cargo \
     "${cargo_env[@]}" -e GIM_HUB_URL="http://$hub:8080" \
+    -e GIM_HUB_PUSH_MEMBER_EVENTS=true -e GIM_HUB_MINIMAL_URL="http://$minimal_hub:8080" \
     rust:1 cargo test -p gim-integration-testing --no-fail-fast -- --include-ignored --nocapture "$@"
 status=0

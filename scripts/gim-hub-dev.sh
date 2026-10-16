@@ -15,7 +15,8 @@ Commands:
   start   Build the image (unless GIM_HUB_BUILD=0), start the container
           (reusing it if already running) with GIM_HUB_PUBLIC_URL, wait for
           /healthz and print that URL on stdout. Status messages, including
-          the hub commit, go to stderr.
+          the hub commit, go to stderr. The hub serves its test push log
+          (GIM_HUB_PUSH_LOG_ENDPOINT=true, docs/push.md §5).
   stop    Stop the container (it runs with --rm); no error if already gone.
   ip      Print the container IP on GIM_HUB_NETWORK; exit 1 if not running.
   url     Print the hub's public URL; exit 1 if not running.
@@ -32,7 +33,9 @@ Closed federation (multi-hub mode):
              new network ai-agent-gim-fed-<run>. Each hub has its own root
              key in a named volume (kept across `docker stop`/`start`); all
              share a generated libp2p PSK (TCP only), so x is refused by the
-             allowlist rather than by the network. Waits for every hub's
+             allowlist rather than by the network. Every hub serves its
+             test push log, and a fallback hub pushes 5 s after it lost the
+             primary (GIM_HUB_PUSH_FAILOVER_SECONDS=5). Waits for every hub's
              /healthz and for a, b (and c) to have bound each other, then
              prints KEY=VALUE lines on stdout: GIM_FED_NETWORK,
              GIM_FED_HUB_<X>=http://hub-<x>:8080 (reachable on that network,
@@ -49,7 +52,7 @@ Arguments:
 Env:
   GIM_HUB_SRC      gim-hub git checkout (default /srv/gimhq/im-client/hub)
   GIM_HUB_REV      commit to build (default
-                   50b3401726c99781e30b7c0311f5c63a56bc5657); exported with
+                   bd8c9ca29f4dc8804eac2f22a9f771319c00070c); exported with
                    `git archive`, so local changes in the checkout are ignored
   GIM_HUB_CHECKOUT directory holding gim-hub at GIM_HUB_REV (e.g. a CI
                    checkout); when set, the image is built from it as is,
@@ -64,13 +67,15 @@ Env:
                    gim-core signs in only at the URL the hub proves, so
                    clients must use exactly this URL; set it when they reach
                    the hub another way (e.g. a published port).
+  GIM_HUB_PUSH_MEMBER_EVENTS, GIM_HUB_PUSH_MINIMAL
+                   start: passed to the hub when set (docs/push.md §3)
   GIM_FED_HUBS     federation: 2 (default) or 3 allowlisted hubs
 EOF
 }
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 GIM_HUB_SRC=${GIM_HUB_SRC:-/srv/gimhq/im-client/hub}
-GIM_HUB_REV=${GIM_HUB_REV:-50b3401726c99781e30b7c0311f5c63a56bc5657}
+GIM_HUB_REV=${GIM_HUB_REV:-bd8c9ca29f4dc8804eac2f22a9f771319c00070c}
 GIM_HUB_IMAGE=${GIM_HUB_IMAGE:-ai-agent/gim-hub}
 GIM_HUB_NETWORK=${GIM_HUB_NETWORK:-traefik}
 GIM_HUB_BUILD=${GIM_HUB_BUILD:-1}
@@ -188,10 +193,15 @@ start() {
             build
         fi
         echo "starting $name on $net" >&2
+        local push_env=() var
+        for var in GIM_HUB_PUSH_MEMBER_EVENTS GIM_HUB_PUSH_MINIMAL; do
+            [ -n "${!var:-}" ] && push_env+=(-e "$var=${!var}")
+        done
         # Disposable: the hub's data lives in memory and goes with it.
         docker run -d --rm --label ai-agent=true --network "$net" --name "$name" \
             --tmpfs /data:rw,uid=10001,gid=10001,mode=0700 \
             -e "GIM_HUB_PUBLIC_URL=${GIM_HUB_PUBLIC_URL:-http://$name:8080}" \
+            -e GIM_HUB_PUSH_LOG_ENDPOINT=true "${push_env[@]}" \
             "$image" >/dev/null
     fi
 
@@ -293,6 +303,8 @@ fed_start() {
             -e GIM_HUB_P2P_PSK_FILE=/config/swarm.key \
             -e GIM_HUB_S2S_TIMEOUT_SECONDS=3 \
             -e GIM_HUB_OUTBOX_BACKOFF_MAX_SECONDS=2 \
+            -e GIM_HUB_PUSH_LOG_ENDPOINT=true \
+            -e GIM_HUB_PUSH_FAILOVER_SECONDS=5 \
             "$image" >/dev/null
     done
     for hub in $hubs x; do

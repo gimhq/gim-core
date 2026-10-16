@@ -33,12 +33,13 @@
 //! suppress or replay messages. The message is always fetched from the
 //! hub, the same copy the stream delivers.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use gim_base::model::{
-    Chat, ChatKind, GroupMessage, IncomingEvent, Membership, MembershipChangeKind, Message,
-    MessageContent, MessageKind, StateChange,
+    Chat, ChatKind, GroupCursor, GroupMessage, IncomingEvent, Membership, MembershipChangeKind,
+    Message, MessageContent, StateChange,
 };
 use gim_base::{BaseError, StateReader, StateStore};
 use gim_common::{now_ms, GroupId, MessageId, UserId};
@@ -66,6 +67,10 @@ const SNAPSHOT_MESSAGES: usize = 100;
 /// A pushed seq further than this past the group's applied history is not
 /// caught up from a push (the stream backfills it).
 const MAX_CATCH_UP: u64 = BACKFILL_PAGE as u64;
+/// Fetches of a pushed message the hub does not serve yet, and the pause
+/// between them.
+const FETCH_ATTEMPTS: u32 = 3;
+const FETCH_RETRY_DELAY: Duration = Duration::from_millis(300);
 
 /// The device's push registration (contract `push.md` §1). Every field is
 /// opaque to the hub, which passes it to the push server.
@@ -436,21 +441,22 @@ impl<R: StateReader + ?Sized> Describe<'_, R> {
     /// What applying the message of `kind` at `(group_id, seq)` changed: a
     /// new message at that seq, a reaction to an earlier message (compared
     /// with `before`), or else something silent (edit, delete, receipt,
-    /// typing, group info, a commit, anything in a self group). An
-    /// application message that changed nothing could not be decrypted:
-    /// generic content.
+    /// typing, group info, a commit, anything in a self group). A message
+    /// that could not be decrypted (`rejected`): generic content. A
+    /// decrypted one may change nothing here, e.g. another member's receipt
+    /// for a message that is not this device's: silent.
     fn applied(
         &self,
         group_id: &GroupId,
         seq: u64,
-        kind: MessageKind,
+        rejected: bool,
         changes: &[StateChange],
         before: &[Message],
     ) -> Result<NotificationContent, BaseError> {
         if self.store.self_groups()?.contains(group_id) {
             return self.base(None, NotificationKind::Generic, false);
         }
-        if changes.is_empty() && kind == MessageKind::Application {
+        if rejected {
             return self.base(Some(group_id), NotificationKind::Generic, true);
         }
         let upserted = changes.iter().filter_map(|change| match change {
@@ -662,24 +668,38 @@ impl<S: StateStore + 'static> Client<S> {
     ///   or another push), the stored message is described and nothing is
     ///   applied again. New text and media are shown (not own ones, nor
     ///   read ones), a new reaction as `reacted <emoji>`; edits, deletes,
-    ///   receipts and other content are silent. A pushed Proposal is
-    ///   applied like any message.
+    ///   receipts and other content show nothing by themselves. A pushed
+    ///   Proposal is applied like any message. In a chat not joined yet
+    ///   (the hub replaced the Welcome's push with this one) it joins
+    ///   through the pending Welcomes first.
     /// - `welcome`: joins through the pending Welcomes (`GET
     ///   /v2/welcomes/pending`, then the acknowledgement) and shows the
     ///   invite. The inline Welcome is not used: it does not name who
     ///   added this device.
     /// - `group.member_added` / `group.member_removed`: catches the group
-    ///   up to the pushed seq; silent.
-    /// - `wake` (minimal mode), an unknown type or version: reads one page
-    ///   of events from every reachable hub (without moving the cursors:
-    ///   the app's stream reads them again) and shows the newest unread
-    ///   new message, if any; else silent.
+    ///   up to the pushed seq (joining it first through the pending
+    ///   Welcomes if the change added this device); silent by itself.
+    /// - `wake` (minimal mode), an unknown type or version: joins the
+    ///   pending Welcomes and reads one page of events from every reachable
+    ///   hub (without moving the cursors: the app's stream reads them
+    ///   again).
+    ///
+    /// The hub keeps one pending push per device, with the highest
+    /// priority and the newest payload, so an alert push may carry a
+    /// receipt, an announcement or a member change that followed a text.
+    /// The payload carries no priority: every type is handled the same at
+    /// any priority. When the pushed message shows nothing (and for member
+    /// changes and wake-ups), the
+    /// group is caught up to the pushed seq and the newest unread text or
+    /// media from someone else obtained in this call is shown, else the
+    /// invite of a chat joined in this call, else nothing. Only the stored
+    /// read state decides what is unread.
     ///
     /// Groups with an own commit not settled yet are left to the stream.
     /// Fails only with [`ClientError::InvalidInput`] if `payload` is not a
     /// JSON object; any other failure, and running out of time, give the
-    /// generic content (see [`NotificationContent`]), silent for
-    /// membership pushes.
+    /// generic content (see [`NotificationContent`]), silent only for a
+    /// membership push that did not add this device.
     pub async fn process_push_within(
         &self,
         payload: &str,
@@ -692,8 +712,23 @@ impl<S: StateStore + 'static> Client<S> {
             Err(_) => format!("not done within {timeout:?}"),
         };
         tracing::warn!(kind = ?push.kind, error = %failure, "push not processed; generic notification");
-        let display = !matches!(push.kind, PushKind::Membership { .. });
+        // Silent only for a member change that did not add this device.
+        let display = match &push.kind {
+            PushKind::Membership { group_id, seq } => self.joined_at(group_id, *seq).await,
+            _ => true,
+        };
         Ok(self.generic(&push, display).await)
+    }
+
+    /// Whether this device is in `group_id`, added by the Commit at `seq`.
+    async fn joined_at(&self, group_id: &GroupId, seq: u64) -> bool {
+        let Some(session) = self.session() else {
+            return false;
+        };
+        matches!(
+            self.joined_actor(&session, group_id, Some(seq)).await,
+            Ok(Some(_))
+        )
     }
 
     async fn handle_push(&self, push: &Push) -> Result<NotificationContent> {
@@ -713,14 +748,10 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Runs `describe` over the store.
-    async fn describe<F>(
-        &self,
-        session: Option<&Session>,
-        push: &Push,
-        describe: F,
-    ) -> Result<NotificationContent>
+    async fn describe<T, F>(&self, session: Option<&Session>, push: &Push, describe: F) -> Result<T>
     where
-        F: FnOnce(&Describe<'_, S>) -> Result<NotificationContent, BaseError> + Send + 'static,
+        T: Send + 'static,
+        F: FnOnce(&Describe<'_, S>) -> Result<T, BaseError> + Send + 'static,
     {
         let own = session
             .map(|s| s.device.user_id.clone())
@@ -772,7 +803,50 @@ impl<S: StateStore + 'static> Client<S> {
         .await
     }
 
+    /// A message push. For a chat this device has not joined (the hub
+    /// keeps one pending push per device, so the Welcome's push may have
+    /// been replaced by this one) it joins through the pending Welcomes
+    /// first. If the pushed message itself shows nothing (a receipt, an
+    /// announcement, an edit; the hub may have replaced an earlier push of
+    /// a text with this one), the group is caught up to the pushed seq and
+    /// the newest unread message from someone else obtained in this wake
+    /// is shown, else the invite of a chat joined in this wake.
     async fn push_message(
+        &self,
+        session: &Session,
+        push: &Push,
+        group_id: &GroupId,
+        seq: u64,
+    ) -> Result<NotificationContent> {
+        let before = self.cursors([group_id.clone()]).await?;
+        let mut joined_now = None;
+        if !self.is_joined(group_id).await? {
+            self.join_pending(session, group_id, None).await?;
+            joined_now = self.joined_actor(session, group_id, None).await?;
+        }
+        let content = self
+            .push_joined_message(session, push, group_id, seq)
+            .await?;
+        // After applying: the pushed message may be the inviter's profile.
+        if let Some(actor) = &joined_now {
+            self.joined(session, group_id, actor.as_ref()).await;
+        }
+        if content.should_display {
+            return Ok(content);
+        }
+        if let Err(err) = self.catch_up(session, group_id, seq).await {
+            tracing::info!(%group_id, error = %err, "cannot catch up the pushed group");
+        }
+        if let Some(newest) = self.newest_obtained(session, push, before).await? {
+            return Ok(newest);
+        }
+        match joined_now {
+            Some(actor) => self.describe_invite(session, push, group_id, actor).await,
+            None => Ok(content),
+        }
+    }
+
+    async fn push_joined_message(
         &self,
         session: &Session,
         push: &Push,
@@ -791,10 +865,9 @@ impl<S: StateStore + 'static> Client<S> {
             tracing::info!(%group_id, seq, "pushed message not found");
             return Ok(self.generic(push, true).await);
         };
-        let kind = message.kind;
         let events = vec![IncomingEvent::Message(message)];
         let link = self.home_link();
-        let Some((changes, before)) = self
+        let Some((changes, before, rejected)) = self
             .apply_pushed(session, &link, events, Some(group_id))
             .await?
         else {
@@ -806,7 +879,7 @@ impl<S: StateStore + 'static> Client<S> {
         }
         let gid = group_id.clone();
         self.describe(Some(session), push, move |d| {
-            d.applied(&gid, seq, kind, &changes, &before)
+            d.applied(&gid, seq, rejected, &changes, &before)
         })
         .await
     }
@@ -836,31 +909,41 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// The message at `(group_id, seq)` from the hubs (the home hub first,
-    /// then the other reachable listed hubs).
+    /// then the other reachable listed hubs). A push may outrun the hub
+    /// that serves the message (e.g. another hub of a federated group), so
+    /// a missing message is asked for again a few times.
     async fn fetch_message(&self, group_id: &GroupId, seq: u64) -> Result<Option<GroupMessage>> {
-        let history = self
-            .group_history_from(
-                &self.home_link(),
-                group_id,
-                seq.saturating_sub(1),
-                Some(seq),
-            )
-            .await?;
-        Ok(history.and_then(|messages| messages.into_iter().find(|m| m.seq == seq)))
+        for attempt in 1..=FETCH_ATTEMPTS {
+            let history = self
+                .group_history_from(
+                    &self.home_link(),
+                    group_id,
+                    seq.saturating_sub(1),
+                    Some(seq),
+                )
+                .await?;
+            let found = history.and_then(|messages| messages.into_iter().find(|m| m.seq == seq));
+            if found.is_some() || attempt == FETCH_ATTEMPTS {
+                return Ok(found);
+            }
+            tokio::time::sleep(FETCH_RETRY_DELAY).await;
+        }
+        Ok(None)
     }
 
     /// Applies `events` of the hub of `link` through the sync apply path,
     /// under the group lock, leaving out the groups with an own commit not
-    /// settled yet (which only the stream may resolve). Returns the changes
-    /// and the latest messages of `snapshot` before applying; `None` if
-    /// every event was left out.
+    /// settled yet (which only the stream may resolve). Returns the changes,
+    /// the latest messages of `snapshot` before applying and whether a
+    /// message was skipped as undecryptable; `None` if every event was left
+    /// out.
     async fn apply_pushed(
         &self,
         session: &Session,
         link: &HubLink,
         events: Vec<IncomingEvent>,
         snapshot: Option<&GroupId>,
-    ) -> Result<Option<(Vec<StateChange>, Vec<Message>)>> {
+    ) -> Result<Option<(Vec<StateChange>, Vec<Message>, bool)>> {
         let _guard = self.inner.group_lock.lock().await;
         let snapshot = snapshot.cloned();
         let (pending, before) = self
@@ -890,8 +973,11 @@ impl<S: StateStore + 'static> Client<S> {
         if events.is_empty() {
             return Ok(None);
         }
+        let rejected = &self.inner.rejected_messages;
+        let rejected_before = rejected.load(Ordering::Relaxed);
         let changes = self.apply_group_events(session, link, events).await?;
-        Ok(Some((changes, before)))
+        let rejected = rejected.load(Ordering::Relaxed) != rejected_before;
+        Ok(Some((changes, before, rejected)))
     }
 
     async fn push_welcome(
@@ -901,48 +987,150 @@ impl<S: StateStore + 'static> Client<S> {
         group_id: &GroupId,
         seq: u64,
     ) -> Result<NotificationContent> {
-        if !self.applied_seq(group_id, seq).await?.0 {
-            let _guard = self.inner.group_lock.lock().await;
-            for link in std::iter::once(self.home_link()).chain(self.hub_links()) {
-                match self.join_pending_welcomes(session, &link).await {
-                    Ok(_) if self.applied_seq(group_id, seq).await?.0 => break,
-                    Ok(_) => {}
-                    Err(err) => {
-                        tracing::info!(%group_id, error = %err, "cannot read the pending Welcomes")
+        let joining = !self.applied_seq(group_id, seq).await?.0;
+        if joining {
+            self.join_pending(session, group_id, Some(seq)).await?;
+        }
+        let Some(actor) = self.joined_actor(session, group_id, Some(seq)).await? else {
+            return Ok(self.generic(push, true).await);
+        };
+        if joining {
+            self.catch_up_joined(session, group_id).await;
+        }
+        self.invite(session, push, group_id, actor).await
+    }
+
+    /// After joining `group_id` through a push: applies the messages the
+    /// hub has after the join (bounded by [`MAX_CATCH_UP`]), e.g. the
+    /// group's name and the inviter's profile sent right after the Commit,
+    /// so the invite names the group. Best effort.
+    async fn catch_up_joined(&self, session: &Session, group_id: &GroupId) {
+        let result = async {
+            let (_, contiguous) = self.applied_seq(group_id, 0).await?;
+            let until = contiguous.saturating_add(MAX_CATCH_UP);
+            let history = self
+                .group_history_from(&self.home_link(), group_id, contiguous, Some(until))
+                .await?
+                .unwrap_or_default();
+            if history.is_empty() {
+                return Ok(());
+            }
+            let events = history.into_iter().map(IncomingEvent::Message).collect();
+            self.apply_pushed(session, &self.home_link(), events, None)
+                .await
+                .map(drop)
+        }
+        .await;
+        if let Err(err) = result {
+            tracing::info!(%group_id, error = %err, "cannot catch up the joined group");
+        }
+    }
+
+    /// Joins the pending Welcomes of every reachable hub, the home hub
+    /// first, until `group_id` is joined (at `seq`, the Welcome's Commit,
+    /// if given).
+    async fn join_pending(
+        &self,
+        session: &Session,
+        group_id: &GroupId,
+        seq: Option<u64>,
+    ) -> Result<()> {
+        let _guard = self.inner.group_lock.lock().await;
+        for link in std::iter::once(self.home_link()).chain(self.hub_links()) {
+            match self.join_pending_welcomes(session, &link).await {
+                Ok(_) => {
+                    let done = match seq {
+                        Some(seq) => self.applied_seq(group_id, seq).await?.0,
+                        None => self.is_joined(group_id).await?,
+                    };
+                    if done {
+                        break;
                     }
+                }
+                Err(err) => {
+                    tracing::info!(%group_id, error = %err, "cannot read the pending Welcomes")
                 }
             }
         }
+        Ok(())
+    }
+
+    async fn is_joined(&self, group_id: &GroupId) -> Result<bool> {
+        let gid = group_id.clone();
+        self.read(move |store, _| {
+            Ok(store
+                .chat(&gid)?
+                .is_some_and(|c| c.membership == Membership::Joined))
+        })
+        .await
+    }
+
+    /// `None` unless `group_id` is joined; else who added this device (at
+    /// `seq` if given, else the latest addition), if known.
+    async fn joined_actor(
+        &self,
+        session: &Session,
+        group_id: &GroupId,
+        seq: Option<u64>,
+    ) -> Result<Option<Option<UserId>>> {
         let (gid, own) = (group_id.clone(), session.device.user_id.clone());
-        let joined = self
-            .run(move |store, _| {
-                let joined = store
-                    .chat(&gid)?
-                    .is_some_and(|c| c.membership == Membership::Joined);
-                let actor = store
-                    .membership_events(&gid)?
-                    .into_iter()
-                    .find(|e| {
-                        e.seq == seq && e.user_id == own && e.kind == MembershipChangeKind::Added
-                    })
-                    .map(|e| e.actor);
-                Ok(joined.then_some(actor))
-            })
-            .await?;
-        let Some(actor) = joined else {
-            return Ok(self.generic(push, true).await);
-        };
-        // What the sync loop does for a chat it joined.
-        if let Some(actor) = &actor {
+        self.run(move |store, _| {
+            let joined = store
+                .chat(&gid)?
+                .is_some_and(|c| c.membership == Membership::Joined);
+            let actor = store
+                .membership_events(&gid)?
+                .into_iter()
+                .filter(|e| {
+                    seq.is_none_or(|seq| e.seq == seq)
+                        && e.user_id == own
+                        && e.kind == MembershipChangeKind::Added
+                })
+                .max_by_key(|e| e.seq)
+                .map(|e| e.actor);
+            Ok(joined.then_some(actor))
+        })
+        .await
+    }
+
+    /// What the sync loop does for a chat it joined.
+    async fn joined(&self, session: &Session, group_id: &GroupId, actor: Option<&UserId>) {
+        if let Some(actor) = actor {
             self.resolve_users(session, BTreeSet::from([actor.clone()]))
                 .await;
         }
         self.announce_profile(group_id).await;
+    }
+
+    /// The invite to the joined `group_id` by `actor`, after doing what the
+    /// sync loop does for a chat it joined.
+    async fn invite(
+        &self,
+        session: &Session,
+        push: &Push,
+        group_id: &GroupId,
+        actor: Option<UserId>,
+    ) -> Result<NotificationContent> {
+        self.joined(session, group_id, actor.as_ref()).await;
+        self.describe_invite(session, push, group_id, actor).await
+    }
+
+    async fn describe_invite(
+        &self,
+        session: &Session,
+        push: &Push,
+        group_id: &GroupId,
+        actor: Option<UserId>,
+    ) -> Result<NotificationContent> {
         let gid = group_id.clone();
         self.describe(Some(session), push, move |d| d.invite(&gid, actor.as_ref()))
             .await
     }
 
+    /// A member change. If it added this device (its Welcome push coalesced
+    /// into this one), joins through the pending Welcomes and shows the
+    /// invite. Else catches the group up to the pushed seq and shows a
+    /// message that brought, else nothing.
     async fn push_membership(
         &self,
         session: &Session,
@@ -950,20 +1138,33 @@ impl<S: StateStore + 'static> Client<S> {
         group_id: &GroupId,
         seq: u64,
     ) -> Result<NotificationContent> {
-        let (applied, contiguous) = self.applied_seq(group_id, seq).await?;
-        if !applied && seq <= contiguous.saturating_add(MAX_CATCH_UP) {
-            let history = self
-                .group_history_from(&self.home_link(), group_id, contiguous, Some(seq))
-                .await?
-                .unwrap_or_default();
-            let events = history
-                .into_iter()
-                .filter(|m| m.seq <= seq)
-                .map(IncomingEvent::Message)
-                .collect();
-            self.apply_pushed(session, &self.home_link(), events, None)
-                .await?;
+        if !self.is_joined(group_id).await? {
+            // The Commit may have added this device: its Welcome push
+            // coalesced into this one.
+            self.join_pending(session, group_id, Some(seq)).await?;
+            let Some(actor) = self.joined_actor(session, group_id, Some(seq)).await? else {
+                // Not joined: nothing to catch up; the stream joins it.
+                return self.silent_membership(session, push, group_id).await;
+            };
+            // The invite, like a Welcome push. Later messages caught up
+            // here have pushes of their own.
+            self.catch_up_joined(session, group_id).await;
+            return self.invite(session, push, group_id, actor).await;
         }
+        let before = self.cursors([group_id.clone()]).await?;
+        self.catch_up(session, group_id, seq).await?;
+        if let Some(newest) = self.newest_obtained(session, push, before).await? {
+            return Ok(newest);
+        }
+        self.silent_membership(session, push, group_id).await
+    }
+
+    async fn silent_membership(
+        &self,
+        session: &Session,
+        push: &Push,
+        group_id: &GroupId,
+    ) -> Result<NotificationContent> {
         let gid = group_id.clone();
         self.describe(Some(session), push, move |d| {
             d.base(Some(&gid), NotificationKind::Membership, false)
@@ -971,48 +1172,146 @@ impl<S: StateStore + 'static> Client<S> {
         .await
     }
 
+    /// Applies the group's messages up to `seq` that are missing, unless
+    /// `seq` is more than [`MAX_CATCH_UP`] past the applied history (the
+    /// stream backfills that).
+    async fn catch_up(&self, session: &Session, group_id: &GroupId, seq: u64) -> Result<()> {
+        let (_, contiguous) = self.applied_seq(group_id, seq).await?;
+        if seq <= contiguous || seq > contiguous.saturating_add(MAX_CATCH_UP) {
+            return Ok(());
+        }
+        let history = self
+            .group_history_from(&self.home_link(), group_id, contiguous, Some(seq))
+            .await?
+            .unwrap_or_default();
+        let events = history
+            .into_iter()
+            .filter(|m| m.seq <= seq)
+            .map(IncomingEvent::Message)
+            .collect();
+        self.apply_pushed(session, &self.home_link(), events, None)
+            .await?;
+        Ok(())
+    }
+
+    /// The applied seqs of `groups` now.
+    async fn cursors(
+        &self,
+        groups: impl IntoIterator<Item = GroupId>,
+    ) -> Result<BTreeMap<GroupId, GroupCursor>> {
+        let groups: Vec<GroupId> = groups.into_iter().collect();
+        self.read(move |store, _| {
+            groups
+                .into_iter()
+                .map(|gid| Ok((gid.clone(), store.group_cursor(&gid)?)))
+                .collect()
+        })
+        .await
+    }
+
+    /// The newest message to show among those applied since `before` was
+    /// read (their seq was not applied then): text or media from someone
+    /// else, not deleted and not read, outside the self groups. Reads only
+    /// the stored unread state.
+    async fn newest_obtained(
+        &self,
+        session: &Session,
+        push: &Push,
+        before: BTreeMap<GroupId, GroupCursor>,
+    ) -> Result<Option<NotificationContent>> {
+        self.describe(Some(session), push, move |d| {
+            let hidden = d.store.self_groups()?;
+            let mut newest: Option<NotificationContent> = None;
+            for (gid, cursor) in &before {
+                if hidden.contains(gid) {
+                    continue;
+                }
+                for message in d.store.messages(gid, None, SNAPSHOT_MESSAGES)? {
+                    if !message.seq.is_some_and(|seq| !cursor.contains(seq)) {
+                        continue;
+                    }
+                    let content = d.message(&message)?;
+                    if content.should_display
+                        && newest
+                            .as_ref()
+                            .is_none_or(|n| content.timestamp_ms > n.timestamp_ms)
+                    {
+                        newest = Some(content);
+                    }
+                }
+            }
+            Ok(newest)
+        })
+        .await
+    }
+
+    /// A wake-up (minimal mode, unknown type): joins the pending Welcomes
+    /// and reads one page of events of every reachable hub, then shows the
+    /// newest unread message from someone else obtained, else the invite
+    /// of a chat joined, else nothing (generic content if a hub could not
+    /// be read).
     async fn push_wake(&self, session: &Session, push: &Push) -> Result<NotificationContent> {
-        let mut changes = Vec::new();
+        let own = session.device.user_id.clone();
+        let mut joined = Vec::new();
         let mut complete = true;
+        {
+            let _guard = self.inner.group_lock.lock().await;
+            for link in std::iter::once(self.home_link()).chain(self.hub_links()) {
+                match self.join_pending_welcomes(session, &link).await {
+                    Ok(changes) => {
+                        joined.extend(changes.into_iter().filter_map(|change| match change {
+                            StateChange::MembershipChanged(e)
+                                if e.user_id == own && e.kind == MembershipChangeKind::Added =>
+                            {
+                                Some(e.group_id)
+                            }
+                            _ => None,
+                        }))
+                    }
+                    Err(err) => {
+                        tracing::info!(error = %err, "cannot read the pending Welcomes for a push");
+                        complete = false;
+                    }
+                }
+            }
+        }
+        let mut before = self.cursors(joined.iter().cloned()).await?;
         for link in std::iter::once(self.home_link()).chain(self.hub_links()) {
             match self.wake_hub(session, &link).await {
-                Ok(applied) => changes.extend(applied),
+                Ok(cursors) => {
+                    for (gid, cursor) in cursors {
+                        before.entry(gid).or_insert(cursor);
+                    }
+                }
                 Err(err) => {
                     tracing::info!(error = %err, "cannot read a hub's events for a push");
                     complete = false;
                 }
             }
         }
-        let own = session.device.user_id.clone();
-        let newest = self
-            .visible(changes)
-            .into_iter()
-            .filter_map(|change| match change {
-                StateChange::MessageUpserted(m)
-                    if m.seq.is_some() && m.sender.user_id != own && !m.deleted =>
-                {
-                    Some(m)
-                }
-                _ => None,
-            })
-            .max_by_key(|m| m.sent_at_ms);
-        self.describe(Some(session), push, move |d| match newest {
-            Some(message) => {
-                let content = d.message(&message)?;
-                if content.should_display {
-                    Ok(content)
-                } else {
-                    d.base(None, NotificationKind::Generic, !complete)
-                }
+        if let Some(newest) = self.newest_obtained(session, push, before).await? {
+            return Ok(newest);
+        }
+        let hidden = self.read(|store, _| Ok(store.self_groups()?)).await?;
+        if let Some(group_id) = joined.iter().rev().find(|g| !hidden.contains(*g)) {
+            if let Some(actor) = self.joined_actor(session, group_id, None).await? {
+                return self.invite(session, push, group_id, actor).await;
             }
-            None => d.base(None, NotificationKind::Generic, !complete),
+        }
+        self.describe(Some(session), push, move |d| {
+            d.base(None, NotificationKind::Generic, !complete)
         })
         .await
     }
 
     /// Reads one page of events of the hub of `link` (without moving its
-    /// cursor) and applies its DeviceList updates and group events.
-    async fn wake_hub(&self, session: &Session, link: &HubLink) -> Result<Vec<StateChange>> {
+    /// cursor) and applies its DeviceList updates and group events. Returns
+    /// the applied seqs of the groups of those events before applying.
+    async fn wake_hub(
+        &self,
+        session: &Session,
+        link: &HubLink,
+    ) -> Result<BTreeMap<GroupId, GroupCursor>> {
         let Fetched::Batch(batch) = self.fetch(link, Duration::ZERO).await? else {
             return Err(ClientError::Transport(TransportError::Gone { cursor: 0 }));
         };
@@ -1036,11 +1335,18 @@ impl<S: StateStore + 'static> Client<S> {
             }
         }
         self.record_revoked(session, revoked).await?;
-        Ok(self
-            .apply_pushed(session, link, events, None)
-            .await?
-            .map(|(changes, _)| changes)
-            .unwrap_or_default())
+        let groups: BTreeSet<GroupId> = events
+            .iter()
+            .filter_map(|event| match event {
+                IncomingEvent::Message(m) => Some(m.group_id.clone()),
+                IncomingEvent::MemberAdded { group_id, .. }
+                | IncomingEvent::MemberRemoved { group_id, .. } => Some(group_id.clone()),
+                IncomingEvent::KeyPackagesLow => None,
+            })
+            .collect();
+        let before = self.cursors(groups).await?;
+        self.apply_pushed(session, link, events, None).await?;
+        Ok(before)
     }
 }
 

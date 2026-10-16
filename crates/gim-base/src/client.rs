@@ -2,6 +2,8 @@
 //! transaction per event, MLS state included.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use gim_common::{now_ms, ClientId, DeviceRef, GroupId, MessageId, UserId};
 use gim_crypto::{decrypt_to_envelope, CryptoError, DecryptedMessage, MlsEngine, ProcessedMessage};
@@ -23,6 +25,8 @@ pub struct BaseClient {
     pub(crate) own: DeviceRef,
     /// See [`BaseClient::failing_on_unknown_device_lists`].
     fail_on_unknown_lists: bool,
+    /// See [`BaseClient::rejected`]; shared by clones.
+    rejected: Arc<AtomicU64>,
 }
 
 enum Outcome {
@@ -36,7 +40,16 @@ impl BaseClient {
         Self {
             own,
             fail_on_unknown_lists: false,
+            rejected: Arc::default(),
         }
+    }
+
+    /// How many messages this client (and its clones) skipped as
+    /// undecryptable or malformed. Such a message changes nothing, like a
+    /// message whose content changes nothing on this device (e.g. a receipt
+    /// for another member's message); this tells the two apart.
+    pub fn rejected(&self) -> u64 {
+        self.rejected.load(Ordering::Relaxed)
     }
 
     /// Makes [`BaseClient::apply`] fail with
@@ -54,7 +67,10 @@ impl BaseClient {
             err @ CryptoError::DeviceListUnknown { .. } if self.fail_on_unknown_lists => {
                 Err(err.into())
             }
-            _ => Ok(Outcome::Applied),
+            _ => {
+                self.rejected.fetch_add(1, Ordering::Relaxed);
+                Ok(Outcome::Applied)
+            }
         }
     }
 
