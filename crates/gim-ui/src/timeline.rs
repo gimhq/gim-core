@@ -9,7 +9,9 @@ use eyeball_im::{ObservableVector, Vector, VectorDiff};
 use futures_core::Stream;
 use futures_util::future::BoxFuture;
 use futures_util::StreamExt;
-use gim_base::model::{Chat, ChatKind, MembershipEvent, Message, StateChange};
+use gim_base::model::{
+    Chat, ChatKind, MembershipChangeKind, MembershipEvent, Message, StateChange,
+};
 use gim_base::{BaseError, StateReader, StateStore};
 use gim_common::{GroupId, MessageId, UserId};
 use gim_sdk::{Backfill, Client, BACKFILL_PAGE};
@@ -18,7 +20,7 @@ use tokio::task::JoinHandle;
 use crate::diff;
 use crate::items::{
     membership_change_kind, message_content, preview_text, profile, reaction_groups, send_state,
-    MessageItem, ReplyPreview, TimelineItem, UserProfile,
+    ChatState, MessageItem, ReplyPreview, TimelineItem, UserProfile,
 };
 use crate::listener::{lock, own_user, recv_batch, with_state, Received};
 use crate::Result;
@@ -172,6 +174,14 @@ impl Timeline {
 
     pub fn group_id(&self) -> &GroupId {
         &self.group_id
+    }
+
+    /// The chat's current state; `None` while the chat is not stored.
+    pub fn chat_state(&self) -> Option<ChatState> {
+        lock(&self.state)
+            .chat
+            .as_ref()
+            .map(|chat| chat.membership.into())
     }
 
     /// The current items, oldest first, and their diffs from then on. A
@@ -544,6 +554,12 @@ impl State {
                 user_name,
                 change: membership_change_kind(event.kind),
                 at_ms: event.at_ms,
+                user_id: event.user_id.clone(),
+                // Leaving is the user's own doing, whoever committed it.
+                actor_user_id: Some(match event.kind {
+                    MembershipChangeKind::Left => event.user_id.clone(),
+                    _ => event.actor.clone(),
+                }),
             };
             (
                 event.at_ms,

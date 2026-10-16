@@ -195,7 +195,8 @@ implementations fast and thread-safe.
 | `createGroupChat(name, memberUserIds)` | chat id | The name is shared with the members (and with members added later) in an encrypted group info message. Invitees that do not exist or have no device are skipped, each reported as a `MembershipChanged(Removed)` change for that user (not stored); `NotFound` (and no chat is created) if that is every invitee. |
 | `chatMembers(chatId)` | `[UserProfile]` | Current members, one entry per user (not per device), including the signed-in user. Names come from the local user directory, filled by `findUser`, registration, and directory lookups the client makes for members of created or joined chats, added members and unknown senders; until a lookup succeeds a user shows as its user id. Resolved names arrive as `ChatListDiff`s and timeline `Set`s. No members listener in M1: re-query when a `ChatListDiff` touches that chat or a `TimelineItem.MembershipChange` arrives. |
 | `addMembers(chatId, userIds)`, `removeMember(chatId, userId)` | | `addMembers` skips users that do not exist or have no device like `createGroupChat`, and fails with `NotFound` (nothing committed) if that is every user. |
-| `leaveChat(chatId)` | | Submits a leave Proposal and returns once the hub accepted it; another member commits it, then the chat shows the own `Left` change. Until then (also across restarts) sends to the chat fail with `InvalidInput`. |
+| `leaveChat(chatId)` | | Submits a leave Proposal and returns once the hub accepted it, with the chat `ChatState.Leaving`; another member commits it, then the chat is `Left` and shows the own `Left` change. gim-core keeps and re-sends the leave across restarts (native code does not persist it); calling `leaveChat` again while leaving re-sends it. A leave the hub refuses for good (4xx) returns the chat to `Active` and throws the rejection. `ChatNotActive(Left)` once left. See *Chat state*. |
+| `chatState(chatId)` | `ChatState` | From local state, no network call: correct right after a restart, before any other call. `NotFound` for an unknown chat. |
 | `setGroupInfo(chatId, name?, avatarFilePath?)` | | `null`/`nil` leaves a field unchanged; at least one must be set. The avatar is encrypted and uploaded before the call returns (MIME type from the file extension), then the change is applied locally and sent to the members. `InvalidInput` for direct chats. |
 | `sendText(chatId, body, replyTo?)` | message id | The message appears in the timeline immediately with `SendState.Pending`. |
 | `sendMedia(chatId, filePath, mime, caption?, replyTo?)` | message id | The file is copied before the call returns. |
@@ -207,7 +208,7 @@ implementations fast and thread-safe.
 | `stopTyping(chatId)` | | Same as `setTyping(chatId, false)`: call when the input is cleared, the message sent or the chat is left. Does nothing unless typing was reported. |
 | `fetchMedia(chatId, messageId, destPath)` | file path | Downloads and decrypts the attachment. A blob uploaded on another hub is fetched by the own hub from that hub on first access. `NotFound` if the blob is unknown (or federation is disabled on the own hub); `RetryLater(503, …)` while the uploader's hub stays unreachable and `Server(502, …)` while it keeps refusing, after up to 3 attempts within the call. |
 | `fetchThumbnail(chatId, messageId, destPath)` | file path? | `null`/`nil` if the media has no thumbnail. |
-| `chatList(listener)` | `TaskHandle` | |
+| `chatList(listener)` | `TaskHandle` | Rows are `ChatSummary` (`chatId`, `kind`, `name`, `avatar?`, `lastMessage?`, `unreadCount`, `updatedAtMs`, `memberCount`, `state`). |
 | `timeline(chatId)` | `Timeline` | |
 | `setLocalTimeZone(zone?)` | | Synchronous, never throws. Date separators follow `zone`; `null`/`nil` is UTC (the default). See *Local time zone*. |
 | `connectionState(listener)` | `TaskHandle` | `Offline` until `startSync` and after a failure while waiting to retry; `Connecting` → `Syncing` (catching up) → `Connected`. |
@@ -218,6 +219,26 @@ to delivery, so native code can key views by it.
 
 `DeviceInfo` is `deviceId`, `createdAtMs` (when the device was certified; 0 for revoked devices),
 `isCurrent` (this client's device) and `revoked`.
+
+### Chat state
+
+`ChatSummary.state`, `chatState(chatId)` and `Timeline.chatState()` give where this device stands
+in a chat, read from local state (so they are right from the first callback after a restart):
+
+| `ChatState` | Meaning |
+|---|---|
+| `Active` | A member; messages can be sent. |
+| `Leaving` | `leaveChat` was accepted by the hub; still an MLS member until another member commits the removal, but nothing can be sent. |
+| `Left` | Removed: after leaving, by another member, or hub-side. History is kept; nothing can be sent. |
+
+Transitions reach the chat list as a `Set` of the row: `Active → Leaving` (`leaveChat`),
+`Leaving → Left` (removal applied), `Leaving → Active` (the hub refused the leave for good),
+`Active → Left` (removed by another member).
+
+Calls that send to or change a `Leaving` or `Left` chat (`sendText`, `sendMedia`, `editMessage`,
+`deleteMessage`, `react`, `unreact`, `retrySend`, `setGroupInfo`, `addMembers`, `removeMember`;
+`leaveChat` once `Left`) throw `ChatNotActive(chatId, state)` instead of `InvalidInput`. Do not
+parse `InvalidInput` reasons to detect leaving.
 
 `MediaRef` identifies an attachment (`chatId`, `messageId`, `mime`, `size`, `hasThumbnail`).
 Encryption keys and blob ids never leave Rust; pass the ids to `fetchMedia` / `fetchThumbnail`.
@@ -231,10 +252,17 @@ Encryption keys and blob ids never leave Rust; pass the ids to `fetchMedia` / `f
 - `paginateBackwards(count)` loads up to `count` older items (they arrive through the listener as
   diffs) and returns whether more history exists.
 - `chatId()`.
+- `chatState()` → `ChatState?`: the chat's current state (see *Chat state*); `null`/`nil` while the
+  chat is not known locally.
 
 `TimelineItem` is a `Message` (`MessageItem`), a `DateSeparator` (`dayStartMs`: start of a local
 calendar day, see *Local time zone*) or a `MembershipChange` (`Added`, `Removed`, `Left`; group chats
 only, in seq order among the messages, at the time the change was applied on this device).
+A `MembershipChange` carries `userName`, `change`, `atMs`, `userId` (the user who joined or left)
+and `actorUserId?` (who caused it: the adder or remover; the user themselves for `Left`, whoever
+committed the removal; `null`/`nil` if unknown). An invitee that could not be added (unknown user,
+or a pending invite that expired) shows as `Removed` with the inviter as actor. The signed-in
+user's own `Left` has `userId` equal to the own user id.
 `paginateBackwards` pages through locally stored history first, then through the server history:
 messages this device cannot decrypt (sent before it joined, or already read once and removed
 locally) are skipped, and it returns `false` once nothing older is readable. `MessageItem.sendState` is set only for own
@@ -310,8 +338,10 @@ The chat list is ordered most recently updated first; a timeline oldest first.
 | `Cancelled` | Cancelled by `stopSync`, `signOut` or `cancelSend`. | Ignore. |
 | `NotImplemented` | In the contract but not implemented in this build. | Development builds only. |
 | `Internal(reason)` | Bug, or an unexpected exception thrown by a platform hook. | Report. |
+| `ChatNotActive(chatId, state)` | The call sends to or changes a chat this device is leaving (`state = Leaving`) or has left (`Left`); see *Chat state*. | Show the chat read-only. |
 
-Kotlin throws `GimException.<Variant>`; Swift throws `GimError.<Variant>`.
+Kotlin throws `GimException.<Variant>`; Swift throws `GimError.<Variant>`. `ChatNotActive` was added
+after M2b: an exhaustive Swift `switch` / Kotlin `when` over the error needs a new case.
 
 ## Other functions
 

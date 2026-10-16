@@ -1,3 +1,5 @@
+use crate::ChatState;
+
 /// Error returned by every fallible gim-core call.
 ///
 /// Kotlin: `GimException.<Variant>`; Swift: `GimError.<Variant>`.
@@ -44,6 +46,10 @@ pub enum GimError {
     /// A bug or an unexpected failure inside gim-core or a platform callback.
     #[error("internal error: {reason}")]
     Internal { reason: String },
+    /// The call sends to (or changes) a chat this device is leaving or has
+    /// left. `state` is `Leaving` or `Left`; see `ChatState`.
+    #[error("chat {chat_id} is not active: {state:?}")]
+    ChatNotActive { chat_id: String, state: ChatState },
 }
 
 impl From<uniffi::UnexpectedUniFFICallbackError> for GimError {

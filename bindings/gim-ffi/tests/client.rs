@@ -8,10 +8,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gim_core::{
-    create_client_with_fake_transport, ChatKind, ChatListDiff, ChatListListener, ChatSummary,
-    ClientConfig, ConnectionState, ConnectionStateListener, GimClient, GimError, LocalTimeZone,
-    MessageContent, MessageItem, PlatformHooks, SendState, TaskHandle, TimelineDiff, TimelineItem,
-    TimelineListener, TypingListener,
+    create_client_with_fake_transport, ChatKind, ChatListDiff, ChatListListener, ChatState,
+    ChatSummary, ClientConfig, ConnectionState, ConnectionStateListener, GimClient, GimError,
+    LocalTimeZone, MembershipChangeKind, MessageContent, MessageItem, PlatformHooks, SendState,
+    TaskHandle, TimelineDiff, TimelineItem, TimelineListener, TypingListener,
 };
 use gim_sdk::testing::FakeTransport;
 use tempfile::TempDir;
@@ -694,6 +694,179 @@ async fn group_info_and_member_names_reach_joiners() {
         Err(GimError::InvalidInput { .. })
     ));
     bob.client.stop_sync().await.unwrap();
+}
+
+fn chat_state(rows: &[ChatSummary], chat: &str) -> Option<ChatState> {
+    rows.iter().find(|c| c.chat_id == chat).map(|c| c.state)
+}
+
+/// `(change, user_id, actor_user_id)` of the membership items.
+fn membership(items: &[TimelineItem]) -> Vec<(MembershipChangeKind, String, Option<String>)> {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            TimelineItem::MembershipChange {
+                change,
+                user_id,
+                actor_user_id,
+                ..
+            } => Some((*change, user_id.clone(), actor_user_id.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn not_active(result: Result<impl std::fmt::Debug, GimError>, chat: &str, state: ChatState) {
+    match result {
+        Err(GimError::ChatNotActive { chat_id, state: s }) if chat_id == chat && s == state => {}
+        other => panic!("expected ChatNotActive {state:?}, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn leaving_and_left_chat_state() {
+    let transport = FakeTransport::new();
+    let alice = User::register(&transport, "alice", "Alice").await;
+    let carol = User::register(&transport, "carol", "Carol").await;
+    let chat = alice
+        .client
+        .create_group_chat("Crew".to_string(), vec![carol.user_id.clone()])
+        .await
+        .unwrap();
+    let (list, list_handle) = carol.chat_list().await;
+    carol.client.start_sync().await.unwrap();
+    list.wait("the chat, active", |rows| {
+        chat_state(rows, &chat) == Some(ChatState::Active)
+    })
+    .await;
+    let (timeline, _timeline_handle) = carol.timeline(&chat).await;
+    let added = (
+        MembershipChangeKind::Added,
+        carol.user_id.clone(),
+        Some(alice.user_id.clone()),
+    );
+    timeline
+        .wait("carol added by alice", |items| {
+            membership(items).contains(&added)
+        })
+        .await;
+
+    // Alice does not sync yet: the leave stays pending.
+    carol.client.leave_chat(chat.clone()).await.unwrap();
+    list.wait("leaving", |rows| {
+        chat_state(rows, &chat) == Some(ChatState::Leaving)
+    })
+    .await;
+    assert_eq!(
+        carol.client.chat_state(chat.clone()).await.unwrap(),
+        ChatState::Leaving
+    );
+    not_active(
+        carol
+            .client
+            .send_text(chat.clone(), "hi".to_string(), None)
+            .await,
+        &chat,
+        ChatState::Leaving,
+    );
+
+    // After a restart the state is there before any call fails.
+    carol.client.stop_sync().await.unwrap();
+    drop((list_handle, list, _timeline_handle, timeline));
+    let hooks = carol.hooks.clone();
+    drop(carol.client);
+    let restarted = open(&transport, &hooks).await;
+    assert_eq!(
+        restarted.chat_state(chat.clone()).await.unwrap(),
+        ChatState::Leaving
+    );
+    let opened = restarted.timeline(chat.clone()).await.unwrap();
+    assert_eq!(opened.chat_state(), Some(ChatState::Leaving));
+    let list = Mirror::new();
+    let _list_handle = restarted.chat_list(list.clone()).await.unwrap();
+    list.wait("leaving after restart", |rows| {
+        chat_state(rows, &chat) == Some(ChatState::Leaving)
+    })
+    .await;
+    let timeline = Mirror::new();
+    let _timeline_handle = opened.add_listener(timeline.clone()).await;
+
+    // Alice commits the leave; Carol applies it.
+    alice.client.start_sync().await.unwrap();
+    restarted.start_sync().await.unwrap();
+    list.wait("left", |rows| {
+        chat_state(rows, &chat) == Some(ChatState::Left)
+    })
+    .await;
+    let left = (
+        MembershipChangeKind::Left,
+        carol.user_id.clone(),
+        Some(carol.user_id.clone()),
+    );
+    timeline
+        .wait("own left", |items| membership(items).last() == Some(&left))
+        .await;
+    assert_eq!(opened.chat_state(), Some(ChatState::Left));
+    not_active(
+        restarted
+            .send_text(chat.clone(), "hi".to_string(), None)
+            .await,
+        &chat,
+        ChatState::Left,
+    );
+    not_active(
+        restarted.leave_chat(chat.clone()).await,
+        &chat,
+        ChatState::Left,
+    );
+    let (alice_timeline, _alice_handle) = alice.timeline(&chat).await;
+    alice_timeline
+        .wait("carol left", |items| {
+            membership(items).last() == Some(&left)
+        })
+        .await;
+    assert!(matches!(
+        restarted.chat_state("unknown".to_string()).await,
+        Err(GimError::NotFound { .. })
+    ));
+    for client in [&alice.client, &restarted] {
+        client.stop_sync().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refused_leave_keeps_the_chat_active() {
+    let transport = FakeTransport::new();
+    let alice = User::register(&transport, "alice", "Alice").await;
+    let carol = User::register(&transport, "carol", "Carol").await;
+    let chat = alice
+        .client
+        .create_group_chat("Crew".to_string(), vec![carol.user_id.clone()])
+        .await
+        .unwrap();
+    let (list, _list_handle) = carol.chat_list().await;
+    carol.client.start_sync().await.unwrap();
+    list.wait("the chat", |rows| chat_state(rows, &chat).is_some())
+        .await;
+    carol.client.stop_sync().await.unwrap();
+
+    // Removed hub-side, unseen by Carol: the hub refuses the leave (403).
+    let session = carol.client.session().await.unwrap().unwrap();
+    let device = gim_common::DeviceRef::parse(&session.user_id, &session.device_id).unwrap();
+    let group = gim_common::GroupId::new(chat.clone()).unwrap();
+    transport.service().remove_member(&group, &device).unwrap();
+    assert!(matches!(
+        carol.client.leave_chat(chat.clone()).await,
+        Err(GimError::Server { status: 403, .. })
+    ));
+    assert_eq!(
+        carol.client.chat_state(chat.clone()).await.unwrap(),
+        ChatState::Active
+    );
+    list.wait("active again", |rows| {
+        chat_state(rows, &chat) == Some(ChatState::Active)
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

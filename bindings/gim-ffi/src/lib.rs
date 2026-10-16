@@ -22,7 +22,7 @@ pub use link::{LinkSession, PendingApproval};
 pub use task_handle::TaskHandle;
 pub use timeline::{LocalTimeZone, Timeline, TimelineDiff, TimelineListener};
 pub use types::{
-    ChatKind, ChatSummary, ConnectionState, DeviceInfo, MediaRef, MembershipChangeKind,
+    ChatKind, ChatState, ChatSummary, ConnectionState, DeviceInfo, MediaRef, MembershipChangeKind,
     MessageContent, MessageItem, MessagePreview, ReactionGroup, ReplyPreview, SendState, Session,
     TimelineItem, UserProfile,
 };
