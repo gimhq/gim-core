@@ -729,7 +729,7 @@ impl<S: StateStore + 'static> Client<S> {
             .map(|s| s.device.user_id.clone())
             .or_else(|| self.session().map(|s| s.device.user_id));
         let collapse_id = push.collapse_id.clone();
-        self.run(move |store, _| {
+        self.read(move |store, _| {
             describe(&Describe {
                 store,
                 own: own.as_ref(),
@@ -768,7 +768,7 @@ impl<S: StateStore + 'static> Client<S> {
     /// contiguous applied seq.
     async fn applied_seq(&self, group_id: &GroupId, seq: u64) -> Result<(bool, u64)> {
         let gid = group_id.clone();
-        self.run(move |store, _| {
+        self.read(move |store, _| {
             let cursor = store.group_cursor(&gid)?;
             Ok((cursor.contains(seq), cursor.contiguous_seq))
         })

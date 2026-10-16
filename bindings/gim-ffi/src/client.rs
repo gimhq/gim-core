@@ -11,8 +11,9 @@ use gim_base::{BaseError, StateReader};
 use gim_common::{DeviceId, GroupId, MessageId, UserId};
 use gim_sdk::transport::Transport;
 use gim_sdk::{
-    Client, ClientBuilder, HttpTransport, OutboxSender, RecoveryCode, DEVICE_KEY_SECRET_KEY,
-    OUTGOING_DIR, PUSH_REGISTRATION_SECRET_KEY, ROOT_KEY_SECRET_KEY, SESSION_SECRET_KEY,
+    Client, ClientBuilder, HttpTransport, OutboxSender, RecoveryCode, StoreLock,
+    DEFAULT_STORE_LOCK_TIMEOUT, DEVICE_KEY_SECRET_KEY, OUTGOING_DIR, PUSH_REGISTRATION_SECRET_KEY,
+    ROOT_KEY_SECRET_KEY, SESSION_SECRET_KEY,
 };
 use gim_sqlite::{DbKey, SqliteStore, DATABASE_FILE_NAME};
 use tokio::sync::{broadcast, watch};
@@ -39,6 +40,34 @@ const SIGN_OUT_PUSH_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct ClientConfig {
     /// Base URL of the hub, `http://` or `https://`.
     pub server_url: String,
+    /// The process kind; `None` is `ClientMode::App`.
+    #[uniffi(default)]
+    pub mode: Option<ClientMode>,
+}
+
+/// What the process creating the client is. See `docs/API.md`, *App
+/// extensions*.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, uniffi::Enum)]
+pub enum ClientMode {
+    /// The app.
+    #[default]
+    App,
+    /// An app extension (the iOS Notification Service Extension) on the
+    /// app's data directory: no sync loop (`start_sync` fails), no
+    /// KeyPackage uploads, hub refreshes or other maintenance, a small
+    /// database cache, and a local database that cannot be opened (missing
+    /// key, incompatible schema) fails `create_client` instead of being
+    /// reset.
+    Extension,
+}
+
+impl From<ClientMode> for gim_sdk::ClientMode {
+    fn from(mode: ClientMode) -> Self {
+        match mode {
+            ClientMode::App => Self::App,
+            ClientMode::Extension => Self::Extension,
+        }
+    }
 }
 
 /// Receives connection state changes. The first callback carries the current
@@ -228,7 +257,24 @@ impl GimClient {
             callbacks: callbacks.clone(),
         });
         let dir = data_dir.clone();
+        let mode = config.mode.unwrap_or_default();
         let (builder, local_state_reset) = tokio::task::spawn_blocking(move || {
+            // Migrations and resets only under the store lock, so that the
+            // other process never sees a half-migrated database.
+            let mut dirs = std::fs::DirBuilder::new();
+            dirs.recursive(true);
+            #[cfg(unix)]
+            std::os::unix::fs::DirBuilderExt::mode(&mut dirs, 0o700);
+            dirs.create(&dir).map_err(gim_sdk::ClientError::from)?;
+            let lock = StoreLock::open(&dir, DEFAULT_STORE_LOCK_TIMEOUT)?;
+            let _held = lock.acquire()?;
+            if mode == ClientMode::Extension {
+                let builder = ClientBuilder::open_extension(transport, secrets, |key| {
+                    SqliteStore::open_for_extension(&dir, &DbKey::new(*key))
+                        .map_err(BaseError::from)
+                })?;
+                return Ok::<_, GimError>((builder, false));
+            }
             let mut reset = false;
             let builder = ClientBuilder::open(transport, secrets, |key, new_key| {
                 let opened = SqliteStore::open_or_reset(&dir, &DbKey::new(*key), new_key)
@@ -741,6 +787,9 @@ impl GimClient {
         if sdk.session().is_none() {
             return Err(GimError::NotRegistered);
         }
+        // What an app extension wrote while the app was in the background.
+        // Best effort: the next store change picks it up as well.
+        let _ = sdk.reload_external_changes().await;
         let mut sync = self.sync.lock().unwrap_or_else(|e| e.into_inner());
         if sync.is_none() {
             *sync = Some(SyncTasks::start(sdk, self.shared.clone())?);

@@ -332,7 +332,7 @@ impl<S: StateStore + 'static> Client<S> {
 
     pub(crate) async fn own_user(&self) -> Result<Option<UserInfo>> {
         let user_id = self.require_session()?.device.user_id;
-        self.run(move |store, _| Ok(store.user(&user_id)?)).await
+        self.read(move |store, _| Ok(store.user(&user_id)?)).await
     }
 
     /// Looks a user up by handle in the hub directory, caches the profile

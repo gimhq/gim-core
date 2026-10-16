@@ -269,7 +269,7 @@ impl<S: StateStore + 'static> Client<S> {
     /// The listed hubs (not removed) in registry order.
     async fn listed_hubs(&self) -> Result<Vec<HubRecord>> {
         let mut hubs: Vec<HubRecord> = self
-            .run(|store, _| Ok(store.hubs()?))
+            .read(|store, _| Ok(store.hubs()?))
             .await?
             .into_iter()
             .filter(|h| h.state != HubState::Removed)

@@ -29,6 +29,7 @@ mod routing;
 mod secrets;
 mod self_group;
 mod send;
+mod store_lock;
 pub mod stream;
 mod sync;
 #[cfg(any(test, feature = "testing"))]
@@ -36,7 +37,7 @@ pub mod testing;
 pub mod transport;
 
 pub use client::{
-    Client, ClientBuilder, Session, COMMIT_POST_ATTEMPTS, DEVICE_KEY_SECRET_KEY,
+    Client, ClientBuilder, ClientMode, Session, COMMIT_POST_ATTEMPTS, DEVICE_KEY_SECRET_KEY,
     ENROLLMENT_SECRET_KEY, KEY_PACKAGE_BATCH, MAX_COMMIT_RETRIES, ROOT_KEY_SECRET_KEY,
     SESSION_SECRET_KEY,
 };
@@ -59,6 +60,7 @@ pub use push::{
 pub use secrets::{SecretStorage, SecretStorageError};
 pub use self_group::DeviceInfo;
 pub use send::TYPING_INTERVAL;
+pub use store_lock::{StoreLock, StoreLockGuard, DEFAULT_STORE_LOCK_TIMEOUT, LOCK_FILE_NAME};
 pub use stream::ConnectionState;
 pub use sync::{SyncSettings, BACKFILL_PAGE};
 pub use transport::{EventStream, Transport, TransportError};

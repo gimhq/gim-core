@@ -238,6 +238,7 @@ impl TypingListener for Recorder<Vec<String>> {
 pub async fn open(server_url: &str, hooks: &Arc<MemoryHooks>) -> Arc<GimClient> {
     let config = ClientConfig {
         server_url: server_url.to_string(),
+        mode: None,
     };
     create_client(config, hooks.clone()).await.unwrap()
 }
