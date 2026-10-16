@@ -168,6 +168,27 @@ A `Message` (submit responses, `GET /v2/groups/{gid}/messages`, `message` events
 the owning hub and is identical on every hub that stores the message; it equals the push
 `message_id` / `collapse_id` and is the cross-hub dedup key (docs/multihoming.md §6.3).
 
+## Blobs
+
+`POST /v2/blobs` stores the encrypted body and returns `{blob_id, size}` (shape unchanged) with
+`blob_id = <origin hub_id>/b_<base64url, no padding, of 16 random bytes>`: the uploading hub's
+`hub_id` (as in gids), a `/`, then the random part. Percent-encode the `/` in paths:
+`GET /v2/blobs/<hub_id>%2Fb_<random>`. Ids without `/` (`b_<random>`, uploaded before H5-B1) are
+legacy ids: they stay valid and always mean the hub the client talks to.
+
+Clients only talk to their own hub. `GET /v2/blobs/{blob_id}` for a blob whose origin is another
+hub fetches it from the origin over S2S on first access, caches it and serves it like a local
+blob (single byte ranges included); later reads are served from the cache. Errors besides the
+existing 401, 404 and 416:
+
+| Status | Code | When |
+|---|---|---|
+| 404 | `not_found` | unknown or malformed id, the origin does not know the blob, or federation is disabled on this hub |
+| 502 | `peer_refused` | the origin refused (e.g. this hub hosts no user sharing a group with the uploader) or sent an invalid blob |
+| 503 | `peer_unavailable` | the origin is unreachable; `Retry-After` in seconds |
+
+Treat 503 as retryable. Details in [`federation.md`](federation.md) §5.6.
+
 ## Pending Welcomes and 410 recovery
 
 Every Welcome addressed to a device is also kept as a pending Welcome for that device:
@@ -343,6 +364,7 @@ device's provider (never to the sender's own device; never for `message` events 
 | KeyPackage upload | `last_resort` is a separate package field | `last_resort: true` flag; the request then holds exactly one package |
 | KeyPackage claim | `{device_ids}` | `{targets: [{user_id, device_id?}]}`, one package per active device; results carry `user_id` |
 | Group ID | `group_id`, opaque | `gid = <owner hub_id>/<random_128 base32lower>`, assigned by the hub (MLS group ID = gid bytes); percent-encode it in paths (`/` as `%2F`) |
+| Blob ID | `b_<random>`, opaque | `blob_id = <origin hub_id>/b_<random>`, assigned by the uploading hub; percent-encode it in paths (`/` as `%2F`); see [Blobs](#blobs) |
 | Group create | `{kind, member_device_ids}` | `{kind}`; members are added by Commits |
 | Membership | `POST /members`, `DELETE /members/{device_id}` | removed; driven by `POST /v2/groups/{gid}/commits {client_id, mls_message, welcome?, welcome_recipients?, ratchet_tree?}` returning `{seq, epoch, duplicate}` |
 | Epoch | client `epoch` field | read by the hub from the MLS framing |
@@ -375,7 +397,9 @@ UnifiedPush when configured; payload v1 without `sender_user_id`, optional minim
 Pending:
 
 - Multi-homing known limits ([`multihoming.md`](multihoming.md) §13): a group whose owning hub is
-  down cannot sequence (503 `peer_unavailable`); blobs are not replicated; an added hub serves no
+  down cannot sequence (503 `peer_unavailable`); blobs are not replicated: a hub serves a remote
+  blob only once it fetched it from the origin, so while the origin is down a blob a hub never
+  fetched is 503 `peer_unavailable`; an added hub serves no
   history before its replica seed; pushes in the failover window after the primary stops are
   not sent late; pending Welcome acknowledgements are per hub; `message` events carry no
   `message_id`, so clients merge the streams of several hubs by `(gid, seq)`.

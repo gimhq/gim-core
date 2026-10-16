@@ -316,6 +316,30 @@ impl<S: StateStore + 'static> Client<S> {
         }
         tracing::warn!(%group_id, ?users, "pending invites failed");
         self.remove_invites(group_id, users.iter());
+        self.emit_removed(session, group_id, users).await
+    }
+
+    /// Surfaces invitees that do not exist or have no device as `Removed`
+    /// membership changes by this user (broadcast only, not stored).
+    pub(crate) async fn reject_invitees(
+        &self,
+        session: &Session,
+        group_id: &GroupId,
+        users: &[UserId],
+    ) -> Result<()> {
+        if users.is_empty() {
+            return Ok(());
+        }
+        tracing::warn!(%group_id, ?users, "invitees not found; not added");
+        self.emit_removed(session, group_id, users.to_vec()).await
+    }
+
+    async fn emit_removed(
+        &self,
+        session: &Session,
+        group_id: &GroupId,
+        users: Vec<UserId>,
+    ) -> Result<()> {
         let gid = group_id.clone();
         let seq = self
             .run(move |store, _| Ok(store.group_cursor(&gid)?.contiguous_seq))

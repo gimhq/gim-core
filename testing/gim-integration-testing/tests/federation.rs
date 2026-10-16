@@ -189,10 +189,9 @@ async fn send_image(
     (id, media)
 }
 
-/// The receiver of an image sent from another hub downloads it. Blobs stay
-/// on the hub they were uploaded to and the receiver's hub answers 404 for
-/// them (hub-v2 multihoming.md Q6: no blob federation yet), so this fails
-/// against gim-hub 9608f34.
+/// The receiver of an image sent from another hub downloads it: the
+/// receiver's hub fetches the blob from its origin hub (hub-v2
+/// federation.md §5.6, gim-hub H5 at 18afc7bdde8cd643e4f4e21a35758fdb3a0bc155).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs a gim-hub federation: GIM_FEDERATION=1 scripts/integration-test.sh"]
 async fn cross_hub_image_fetch() {

@@ -39,13 +39,15 @@ message S2sRequest {
     NotifyHostingRecordRequest notify_hosting_record = 18;
     SeedReplicaRequest seed_replica = 19;
     CopyPendingWelcomesRequest copy_pending_welcomes = 20;
+    // 21-29: blobs.
+    FetchBlobRequest fetch_blob = 21;
     // 30-39: reserved for push (P) operations, e.g. collapse-id coordination.
     // 40-49: federation (M2b).
     HelloRequest hello = 40;
     NotifyDeviceListRequest notify_device_list = 41;
   }
 
-  reserved 21 to 39;
+  reserved 22 to 39;
 }
 
 message S2sResponse {
@@ -66,12 +68,13 @@ message S2sResponse {
     NotifyHostingRecordResponse notify_hosting_record = 18;
     SeedReplicaResponse seed_replica = 19;
     CopyPendingWelcomesResponse copy_pending_welcomes = 20;
-    // 21-39: reserved, mirroring S2sRequest.op.
+    FetchBlobResponse fetch_blob = 21;
+    // 22-39: reserved, mirroring S2sRequest.op.
     HelloResponse hello = 40;
     NotifyDeviceListResponse notify_device_list = 41;
   }
 
-  reserved 21 to 39;
+  reserved 22 to 39;
 
   Error error = 2;
 }
@@ -393,3 +396,28 @@ message PendingWelcome {
   uint64 created_at = 5;           // unix ms on the sending hub
 }
 message CopyPendingWelcomesResponse {}
+
+// ---------------------------------------------------------------------------
+// Blobs (any hub -> the blob's origin hub)
+// ---------------------------------------------------------------------------
+
+// Reads a chunk of a blob uploaded on the receiving hub. blob_id has the form
+// "<origin hub_id>/b_<random>"; the origin serves only its own uploads, never
+// copies it fetched from other hubs.
+message FetchBlobRequest {
+  string blob_id = 1;
+  // First byte to return.
+  uint64 offset = 2;
+  // Maximum number of bytes; 0 means the origin's chunk size. The origin
+  // caps it at its chunk size (4 MiB).
+  uint32 max_len = 3;
+}
+
+message FetchBlobResponse {
+  // Total size of the blob in bytes.
+  uint64 size = 1;
+  // Echo of FetchBlobRequest.offset.
+  uint64 offset = 2;
+  // Bytes [offset, offset + len(data)); empty only at the end of the blob.
+  bytes data = 3;
+}
