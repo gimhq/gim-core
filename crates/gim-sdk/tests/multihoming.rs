@@ -80,6 +80,9 @@ struct HubState {
     down: AtomicBool,
     /// Commit submissions fail as if the hub were unreachable.
     commits_down: AtomicBool,
+    /// DeviceList reads answer 503 `peer_unavailable`, as when the user's
+    /// only hub is down.
+    device_lists_down: AtomicBool,
     /// Adds need their devices' KeyPackages claimed through this hub.
     enforce_claims: AtomicBool,
     claimed: Mutex<HashSet<DeviceRef>>,
@@ -283,6 +286,13 @@ impl Transport for Hub {
     ) -> TransportResult<Option<Vec<u8>>> {
         self.up()?;
         self.log(Call::Read("device_list", u.clone()));
+        if self.state.device_lists_down.load(Ordering::SeqCst) {
+            return Err(TransportError::RetryLater {
+                status: 503,
+                retry_after_secs: 1,
+                reason: "peer_unavailable: peer hub unavailable".into(),
+            });
+        }
         self.owner.device_list(t, u).await
     }
 
@@ -1149,6 +1159,66 @@ async fn a_hub_that_does_not_prove_the_entered_url_is_not_added() {
     assert!(s.hub_b.uploads().is_empty());
     assert_eq!(s.fake_b.service().key_package_count(&device), 0);
     assert!(s.fake_b.service().device_list(&device.user_id).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_welcome_whose_sender_list_is_unavailable_is_joined_later() {
+    let s = Setup::new().await;
+    let g = s
+        .bob
+        .client
+        .create_group_chat(Some("Crew".into()), &[s.user_id()])
+        .await
+        .unwrap();
+    // The inviter's hub is down: no hub can serve bob's DeviceList.
+    for hub in [&s.hub_a, &s.hub_b] {
+        hub.state.device_lists_down.store(true, Ordering::SeqCst);
+    }
+    assert!(s.alice.sync_once().await.is_err());
+    assert!(s.store.chat(&g).unwrap().is_none());
+
+    for hub in [&s.hub_a, &s.hub_b] {
+        hub.state.device_lists_down.store(false, Ordering::SeqCst);
+    }
+    s.alice.sync_once().await.unwrap();
+    let chat = s
+        .store
+        .chat(&g)
+        .unwrap()
+        .expect("joined once the list is back");
+    assert_eq!(chat.membership, gim_base::model::Membership::Joined);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hub_known_only_from_a_shared_hub_map_is_added_to_the_record() {
+    let s = Setup::build(Options {
+        unlisted_b: true,
+        ..Options::default()
+    })
+    .await;
+    let (a, b) = (Setup::hub_id(&s.fake_a), Setup::hub_id(&s.fake_b));
+    // A hub map from the self group (applied locally when this device
+    // sends one, too) names B, which the record does not list.
+    let shared = gim_base::model::HubRecord {
+        hub_id: b.clone(),
+        url: Some("https://elsewhere.example.eu".into()),
+        url_shared: true,
+        priority: 1,
+        verified_root_pubkey: None,
+        last_seen_ms: None,
+        state: gim_base::model::HubState::Unverified,
+    };
+    gim_base::StateStore::transaction(&*s.store, |txn| {
+        gim_base::StoreTxn::upsert_hub(txn, &shared)?;
+        Ok(())
+    })
+    .unwrap();
+
+    let added = s.alice.add_hub(HUB_B_URL).await.unwrap();
+    assert_eq!(added.hub.state, gim_base::model::HubState::Verified);
+    assert_eq!(added.hub.url.as_deref(), Some(HUB_B_URL));
+    let (_, hubs) = s.stored_record(&s.fake_a);
+    assert_eq!(hubs, [(a, 0), (b, 1)]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

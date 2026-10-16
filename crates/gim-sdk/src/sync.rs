@@ -1186,7 +1186,10 @@ impl<S: StateStore + 'static> Client<S> {
             retry = false;
             if let Some(user_id) = unknown {
                 tracing::info!(%user_id, "unknown device list; fetching it and retrying once");
-                let revoked = self.refresh_device_list(&user_id).await?;
+                // Without the list the retry would skip the event for good
+                // (a Welcome is never joined): a list that cannot be read
+                // now fails the batch, which is fetched again later.
+                let revoked = self.refresh_device_list_strict(&user_id).await?;
                 self.record_revoked(session, revoked).await?;
                 retry = true;
             }
