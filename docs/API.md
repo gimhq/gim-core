@@ -114,11 +114,38 @@ user's signed DeviceList. Handles are optional directory entries pointing at a u
 - **Multiple hubs** (multi-homing, groundwork): gim-core keeps a registry of the hubs the hosting
   record lists, with each hub's URL and this device's session there; it is persisted and restored
   with the session. The hub the client was created with is checked with `GET /v2/hub` and
-  recorded. URLs of the other hubs come from the user's other devices (shared in the hidden self
-  group); a URL is used only after `GET /v2/hub` there proves the listed hub id, then the device
-  signs in there too. The registry follows the record on every publication and on the hub's
-  `hosting_record.updated` event. All traffic still goes through the hub the client was created
-  with; no API for the app yet.
+  recorded. A URL set on this device for another listed hub is used only after `GET /v2/hub`
+  there proves the listed hub id, then the device signs in there too; URLs set on a device are
+  shared with the user's other devices through the hidden self group. The registry follows the record on every publication and on the hub's
+  `hosting_record.updated` event. No API for the app yet.
+  - Hub URLs received from the user's other devices are recorded but not contacted: such a hub
+    stays unverified (no `GET /v2/hub`, no sign-in, no KeyPackages, no sending or receiving)
+    until URL-bound hub verification lands, because a relay at a wrong URL could pass the
+    current checks and obtain this device's session. Only a URL set on this device (and the URL
+    the client was created with) is used.
+  - Receiving: while sync runs, the device follows every listed hub with a verified URL, each with
+    its own event stream (long-poll fallback) and persisted cursor; hubs joining or leaving the
+    registry are started or stopped. Every hub delivers the same messages; each is applied once
+    (by chat id and seq, which the owning hub assigns together with the message id), so the
+    timeline is the same whichever hub delivered first, and messages keep arriving through the
+    other hubs while one is down. A missing message is read from the hub that showed the gap,
+    else from another listed hub. A chat invitation is joined once and acknowledged on every hub
+    that holds it. An expired cursor on one hub is recovered from that hub alone. `connectionState`
+    reports the hub the client was created with; the other hubs' failures are retried in the
+    background.
+  - Sending: messages, member changes and leave Proposals go to the primary hub (lowest priority).
+    If that hub itself cannot be reached (network error, timeout, 5xx), gim-core sends the same
+    request (same `client_id` and bytes) to the next listed hub; the chat's owning hub keeps it
+    once. A 503 `peer_unavailable` (the owning hub is down) is retried on the same hub after its
+    `Retry-After`, never sent elsewhere; a definite rejection (4xx) is never resent. Member
+    additions claim KeyPackages and commit through the same hub; if that hub becomes unreachable
+    or answers `kp_not_claimed`, gim-core claims again through the hub in use and rebuilds the
+    change.
+  - KeyPackages: each listed hub the device is signed in to gets its own one-time KeyPackages and
+    last-resort KeyPackage; a KeyPackage is uploaded to one hub only, ever (also after that hub
+    is removed). A hub's `keypackages.low` (or an expired cursor there) tops up that hub only.
+  - Uploads, chat creation and all other requests still go through the hub the client was created
+    with.
 - **Federation**: users are addressed by user id everywhere; a remote user may have no handle and is
   shown by display name, else a short user id. A chat is created on the own hub, which owns it (the
   `<hub_id>/` prefix of its id); in chats owned by another hub, messages and member changes of
