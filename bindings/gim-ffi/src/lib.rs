@@ -2,6 +2,7 @@
 //! callbacks, as a thin mapping over gim-ui / gim-sdk. Built as
 //! `libgim_core.{so,a,dylib}`. The contract is documented in `docs/API.md`.
 
+mod callbacks;
 mod chat_list;
 mod client;
 mod convert;
