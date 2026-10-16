@@ -10,6 +10,11 @@
 //! later on the same hub order, after the `Retry-After`, and never sent to
 //! the next hub because of it. Definite rejections never fail over.
 //!
+//! A hub that answers 404 for a group another hub owns has no replica of
+//! it yet (the owner has not delivered the group there); the request goes
+//! to the next hub. A 404 from the owning hub is definite.
+//!
+//! Groups are created on the primary hub (§2.1), which then owns them.
 //! An Add is claimed and committed through one hub. A hub that answers
 //! `kp_not_claimed` did not hand out the KeyPackages; the next hub is
 //! tried with the same bytes, and if none takes it, the KeyPackages are
@@ -23,13 +28,14 @@
 use std::future::Future;
 use std::sync::Arc;
 
+use gim_base::model::ChatKind;
 use gim_base::model::{HubState, KeyPackageRecord};
 use gim_base::{StateStore, StoreTxn};
-use gim_common::{now_ms, ClientId, GroupId};
+use gim_common::{now_ms, ClientId, GroupId, UserId};
 use gim_proto::v2::{DUPLICATE_KEY_PACKAGE, KP_NOT_CLAIMED};
 
 use crate::auth::AuthFailure;
-use crate::client::KEY_PACKAGE_BATCH;
+use crate::client::{owner_hub, KEY_PACKAGE_BATCH};
 use crate::hubs::sort;
 use crate::transport::{
     AccessToken, ClaimedKeyPackage, CommitAccepted, KeyPackageClaim, OutgoingCommit, PostError,
@@ -65,6 +71,13 @@ pub(crate) fn hub_unreachable(err: &TransportError) -> bool {
     matches!(err, TransportError::Network(_) | TransportError::Server(_))
 }
 
+/// 404 from a hub that does not own the group: it has no replica of it
+/// yet, so the owner or another hub may take the request.
+fn no_replica(group_id: &GroupId, hub: &HubTarget, err: &TransportError) -> bool {
+    matches!(err, TransportError::NotFound(_))
+        && owner_hub(group_id).is_some_and(|owner| owner != hub.hub_id)
+}
+
 /// A hub this device cannot get a session on fails like an unreachable
 /// one, so the next hub is tried.
 fn no_session(hub_id: &str) -> TransportError {
@@ -97,7 +110,7 @@ impl<S: StateStore + 'static> Client<S> {
     /// others with a verified URL in this run). The home hub is always
     /// among them, last if the registry does not list it as verified.
     pub(crate) async fn submission_hubs(&self) -> Vec<HubTarget> {
-        let mut hubs = match self.run(|store, _| Ok(store.hubs()?)).await {
+        let mut hubs = match self.read(|store, _| Ok(store.hubs()?)).await {
             Ok(hubs) => hubs,
             Err(err) => {
                 tracing::warn!(error = %err, "cannot read the hub registry; using the home hub");
@@ -177,6 +190,44 @@ impl<S: StateStore + 'static> Client<S> {
         }
     }
 
+    /// The hubs to read from: the home hub, then the other verified hubs
+    /// in registry order.
+    async fn read_hubs(&self) -> Vec<HubTarget> {
+        let mut hubs = self.submission_hubs().await;
+        hubs.retain(|h| !h.home);
+        hubs.insert(0, self.home_target());
+        hubs
+    }
+
+    /// Looks `handle` up on the home hub, then on the next verified hub in
+    /// registry order while the hub asked does not know it or cannot be
+    /// reached. Handles are per hub: the first hub that knows it answers,
+    /// with the user id. `Ok(None)` only if every hub answered that it does
+    /// not know the handle.
+    pub(crate) async fn find_handle_routed(
+        &self,
+        handle: &str,
+    ) -> std::result::Result<Option<(UserId, HubTarget)>, TransportError> {
+        let mut failed = None;
+        for hub in self.read_hubs().await {
+            let found = self
+                .authed_on(&hub, |transport, t| async move {
+                    transport.find_handle(&t, handle).await
+                })
+                .await;
+            match found {
+                Ok(Some(user_id)) => return Ok(Some((user_id, hub))),
+                Ok(None) => {}
+                Err(err) if hub_unreachable(&err) => {
+                    tracing::debug!(hub_id = %hub.hub_id, error = %err, "hub unreachable; looking the handle up on the next hub");
+                    failed = Some(err);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        failed.map_or(Ok(None), Err)
+    }
+
     /// Runs a read (DeviceList, user directory, hosting record) on the home
     /// hub and, while the hub asked cannot be reached (network, 5xx), on
     /// the next verified hub in registry order. Definite answers, also
@@ -189,11 +240,8 @@ impl<S: StateStore + 'static> Client<S> {
         F: Fn(Arc<dyn Transport>, AccessToken) -> Fut,
         Fut: Future<Output = std::result::Result<T, TransportError>>,
     {
-        let mut hubs = self.submission_hubs().await;
-        hubs.retain(|h| !h.home);
-        hubs.insert(0, self.home_target());
         let mut failed = None;
-        for hub in hubs {
+        for hub in self.read_hubs().await {
             match self.authed_on(&hub, &call).await {
                 Err(err) if hub_unreachable(&err) => {
                     tracing::debug!(hub_id = %hub.hub_id, error = %err, "hub unreachable; reading from the next hub");
@@ -235,6 +283,42 @@ impl<S: StateStore + 'static> Client<S> {
         Err(failed.unwrap_or_else(|| TransportError::Network("no hub to read from".into())))
     }
 
+    /// Creates a group on `first` (the hub of the KeyPackage claim for its
+    /// first Add) or else the primary hub, on the next hub while the one
+    /// asked cannot be reached. The hub that created it owns it.
+    pub(crate) async fn create_group_routed(
+        &self,
+        kind: ChatKind,
+        first: Option<&HubTarget>,
+    ) -> std::result::Result<GroupId, TransportError> {
+        let hubs = Self::hub_order(self.submission_hubs().await, first);
+        let last = hubs.len().saturating_sub(1);
+        for (i, hub) in hubs.into_iter().enumerate() {
+            let created = self
+                .authed_on(&hub, |transport, t| async move {
+                    transport.create_group(&t, kind).await
+                })
+                .await;
+            match created {
+                Err(err) if hub_unreachable(&err) && i < last => {
+                    tracing::warn!(hub_id = %hub.hub_id, error = %err, "hub unreachable; creating the group on the next hub");
+                }
+                Ok(group_id) => {
+                    if owner_hub(&group_id)
+                        .is_some_and(|owner| !hub.hub_id.is_empty() && owner != hub.hub_id)
+                    {
+                        tracing::warn!(%group_id, hub_id = %hub.hub_id, "the hub created a group it does not own");
+                    }
+                    return Ok(group_id);
+                }
+                created => return created,
+            }
+        }
+        Err(TransportError::Network(
+            "no hub to create the group on".into(),
+        ))
+    }
+
     /// Submits a Commit or Proposal through the hubs, `first` (the hub of
     /// an Add's claim) or else the primary first; see the module docs.
     pub(crate) async fn submit_routed(
@@ -245,6 +329,7 @@ impl<S: StateStore + 'static> Client<S> {
     ) -> Submission<CommitAccepted> {
         let hubs = Self::hub_order(self.submission_hubs().await, first);
         let mut unknown = None;
+        let mut not_found = None;
         let mut not_claimed: Option<(HubTarget, TransportError)> = None;
         for hub in hubs {
             let submitted = self
@@ -257,6 +342,10 @@ impl<S: StateStore + 'static> Client<S> {
                 Err(PostError::Transport(err)) if hub_unreachable(&err) => {
                     tracing::warn!(hub_id = %hub.hub_id, %group_id, error = %err, "hub unreachable; submitting to the next hub");
                     unknown.get_or_insert(err);
+                }
+                Err(PostError::Transport(err)) if no_replica(group_id, &hub, &err) => {
+                    tracing::info!(hub_id = %hub.hub_id, %group_id, "hub has no replica of the group; submitting to the next hub");
+                    not_found.get_or_insert(err);
                 }
                 Err(PostError::Transport(err)) if kp_not_claimed(&err) => {
                     tracing::info!(hub_id = %hub.hub_id, %group_id, "KeyPackages not claimed through this hub; trying the next hub");
@@ -275,6 +364,7 @@ impl<S: StateStore + 'static> Client<S> {
         let (hub, rejected) = not_claimed.unzip();
         let err = unknown
             .or(rejected)
+            .or(not_found)
             .unwrap_or_else(|| TransportError::Network("no hub to submit to".into()));
         Submission {
             result: Err(err.into()),
@@ -306,6 +396,9 @@ impl<S: StateStore + 'static> Client<S> {
             match posted {
                 Err(PostError::Transport(err)) if hub_unreachable(&err) && i < last => {
                     tracing::warn!(hub_id = %hub.hub_id, %group_id, error = %err, "hub unreachable; posting to the next hub");
+                }
+                Err(PostError::Transport(err)) if no_replica(group_id, &hub, &err) && i < last => {
+                    tracing::info!(hub_id = %hub.hub_id, %group_id, "hub has no replica of the group; posting to the next hub");
                 }
                 posted => return posted,
             }
@@ -495,7 +588,11 @@ impl<S: StateStore + 'static> Client<S> {
 
     /// Generates and uploads [`KEY_PACKAGE_BATCH`] one-time KeyPackages to
     /// `hub` (its `keypackages.low`).
+    /// No-op in [`crate::ClientMode::Extension`]: the app generates them.
     pub(crate) async fn replenish_hub(&self, hub: &HubTarget) -> Result<()> {
+        if self.is_extension() {
+            return Ok(());
+        }
         let (key_packages, _) = self
             .generate_key_packages_for(&hub.hub_id, KEY_PACKAGE_BATCH, false)
             .await?;
@@ -519,7 +616,11 @@ impl<S: StateStore + 'static> Client<S> {
     /// Tops `hub`'s one-time KeyPackages up to [`KEY_PACKAGE_BATCH`], plus
     /// a last-resort one if it has none. Uploads a batch if the hub cannot
     /// count them; network and auth errors are returned.
+    /// No-op in [`crate::ClientMode::Extension`].
     pub(crate) async fn top_up_hub(&self, hub: &HubTarget) -> Result<()> {
+        if self.is_extension() {
+            return Ok(());
+        }
         let counted = self
             .authed_on(hub, |transport, t| async move {
                 transport.key_package_count(&t).await

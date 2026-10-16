@@ -6,7 +6,10 @@
 # with GIM_HUB_PUBLIC_URL http://<container>:8080, the URL the tests use,
 # waits for /healthz and runs the tests in a rust:1 container on the same
 # network. The hub container is always stopped on exit; its logs are printed
-# on failure. The hub commit is printed before the tests run.
+# on failure. The hub commit is printed before the tests run. The hub
+# pushes membership events (GIM_HUB_PUSH_MEMBER_EVENTS=true); a second hub
+# from the same image sends minimal push payloads (GIM_HUB_PUSH_MINIMAL=true,
+# GIM_HUB_MINIMAL_URL in the tests). Both serve the test push log.
 #
 # With GIM_FEDERATION=1 it runs the federation suite
 # (tests/federation.rs) instead: `gim-hub-dev.sh fed-start` starts a closed
@@ -15,10 +18,15 @@
 # the Docker socket mounted (they stop and start hub b). Hub logs are
 # printed on failure; containers, network and volumes are always removed.
 #
+# With GIM_MULTIHOMING=1 it runs the multi-homing suite
+# (tests/multihoming.rs) the same way on a federation of three hubs
+# (GIM_FED_HUBS=3; the tests stop and start hub a).
+#
 # Env: SUBTASK_ID (default: short git sha) names the hub container;
 #      GIM_HUB_SRC, GIM_HUB_REV, GIM_HUB_CHECKOUT, GIM_HUB_BUILD,
 #      GIM_HUB_IMAGE, GIM_HUB_NETWORK, GIM_FED_HUBS (see
-#      scripts/gim-hub-dev.sh); GIM_FEDERATION=1 for the federation suite;
+#      scripts/gim-hub-dev.sh); GIM_FEDERATION=1 for the federation suite,
+#      GIM_MULTIHOMING=1 for the multi-homing suite;
 #      GIM_CARGO_CACHE: CARGO_HOME mounted into the test container (default
 #      /srv/.tmp/cache/cargo); CARGO_INCREMENTAL, CARGO_PROFILE_DEV_DEBUG,
 #      CARGO_PROFILE_TEST_DEBUG and CARGO_TERM_COLOR are passed through when
@@ -33,7 +41,12 @@ mkdir -p "$cargo_cache"
 cargo_env=(-e CARGO_INCREMENTAL -e CARGO_PROFILE_DEV_DEBUG
     -e CARGO_PROFILE_TEST_DEBUG -e CARGO_TERM_COLOR)
 
-if [ "${GIM_FEDERATION:-0}" = 1 ]; then
+if [ "${GIM_FEDERATION:-0}" = 1 ] || [ "${GIM_MULTIHOMING:-0}" = 1 ]; then
+    suite=federation
+    if [ "${GIM_MULTIHOMING:-0}" = 1 ]; then
+        suite=multihoming
+        export GIM_FED_HUBS=3
+    fi
     run=$SUBTASK_ID-$$
     status=1
     cleanup() {
@@ -63,31 +76,37 @@ if [ "${GIM_FEDERATION:-0}" = 1 ]; then
         -v "$cargo_cache:/cache/cargo" -e CARGO_HOME=/cache/cargo \
         -v /var/run/docker.sock:/var/run/docker.sock \
         "${cargo_env[@]}" "${env_args[@]}" \
-        rust:1 cargo test -p gim-integration-testing --test federation --no-fail-fast \
+        rust:1 cargo test -p gim-integration-testing --test "$suite" --no-fail-fast \
         -- --include-ignored --nocapture --test-threads 1 "$@"
     status=0
     exit 0
 fi
 
 hub=ai-agent-gim-hub-it-$SUBTASK_ID
+minimal_hub=$hub-minimal
 network=${GIM_HUB_NETWORK:-traefik}
 status=1
 
 cleanup() {
-    if [ "$status" != 0 ]; then
-        echo "--- logs of $hub" >&2
-        "$repo/scripts/gim-hub-dev.sh" logs "$hub" 2>&1 | tail -n 200 >&2 || true
-    fi
-    "$repo/scripts/gim-hub-dev.sh" stop "$hub"
+    for h in "$hub" "$minimal_hub"; do
+        if [ "$status" != 0 ]; then
+            echo "--- logs of $h" >&2
+            "$repo/scripts/gim-hub-dev.sh" logs "$h" 2>&1 | tail -n 200 >&2 || true
+        fi
+        "$repo/scripts/gim-hub-dev.sh" stop "$h"
+    done
 }
 trap cleanup EXIT
 
-"$repo/scripts/gim-hub-dev.sh" start "$hub" >/dev/null
+GIM_HUB_PUSH_MEMBER_EVENTS=true "$repo/scripts/gim-hub-dev.sh" start "$hub" >/dev/null
+GIM_HUB_BUILD=0 GIM_HUB_PUSH_MINIMAL=true \
+    "$repo/scripts/gim-hub-dev.sh" start "$minimal_hub" >/dev/null
 echo "gim-hub commit under test: $("$repo/scripts/gim-hub-dev.sh" commit "$hub")"
 
 docker run --rm --label ai-agent=true --network "$network" \
     -v "$repo:$repo" -w "$repo" \
     -v "$cargo_cache:/cache/cargo" -e CARGO_HOME=/cache/cargo \
     "${cargo_env[@]}" -e GIM_HUB_URL="http://$hub:8080" \
+    -e GIM_HUB_PUSH_MEMBER_EVENTS=true -e GIM_HUB_MINIMAL_URL="http://$minimal_hub:8080" \
     rust:1 cargo test -p gim-integration-testing --no-fail-fast -- --include-ignored --nocapture "$@"
 status=0
