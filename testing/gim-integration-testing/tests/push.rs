@@ -371,23 +371,15 @@ async fn registration_lifecycle_controls_pushes() {
     assert_eq!(pushes("four").await, 0, "signed out");
 }
 
-/// With priority-aware coalescing (hub H8) a text and the read receipt
-/// right after it reach alice as one alert push carrying the receipt's
-/// payload: the extension catches the chat up and shows the text.
-/// `scripts/integration-test.sh` runs ignored tests too, so this one also
-/// needs `GIM_HUB_PRIORITY_COALESCING=1` until the pinned hub has H8.
+/// With priority-aware coalescing (hub H8, `push.md` §4) a text and the
+/// read receipt right after it reach alice as one alert push carrying the
+/// receipt's payload: the extension catches the chat up and shows the text.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "needs hub H8 priority-aware coalescing"]
+#[ignore = "needs a gim-hub: scripts/integration-test.sh"]
 async fn coalesced_receipt_push_shows_the_text_before_it() {
     let Some(url) = server_url("coalesced_receipt_push_shows_the_text_before_it") else {
         return;
     };
-    if std::env::var("GIM_HUB_PRIORITY_COALESCING").as_deref() != Ok("1") {
-        eprintln!(
-            "skipping coalesced_receipt_push_shows_the_text_before_it: GIM_HUB_PRIORITY_COALESCING is not 1"
-        );
-        return;
-    }
     let alice = TestUser::register(&url, "alice", "Alice").await;
     let bob = TestUser::register(&url, "bob", "Bob").await;
     register_log_push(&alice).await;
@@ -425,4 +417,86 @@ async fn coalesced_receipt_push_shows_the_text_before_it() {
     alice.client.start_sync().await.unwrap();
     let texts = texts_once_synced(&alice, &chat, "Anchored off Hvar").await;
     assert_eq!(texts, ["Ahoy", "Anchored off Hvar"]);
+}
+
+/// Bob adds alice to an existing group and sends a text right after. The
+/// Welcome (alert), the membership event of the Commit (silent, if the hub
+/// pushes membership events) and the text (alert) reach alice's device as
+/// one coalesced push or, from separate reads of the hub's events, as
+/// several; a membership payload may arrive at alert priority. Processed
+/// in turn, they show the text or the invite (never nothing), neither
+/// twice, and the app's sync afterwards applies nothing again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a gim-hub: scripts/integration-test.sh"]
+async fn coalesced_add_and_text_push_shows_the_text_or_the_invite() {
+    let Some(url) = server_url("coalesced_add_and_text_push_shows_the_text_or_the_invite") else {
+        return;
+    };
+    let alice = TestUser::register(&url, "alice", "Alice").await;
+    let bob = TestUser::register(&url, "bob", "Bob").await;
+    let carol = TestUser::register(&url, "carol", "Carol").await;
+    register_log_push(&alice).await;
+    let group = bob
+        .client
+        .create_group_chat("Crew Korčula".into(), vec![carol.user_id.clone()])
+        .await
+        .unwrap();
+    wait_joined(&carol, &group).await;
+
+    alice.client.stop_sync().await.unwrap();
+    bob.client.find_user(alice.handle.clone()).await.unwrap();
+    let before = push_log(&url, &alice.device_id).len();
+    bob.client
+        .add_members(group.clone(), vec![alice.user_id.clone()])
+        .await
+        .unwrap();
+    bob.client
+        .send_text(group.clone(), "Lines ashore at Lumbarda".into(), None)
+        .await
+        .unwrap();
+    let pushed = new_pushes(&url, &alice.device_id, before, PUSH_WAIT, for_chat(&group)).await;
+    eprintln!("alice got {} push(es): {pushed:?}", pushed.len());
+    for payload in &pushed {
+        assert_eq!(payload["collapse_id"], payload["message_id"], "{payload}");
+        if payload["type"] != "message" && payload["type"] != "welcome" {
+            assert!(payload.get("mls_message").is_none(), "{payload}");
+        }
+    }
+
+    let shown = process_all(&url, &alice.hooks, &pushed).await;
+    let shown = displayed(&shown);
+    assert!(!shown.is_empty(), "nothing shown for {pushed:?}");
+    let texts = shown
+        .iter()
+        .filter(|c| c.kind == NotificationKind::Message)
+        .count();
+    let invites = shown
+        .iter()
+        .filter(|c| c.kind == NotificationKind::Invite)
+        .count();
+    assert_eq!(texts + invites, shown.len(), "{shown:?}");
+    assert!(texts <= 1 && invites <= 1, "{shown:?}");
+    for content in &shown {
+        assert_eq!(content.chat_id.as_deref(), Some(group.as_str()));
+        assert_eq!(content.sender_user_id.as_deref(), Some(bob.user_id.as_str()));
+        if content.kind == NotificationKind::Message {
+            assert_eq!(content.body, "Lines ashore at Lumbarda", "{content:?}");
+        }
+    }
+
+    alice.client.start_sync().await.unwrap();
+    let texts = texts_once_synced(&alice, &group, "Lines ashore at Lumbarda").await;
+    assert_eq!(texts, ["Lines ashore at Lumbarda"]);
+    let (chats, _handle) = alice.chat_list().await;
+    let chats = chats
+        .wait("the group in alice's list", |c| {
+            c.iter().any(|c| c.chat_id == group)
+        })
+        .await;
+    assert_eq!(chats.iter().filter(|c| c.chat_id == group).count(), 1);
+    let members = [&alice, &bob, &carol]
+        .iter()
+        .map(|u| u.user_id.clone())
+        .collect();
+    assert_eq!(member_ids(&alice.client, &group).await, members);
 }

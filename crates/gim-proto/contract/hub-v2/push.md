@@ -103,9 +103,11 @@ In Python: `hmac.new(secret, f"{t}.".encode() + body, hashlib.sha256).hexdigest(
 - `sent_at`: unix milliseconds of the first attempt (unchanged on retries).
 - `registration`: the stored registration (section 1). `app_id`, `sandbox`, `p256dh` and `auth`
   are absent when not set; `p256dh` and `auth` are re-encoded as unpadded base64url.
-- `priority`: `high` for `message` and `welcome`, `normal` for membership events (silent).
+- `priority`: `high` for `message` and `welcome`, and for any push that coalesced one of them
+  (section 4), e.g. a `group.member_added` payload that replaced a queued `message` push;
+  `normal` otherwise (membership events, silent).
 - `collapse_id`: equal to the payload's `collapse_id` (section 4).
-- `ttl`: seconds the push server may keep trying to deliver, `86400`.
+- `ttl`: seconds the push server may keep trying to deliver, always `86400`.
 - `payload`: what the device receives (section 3).
 
 The body carries no `user_id` or `device_id`: the push server only needs the registration.
@@ -172,8 +174,8 @@ With `GIM_HUB_PUSH_MINIMAL=true` (default `false`) every payload is exactly
 ```
 
 with no `gid`, `seq`, `message_id` or `mls_message`; the client syncs `GET /v2/events`. The
-webhook body is unchanged otherwise: `priority` still follows the underlying event type and
-`collapse_id` is the same.
+webhook body is unchanged otherwise: `priority` follows the same rule as without minimal mode
+(section 2.3) and `collapse_id` is the same.
 
 ## 4. Dispatch
 
@@ -183,9 +185,24 @@ webhook body is unchanged otherwise: `priority` still follows the underlying eve
   queues a push. The sender's own device never gets a `message` event, so it gets no push.
 - MLS Proposals are not pushed: a `message` event of kind `proposal` changes nothing until a Commit
   covers it, and that Commit (and its membership events) is pushed as usual.
-- Queue: at most one pending push per device; a newer one replaces it (coalescing). At most
-  `GIM_HUB_PUSH_QUEUE_CAPACITY` devices are queued; further pushes are dropped (counted and
-  logged). Four workers send concurrently.
+- Queue: at most one pending push per device. At most `GIM_HUB_PUSH_QUEUE_CAPACITY` devices are
+  queued; further pushes are dropped (counted and logged). Four workers send concurrently.
+- Priority: a push is an alert (`priority` `high`) for `message` and `welcome`, silent (`normal`)
+  for membership events. There are exactly these two levels.
+- Coalescing: a new push for a device with a pending push replaces it. The pending push becomes
+  the **newest** notification (type, `gid`, `seq`, `message_id`/`collapse_id`, `mls_message`,
+  `delivery_id`) with priority = max(pending, new), so a pending alert is never downgraded: an
+  alert followed by a membership push of the same Commit is sent once, as the membership payload
+  with priority `high`. The payload rules of section 3 apply to the merged push as to any other:
+  `mls_message` is inlined only if the newest notification has one that fits (never for
+  membership events; the client then syncs by `seq` / its events), and minimal mode sends the
+  wake object. `ttl` is the constant `86400` for every push, so the merged push keeps it.
+- The events of one read of the `events` table (up to 500) are queued at once, so the pushes of
+  one write (e.g. the `message` and membership events of a Commit, or a federation `Deliver`
+  batch) coalesce per device before any of them is sent.
+- Retries: a retry (section 2.4) never replaces a newer pending push for the device; it is
+  dropped. If the retry is an alert and the pending push is silent, the pending push is raised to
+  alert (its payload kept).
 - Registrations with provider `log` go to the log provider (section 5); every other registration
   goes to the webhook, or is skipped when `GIM_HUB_PUSH_WEBHOOK_URL` is unset.
 - Collapse and dedup: `collapse_id` is always the message ID, so a device (or the push server)
@@ -196,8 +213,9 @@ webhook body is unchanged otherwise: `priority` still follows the underlying eve
   device. With multi-homing only the user's primary hub pushes, a fallback hub only while every
   hub before it is down ([`multihoming.md`](multihoming.md) §8). Without a gate every hub pushes
   and duplicates collapse on `collapse_id`.
-- Counters (`enqueued`, `coalesced`, `dropped`, `sent`, `skipped`, `invalid_token`, `retried`,
-  `failed`) are available from `Dispatcher::metrics`.
+- Counters (`enqueued`, `coalesced`, `upgraded`, `dropped`, `sent`, `skipped`, `invalid_token`,
+  `retried`, `failed`) are available from `Dispatcher::metrics`. `upgraded` counts silent pushes
+  raised to alert by coalescing with an alert (new or retried).
 
 ## 5. Log provider and test-only push log endpoint
 

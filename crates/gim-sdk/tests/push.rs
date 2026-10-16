@@ -714,3 +714,81 @@ async fn membership_push_catches_the_group_up_silently() {
         "{chat:?}"
     );
 }
+
+/// Membership pushes may arrive at alert priority (a coalesced push keeps
+/// the highest priority and the newest payload, `push.md` §4), but the
+/// payload carries no priority, so `process_push` decides by the content
+/// alone: Bob's text and then his Commit adding Carol reach Alice as one
+/// push for the Commit, which catches the group up and shows the text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn membership_push_shows_the_text_it_replaced() {
+    let hub = FakeTransport::new();
+    let alice = Peer::fake(&hub, "alice").await;
+    let bob = Peer::fake(&hub, "bob").await;
+    let carol = Peer::fake(&hub, "carol").await;
+    let group_id = bob
+        .client
+        .create_group_chat(Some("Regatta".into()), &[alice.user_id()])
+        .await
+        .unwrap();
+    alice.client.sync_once().await.unwrap();
+    bob.send_text(&group_id, "Carol joins at Vis").await;
+    bob.client
+        .add_members(&group_id, &[carol.user_id()])
+        .await
+        .unwrap();
+    let commit = latest(&hub, &group_id, MessageKind::Commit);
+
+    let payload = target_payload("group.member_added", &group_id, commit.seq);
+    let content = alice.client.process_push(&payload).await.unwrap();
+    assert_eq!(content.kind, NotificationKind::Message, "{content:?}");
+    assert!(content.should_display);
+    assert_eq!(content.body, "Carol joins at Vis");
+    assert_eq!(content.sender_user_id, Some(bob.user_id()));
+    let chat = alice.store.chat(&group_id).unwrap().unwrap();
+    assert!(
+        chat.members.iter().any(|m| m.device == carol.device()),
+        "{chat:?}"
+    );
+
+    // The same push again finds nothing new: silent.
+    let again = alice.client.process_push(&payload).await.unwrap();
+    assert!(!again.should_display, "{again:?}");
+    alice.client.sync_once().await.unwrap();
+    assert_eq!(alice.texts(&group_id), ["Carol joins at Vis"]);
+}
+
+/// The Commit adding Alice to an existing group: its Welcome push and the
+/// membership push coalesce into the membership payload. Alice has not
+/// joined, so the push joins through the pending Welcomes and shows the
+/// invite.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn membership_push_adding_this_device_joins_and_shows_the_invite() {
+    let hub = FakeTransport::new();
+    let alice = Peer::fake(&hub, "alice").await;
+    let bob = Peer::fake(&hub, "bob").await;
+    let carol = Peer::fake(&hub, "carol").await;
+    let group_id = bob
+        .client
+        .create_group_chat(Some("Regatta".into()), &[carol.user_id()])
+        .await
+        .unwrap();
+    bob.client
+        .add_members(&group_id, &[alice.user_id()])
+        .await
+        .unwrap();
+    let commit = latest(&hub, &group_id, MessageKind::Commit);
+    assert!(!alice.has_chat(&group_id));
+
+    let payload = target_payload("group.member_added", &group_id, commit.seq);
+    let content = alice.client.process_push(&payload).await.unwrap();
+    assert_eq!(content.kind, NotificationKind::Invite, "{content:?}");
+    assert!(content.should_display);
+    assert_eq!(content.chat_id.as_ref(), Some(&group_id));
+    assert_eq!(content.sender_user_id, Some(bob.user_id()));
+    assert!(alice.has_chat(&group_id));
+    assert!(hub
+        .service()
+        .pending_welcomes(&alice.device(), 10)
+        .is_empty());
+}
