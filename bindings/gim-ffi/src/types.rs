@@ -230,3 +230,72 @@ pub enum ConnectionState {
     /// Connected and catching up on missed events.
     Syncing,
 }
+
+/// The device's push registration on its hubs (contract `push.md` §1).
+/// Every field is opaque to the hub and passed to the push server.
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct PushRegistration {
+    /// Push platform for the push server (`apns`, `fcm`, `unifiedpush`,
+    /// ...): 1-64 characters of `a-z 0-9 . _ -`.
+    pub provider: String,
+    /// Platform token: 1-4096 bytes without control characters.
+    pub token: String,
+    /// App identifier (e.g. the bundle ID): 1-255 characters of
+    /// `A-Z a-z 0-9 . - _ :`.
+    pub app_id: Option<String>,
+    /// Platform sandbox flag (e.g. the APNs development environment).
+    pub sandbox: Option<bool>,
+    /// Web Push `p256dh` key: 1-256 characters of base64url.
+    pub p256dh: Option<String>,
+    /// Web Push `auth` secret: 1-256 characters of base64url.
+    pub auth: Option<String>,
+}
+
+impl std::fmt::Debug for PushRegistration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PushRegistration")
+            .field("provider", &self.provider)
+            .field("app_id", &self.app_id)
+            .field("sandbox", &self.sandbox)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What a notification is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NotificationKind {
+    /// A text or media message (also the silent edit or delete of one).
+    Message,
+    /// A reaction to a message.
+    Reaction,
+    /// The user was added to a chat.
+    Invite,
+    /// A member was added to or removed from a chat.
+    Membership,
+    /// Content unknown: show `body` ("New message").
+    Generic,
+}
+
+/// What to show for a push, from `GimClient::process_push`.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NotificationContent {
+    pub chat_id: Option<String>,
+    /// Group name, or the other user's name for a direct chat.
+    pub chat_title: Option<String>,
+    pub sender_user_id: Option<String>,
+    pub sender_display_name: Option<String>,
+    /// Text preview: the text, the media caption, "Photo" or
+    /// "File: <name>"; "reacted <emoji>" for a reaction; "New message" for
+    /// generic content.
+    pub body: String,
+    pub message_id: Option<String>,
+    /// The push's `collapse_id`: use it as the notification identifier, so
+    /// the same message pushed by several hubs shows once.
+    pub collapse_id: Option<String>,
+    pub kind: NotificationKind,
+    /// `false`: show nothing (own messages, edits, deletes, receipts,
+    /// membership changes, already read).
+    pub should_display: bool,
+    /// Unix milliseconds: when the message was sent, or now.
+    pub timestamp: u64,
+}

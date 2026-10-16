@@ -175,6 +175,10 @@ impl<S: StateStore + 'static> Client<S> {
     /// again) and returns the error.
     pub(crate) async fn end_enrollment(&self, enrolled: Result<()>) -> Result<()> {
         let ended = enrolled.and_then(|()| Ok(self.inner.secrets.delete(ENROLLMENT_SECRET_KEY)?));
+        if ended.is_ok() {
+            // A registration stored before onboarding goes to the hub.
+            self.push_hub_changed(None, true);
+        }
         if let Err(err) = &ended {
             tracing::warn!(error = %err, "enrollment failed; discarding it");
             if let Err(err) = self.discard_enrollment().await {

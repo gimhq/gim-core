@@ -307,7 +307,7 @@ impl<S: StateStore + 'static> Client<S> {
 
     /// The listed hubs other than the home hub whose URL was verified in
     /// this run, by hub id.
-    fn hub_links(&self) -> Vec<HubLink> {
+    pub(crate) fn hub_links(&self) -> Vec<HubLink> {
         self.verified_hubs()
             .into_iter()
             .map(|(hub_id, _, transport)| HubLink {
@@ -369,14 +369,15 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// The sync loop of the home hub, with the loops of the other listed
-    /// hubs, the hosting record renewal and the pending invite retries
-    /// alongside.
+    /// hubs, the hosting record renewal, the pending invite retries and
+    /// the push registration alongside.
     async fn sync_loop(&self, session: Session) -> Result<()> {
         let result = tokio::select! {
             result = self.follow_events(session.clone()) => result,
             never = self.maintain_hub_loops(session) => match never {},
             never = self.maintain_hosting_record() => match never {},
             never = self.maintain_pending_invites() => match never {},
+            never = self.maintain_push_registration() => match never {},
         };
         // The other hubs' loops stopped with it.
         self.link_states().clear();
@@ -530,6 +531,8 @@ impl<S: StateStore + 'static> Client<S> {
                 connected = true;
                 backoff.reset();
                 self.report(link, ConnectionState::Syncing);
+                // A hub that missed the push registration gets it now.
+                self.push_hub_changed(link.hub_id.as_deref(), false);
             }
             let caught_up = matches!(&fetched, Fetched::Batch(b) if b.events.is_empty());
             self.apply_fetched(session, link, fetched).await?;
@@ -855,7 +858,7 @@ impl<S: StateStore + 'static> Client<S> {
     /// Joins the groups of every Welcome pending on the hub of `link` and
     /// acknowledges them there, page by page. Welcomes of groups already
     /// joined are acknowledged too.
-    async fn join_pending_welcomes(
+    pub(crate) async fn join_pending_welcomes(
         &self,
         session: &Session,
         link: &HubLink,
@@ -1331,7 +1334,7 @@ impl<S: StateStore + 'static> Client<S> {
     /// listed hub that can serve them (every listed hub keeps a replica
     /// with the same seqs). See [`Client::group_history_on`]; if no hub
     /// serves them, the preferred hub's result is returned.
-    async fn group_history_from(
+    pub(crate) async fn group_history_from(
         &self,
         preferred: &HubLink,
         group_id: &GroupId,
