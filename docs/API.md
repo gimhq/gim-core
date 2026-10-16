@@ -355,6 +355,55 @@ item timestamps (at the start of that hour) and cached until the zone is replace
 called on gim-core's callback thread and must not call back into `GimClient`. The chat list does
 not bucket by day; format its timestamps natively.
 
+### Push
+
+| Method | Returns | Notes |
+|---|---|---|
+| `registerPush(registration)` | | Validates the registration, stores it on the device and sends it to every verified hub this device is signed in to (`PUT /v2/push/registration`). `InvalidInput` for a malformed field, `Server(400, …)` if a hub rejects it; an unreachable hub gets it on the next connect. |
+| `unregisterPush()` | | Removes the registration from every hub (`DELETE /v2/push/registration`), then the local copy. Throws the first hub failure; the local copy is removed anyway. |
+| `processPush(payload)` | `NotificationContent` | For the notification extension / service. `InvalidInput` only if `payload` is not a JSON object. |
+
+`PushRegistration` is `provider` (`apns`, `fcm`, `unifiedpush`, …: 1-64 characters of
+`a-z 0-9 . _ -`), `token` (1-4096 bytes, no control characters), `appId?` (1-255 characters of
+`A-Z a-z 0-9 . - _ :`), `sandbox?`, `p256dh?` and `auth?` (Web Push keys: 1-256 characters of
+base64url). Call `registerPush` whenever the platform hands out a new token; gim-core keeps the
+registration across restarts and sends it again by itself when a hub is added or becomes
+verified, after a renewed sign-in, after restore or link, and on each connect to a hub that has
+not received it yet. `signOut()` removes it from the hubs (best effort, a few seconds at most)
+before wiping the device.
+
+`processPush(payload)` takes the data payload exactly as delivered (the JSON object the hub sent
+through the push server) and returns within about 15 s; it does not open event streams, top up
+KeyPackages or download media. What it does depends on the payload type:
+
+- a message: decrypts the inline MLS message, or fetches it from the hub by its seq, and applies
+  it like sync does. A message the stream (or another hub's push) already applied is not applied
+  again; the stored message is described instead.
+- a chat invitation: joins the chat through the pending invitations, as sync does.
+- a member change: catches the chat up; silent.
+- a wake-up (minimal mode) or an unknown type: reads the pending events once, without moving the
+  sync position (the app's stream reads them again), and shows the newest unread message.
+
+`NotificationContent` is `chatId?`, `chatTitle?` (the group name, or the other user's name in a
+direct chat), `senderUserId?`, `senderDisplayName?`, `body` (text, caption, `Photo`,
+`File: <name>`, or `reacted <emoji>`), `messageId?`, `collapseId?`, `kind`
+(`NotificationKind`), `shouldDisplay` and `timestamp` (Unix ms).
+
+| `NotificationKind` | Meaning |
+|---|---|
+| `Message` | A new text or media message (also the silent edit or delete of one). |
+| `Reaction` | A new reaction; `messageId` is the reacted-to message. |
+| `Invite` | This device joined a chat; `senderUserId` added it. |
+| `Membership` | Members were added or removed; never displayed. |
+| `Generic` | The content is unknown, or there is nothing to show. |
+
+Show the notification only if `shouldDisplay`. It is `false` for own messages, edits, deletes,
+receipts, member changes and messages already read. If the push cannot be decrypted or processed
+in time, the call still succeeds with `Generic` content: body `New message`, `shouldDisplay =
+true`, and `chatId` / `chatTitle` when the chat is known locally. An iOS Notification Service
+Extension can therefore always display the result. Use `collapseId` as the platform collapse key
+(`apns-collapse-id`, FCM `tag`): every hub of the user may push the same message.
+
 ## Listeners and threading
 
 `ChatListListener`, `TimelineListener`, `ConnectionStateListener`, `TypingListener` and

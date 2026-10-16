@@ -24,6 +24,7 @@ use tokio::sync::{broadcast, Mutex, Notify};
 use crate::hubs::{http_connector, HubConnector, HubHandle, StoredSession};
 use crate::identity::merge_directory_user;
 use crate::invites::{load_pending_invites, PendingInvites};
+use crate::push::PushState;
 use crate::routing::{HubTarget, Submission};
 use crate::send::TypingState;
 use crate::stream::ConnectionState;
@@ -262,6 +263,9 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
                 hub_admin_lock: Mutex::new(()),
                 hub_changes: broadcast::channel(HUB_CHANGES_CAPACITY).0,
                 link_states: Default::default(),
+                push: Default::default(),
+                push_lock: Mutex::new(()),
+                push_wake: Notify::new(),
             }),
         })
     }
@@ -382,6 +386,13 @@ pub(crate) struct Inner<S> {
     /// The connection state of each sync loop (home hub: `None`); the
     /// reported state is the best of them.
     pub(crate) link_states: std::sync::Mutex<HashMap<Option<String>, ConnectionState>>,
+    /// The hubs holding the push registration in this run.
+    pub(crate) push: std::sync::Mutex<PushState>,
+    /// Serializes push registration changes.
+    pub(crate) push_lock: Mutex<()>,
+    /// Wakes the sync loop's push registration: a hub signed in or
+    /// connected.
+    pub(crate) push_wake: Notify,
 }
 
 #[derive(Clone)]

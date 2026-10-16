@@ -27,8 +27,9 @@ pub use task_handle::TaskHandle;
 pub use timeline::{LocalTimeZone, Timeline, TimelineDiff, TimelineListener};
 pub use types::{
     ChatKind, ChatState, ChatSummary, ConnectionState, DeviceInfo, HubInfo, HubState, MediaRef,
-    MembershipChangeKind, MessageContent, MessageItem, MessagePreview, ReactionGroup, ReplyPreview,
-    SendState, Session, TimelineItem, UserProfile,
+    MembershipChangeKind, MessageContent, MessageItem, MessagePreview, NotificationContent,
+    NotificationKind, PushRegistration, ReactionGroup, ReplyPreview, SendState, Session,
+    TimelineItem, UserProfile,
 };
 
 uniffi::setup_scaffolding!();

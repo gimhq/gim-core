@@ -5,8 +5,9 @@ use gim_ui::VectorDiff;
 
 use crate::{
     ChatKind, ChatListDiff, ChatState, ChatSummary, DeviceInfo, HubInfo, HubState, MediaRef,
-    MembershipChangeKind, MessageContent, MessageItem, MessagePreview, ReactionGroup, ReplyPreview,
-    SendState, TimelineDiff, TimelineItem, UserProfile,
+    MembershipChangeKind, MessageContent, MessageItem, MessagePreview, NotificationContent,
+    NotificationKind, PushRegistration, ReactionGroup, ReplyPreview, SendState, TimelineDiff,
+    TimelineItem, UserProfile,
 };
 
 /// Maps a gim-ui diff onto an FFI diff enum with the same variants.
@@ -288,4 +289,46 @@ pub(crate) fn hub_infos(hubs: Vec<gim_sdk::HubStatus>) -> Vec<HubInfo> {
             signed_in: h.signed_in,
         })
         .collect()
+}
+
+impl From<PushRegistration> for gim_sdk::PushRegistration {
+    fn from(registration: PushRegistration) -> Self {
+        Self {
+            provider: registration.provider,
+            token: registration.token,
+            app_id: registration.app_id,
+            sandbox: registration.sandbox,
+            p256dh: registration.p256dh,
+            auth: registration.auth,
+        }
+    }
+}
+
+impl From<gim_sdk::NotificationKind> for NotificationKind {
+    fn from(kind: gim_sdk::NotificationKind) -> Self {
+        match kind {
+            gim_sdk::NotificationKind::Message => Self::Message,
+            gim_sdk::NotificationKind::Reaction => Self::Reaction,
+            gim_sdk::NotificationKind::Invite => Self::Invite,
+            gim_sdk::NotificationKind::Membership => Self::Membership,
+            gim_sdk::NotificationKind::Generic => Self::Generic,
+        }
+    }
+}
+
+impl From<gim_sdk::NotificationContent> for NotificationContent {
+    fn from(content: gim_sdk::NotificationContent) -> Self {
+        Self {
+            chat_id: content.chat_id.map(Into::into),
+            chat_title: content.chat_title,
+            sender_user_id: content.sender_user_id.map(Into::into),
+            sender_display_name: content.sender_display_name,
+            body: content.body,
+            message_id: content.message_id.map(Into::into),
+            collapse_id: content.collapse_id,
+            kind: content.kind.into(),
+            should_display: content.should_display,
+            timestamp: content.timestamp_ms,
+        }
+    }
 }

@@ -11,6 +11,7 @@ testing = ["dep:gim-test"]
 
 [dependencies]
 async-trait.workspace = true
+base64.workspace = true
 futures-util = { workspace = true, features = ["sink"] }
 getrandom.workspace = true
 gim-base.workspace = true

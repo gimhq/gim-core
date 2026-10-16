@@ -11,8 +11,8 @@ use gim_core::{
     create_client_with_fake_transport, ChatKind, ChatListDiff, ChatListListener, ChatState,
     ChatSummary, ClientConfig, ConnectionState, ConnectionStateListener, GimClient, GimError,
     HubInfo, HubListListener, HubState, LocalTimeZone, MembershipChangeKind, MessageContent,
-    MessageItem, PlatformHooks, SendState, TaskHandle, TimelineDiff, TimelineItem,
-    TimelineListener, TypingListener,
+    MessageItem, NotificationKind, PlatformHooks, PushRegistration, SendState, TaskHandle,
+    TimelineDiff, TimelineItem, TimelineListener, TypingListener,
 };
 use gim_sdk::testing::FakeTransport;
 use tempfile::TempDir;
@@ -887,6 +887,53 @@ async fn sign_out_deletes_local_state() {
 
     let fresh = open(&transport, &alice.hooks).await;
     assert_eq!(fresh.session().await.unwrap(), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn push_registration_processing_and_sign_out() {
+    let transport = FakeTransport::new();
+    let alice = User::register(&transport, "alice", "Alice").await;
+    let registration = PushRegistration {
+        provider: "fcm".to_string(),
+        token: "fcm-token".to_string(),
+        app_id: Some("im.g.apps".to_string()),
+        sandbox: None,
+        p256dh: None,
+        auth: None,
+    };
+    let bad = PushRegistration {
+        provider: String::new(),
+        ..registration.clone()
+    };
+    assert!(matches!(
+        alice.client.register_push(bad).await,
+        Err(GimError::InvalidInput { .. })
+    ));
+    alice.client.register_push(registration).await.unwrap();
+    let requests = transport.push_requests();
+    assert!(
+        matches!(requests.as_slice(), [(_, Some(r))] if r.token == "fcm-token"),
+        "{requests:?}"
+    );
+
+    assert!(matches!(
+        alice.client.process_push("not json".to_string()).await,
+        Err(GimError::InvalidInput { .. })
+    ));
+    let content = alice
+        .client
+        .process_push(r#"{"v":1,"type":"wake","collapse_id":"c1"}"#.to_string())
+        .await
+        .unwrap();
+    assert_eq!(content.kind, NotificationKind::Generic);
+    assert!(!content.should_display);
+    assert_eq!(content.collapse_id.as_deref(), Some("c1"));
+
+    // Signing out removes the registration from the hub first.
+    alice.client.sign_out().await.unwrap();
+    let requests = transport.push_requests();
+    assert!(matches!(requests.last(), Some((_, None))), "{requests:?}");
+    assert!(alice.hooks.secrets.lock().unwrap().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

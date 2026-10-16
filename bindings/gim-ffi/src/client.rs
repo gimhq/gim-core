@@ -3,6 +3,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use gim_base::model::{ChatKind as BaseChatKind, Membership, MessageContent as BaseContent};
@@ -11,7 +12,7 @@ use gim_common::{DeviceId, GroupId, MessageId, UserId};
 use gim_sdk::transport::Transport;
 use gim_sdk::{
     Client, ClientBuilder, HttpTransport, OutboxSender, RecoveryCode, DEVICE_KEY_SECRET_KEY,
-    OUTGOING_DIR, ROOT_KEY_SECRET_KEY, SESSION_SECRET_KEY,
+    OUTGOING_DIR, PUSH_REGISTRATION_SECRET_KEY, ROOT_KEY_SECRET_KEY, SESSION_SECRET_KEY,
 };
 use gim_sqlite::{DbKey, SqliteStore, DATABASE_FILE_NAME};
 use tokio::sync::{broadcast, watch};
@@ -25,11 +26,14 @@ use crate::hooks::HookSecrets;
 use crate::timeline::PlatformTimeZone;
 use crate::{
     ChatListDiff, ChatListListener, ChatState, ConnectionState, DeviceInfo, GimError, HubInfo,
-    LinkSession, LocalTimeZone, PendingApproval, PlatformHooks, Session, TaskHandle, Timeline,
-    UserProfile,
+    LinkSession, LocalTimeZone, NotificationContent, PendingApproval, PlatformHooks,
+    PushRegistration, Session, TaskHandle, Timeline, UserProfile,
 };
 
 type Sdk = Client<SqliteStore>;
+
+/// How long `sign_out` waits for the hubs to drop the push registration.
+const SIGN_OUT_PUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct ClientConfig {
@@ -664,7 +668,10 @@ impl GimClient {
     /// Stops sync and the listeners and deletes the session, local data and
     /// keystore secrets. No callback runs once it returned.
     pub async fn sign_out(&self) -> Result<(), GimError> {
-        self.sdk()?;
+        let sdk = self.sdk()?;
+        // Best effort (gim-sdk logs failures), while the keystore hooks
+        // still run: the hubs stop pushing to this device.
+        let _ = tokio::time::timeout(SIGN_OUT_PUSH_TIMEOUT, sdk.unregister_push()).await;
         self.callbacks.close();
         self.stop_sync_tasks();
         self.signed_out.store(true, Ordering::SeqCst);
@@ -680,6 +687,7 @@ impl GimClient {
                 SESSION_SECRET_KEY,
                 DEVICE_KEY_SECRET_KEY,
                 ROOT_KEY_SECRET_KEY,
+                PUSH_REGISTRATION_SECRET_KEY,
                 ClientBuilder::<SqliteStore>::DB_KEY_SECRET_KEY,
             ] {
                 hooks.call(move |hooks| hooks.secure_store_delete(key.to_string()));
@@ -692,6 +700,38 @@ impl GimClient {
         })
         .await??;
         Ok(())
+    }
+
+    /// Registers this device for push on every hub of the user (`PUT
+    /// /v2/push/registration`) and keeps the registration on this device:
+    /// hubs that cannot be reached now, hubs added later and hubs this
+    /// device signs in to again get it from the sync loop. Call it with
+    /// every new platform token; before onboarding it is only stored.
+    /// `InvalidInput` for a malformed registration (see `PushRegistration`).
+    pub async fn register_push(&self, registration: PushRegistration) -> Result<(), GimError> {
+        Ok(self.sdk()?.register_push(registration.into()).await?)
+    }
+
+    /// Removes the push registration from every hub and from this device.
+    /// The local copy is removed even if a hub could not be reached (then
+    /// the error is returned). `sign_out` does this too.
+    pub async fn unregister_push(&self) -> Result<(), GimError> {
+        Ok(self.sdk()?.unregister_push().await?)
+    }
+
+    /// Turns a received push into notification content; for a Notification
+    /// Service Extension or a background push handler. `payload` is the
+    /// push server's payload object as JSON (`push.md` §3). Does one
+    /// bounded unit of work (at most 15 s): applies the pushed message
+    /// like sync does (the stream does not apply it again), joins a pushed
+    /// invite, or reads one page of events. `InvalidInput` only if
+    /// `payload` is not a JSON object; when the content cannot be read
+    /// (not decryptable, offline, out of time) it returns `Generic` content
+    /// with the body "New message" and `should_display` set: show that,
+    /// never drop the notification. Show nothing when `should_display` is
+    /// false.
+    pub async fn process_push(&self, payload: String) -> Result<NotificationContent, GimError> {
+        Ok(self.sdk()?.process_push(&payload).await?.into())
     }
 
     /// Starts the background sync loop (WebSocket stream with a long-poll

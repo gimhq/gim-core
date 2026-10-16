@@ -1220,7 +1220,32 @@ public protocol GimClientProtocol: AnyObject, Sendable {
      */
     func markRead(chatId: String, upToMessageId: String) async throws 
     
+    /**
+     * Turns a received push into notification content; for a Notification
+     * Service Extension or a background push handler. `payload` is the
+     * push server's payload object as JSON (`push.md` §3). Does one
+     * bounded unit of work (at most 15 s): applies the pushed message
+     * like sync does (the stream does not apply it again), joins a pushed
+     * invite, or reads one page of events. `InvalidInput` only if
+     * `payload` is not a JSON object; when the content cannot be read
+     * (not decryptable, offline, out of time) it returns `Generic` content
+     * with the body "New message" and `should_display` set: show that,
+     * never drop the notification. Show nothing when `should_display` is
+     * false.
+     */
+    func processPush(payload: String) async throws  -> NotificationContent
+    
     func react(chatId: String, messageId: String, emoji: String) async throws 
+    
+    /**
+     * Registers this device for push on every hub of the user (`PUT
+     * /v2/push/registration`) and keeps the registration on this device:
+     * hubs that cannot be reached now, hubs added later and hubs this
+     * device signs in to again get it from the sync loop. Call it with
+     * every new platform token; before onboarding it is only stored.
+     * `InvalidInput` for a malformed registration (see `PushRegistration`).
+     */
+    func registerPush(registration: PushRegistration) async throws 
     
     /**
      * Releases the handle claimed with `claim_handle`; `InvalidInput` if
@@ -1367,6 +1392,13 @@ public protocol GimClientProtocol: AnyObject, Sendable {
     func typing(chatId: String, listener: TypingListener) async throws  -> TaskHandle
     
     func unreact(chatId: String, messageId: String, emoji: String) async throws 
+    
+    /**
+     * Removes the push registration from every hub and from this device.
+     * The local copy is removed even if a hub could not be reached (then
+     * the error is returned). `sign_out` does this too.
+     */
+    func unregisterPush() async throws 
     
     /**
      * The devices of any user, from the user's current DeviceList; empty
@@ -1941,12 +1973,65 @@ open func markRead(chatId: String, upToMessageId: String)async throws   {
         )
 }
     
+    /**
+     * Turns a received push into notification content; for a Notification
+     * Service Extension or a background push handler. `payload` is the
+     * push server's payload object as JSON (`push.md` §3). Does one
+     * bounded unit of work (at most 15 s): applies the pushed message
+     * like sync does (the stream does not apply it again), joins a pushed
+     * invite, or reads one page of events. `InvalidInput` only if
+     * `payload` is not a JSON object; when the content cannot be read
+     * (not decryptable, offline, out of time) it returns `Generic` content
+     * with the body "New message" and `should_display` set: show that,
+     * never drop the notification. Show nothing when `should_display` is
+     * false.
+     */
+open func processPush(payload: String)async throws  -> NotificationContent  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_gim_core_fn_method_gimclient_process_push(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(payload)
+                )
+            },
+            pollFunc: ffi_gim_core_rust_future_poll_rust_buffer,
+            completeFunc: ffi_gim_core_rust_future_complete_rust_buffer,
+            freeFunc: ffi_gim_core_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeNotificationContent_lift,
+            errorHandler: FfiConverterTypeGimError_lift
+        )
+}
+    
 open func react(chatId: String, messageId: String, emoji: String)async throws   {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_gim_core_fn_method_gimclient_react(
                         self.uniffiCloneHandle(),FfiConverterString.lower(chatId),FfiConverterString.lower(messageId),FfiConverterString.lower(emoji)
+                )
+            },
+            pollFunc: ffi_gim_core_rust_future_poll_void,
+            completeFunc: ffi_gim_core_rust_future_complete_void,
+            freeFunc: ffi_gim_core_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeGimError_lift
+        )
+}
+    
+    /**
+     * Registers this device for push on every hub of the user (`PUT
+     * /v2/push/registration`) and keeps the registration on this device:
+     * hubs that cannot be reached now, hubs added later and hubs this
+     * device signs in to again get it from the sync loop. Call it with
+     * every new platform token; before onboarding it is only stored.
+     * `InvalidInput` for a malformed registration (see `PushRegistration`).
+     */
+open func registerPush(registration: PushRegistration)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_gim_core_fn_method_gimclient_register_push(
+                        self.uniffiCloneHandle(),FfiConverterTypePushRegistration_lower(registration)
                 )
             },
             pollFunc: ffi_gim_core_rust_future_poll_void,
@@ -2395,6 +2480,27 @@ open func unreact(chatId: String, messageId: String, emoji: String)async throws 
             rustFutureFunc: {
                 uniffi_gim_core_fn_method_gimclient_unreact(
                         self.uniffiCloneHandle(),FfiConverterString.lower(chatId),FfiConverterString.lower(messageId),FfiConverterString.lower(emoji)
+                )
+            },
+            pollFunc: ffi_gim_core_rust_future_poll_void,
+            completeFunc: ffi_gim_core_rust_future_complete_void,
+            freeFunc: ffi_gim_core_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeGimError_lift
+        )
+}
+    
+    /**
+     * Removes the push registration from every hub and from this device.
+     * The local copy is removed even if a hub could not be reached (then
+     * the error is returned). `sign_out` does this too.
+     */
+open func unregisterPush()async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_gim_core_fn_method_gimclient_unregister_push(
+                        self.uniffiCloneHandle()
                 )
             },
             pollFunc: ffi_gim_core_rust_future_poll_void,
@@ -4951,6 +5057,247 @@ public func FfiConverterTypeMessagePreview_lower(_ value: MessagePreview) -> Rus
 }
 
 
+/**
+ * What to show for a push, from `GimClient::process_push`.
+ */
+public struct NotificationContent: Equatable, Hashable {
+    public var chatId: String?
+    /**
+     * Group name, or the other user's name for a direct chat.
+     */
+    public var chatTitle: String?
+    public var senderUserId: String?
+    public var senderDisplayName: String?
+    /**
+     * Text preview: the text, the media caption, "Photo" or
+     * "File: <name>"; "reacted <emoji>" for a reaction; "New message" for
+     * generic content.
+     */
+    public var body: String
+    public var messageId: String?
+    /**
+     * The push's `collapse_id`: use it as the notification identifier, so
+     * the same message pushed by several hubs shows once.
+     */
+    public var collapseId: String?
+    public var kind: NotificationKind
+    /**
+     * `false`: show nothing (own messages, edits, deletes, receipts,
+     * membership changes, already read).
+     */
+    public var shouldDisplay: Bool
+    /**
+     * Unix milliseconds: when the message was sent, or now.
+     */
+    public var timestamp: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(chatId: String?, 
+        /**
+         * Group name, or the other user's name for a direct chat.
+         */chatTitle: String?, senderUserId: String?, senderDisplayName: String?, 
+        /**
+         * Text preview: the text, the media caption, "Photo" or
+         * "File: <name>"; "reacted <emoji>" for a reaction; "New message" for
+         * generic content.
+         */body: String, messageId: String?, 
+        /**
+         * The push's `collapse_id`: use it as the notification identifier, so
+         * the same message pushed by several hubs shows once.
+         */collapseId: String?, kind: NotificationKind, 
+        /**
+         * `false`: show nothing (own messages, edits, deletes, receipts,
+         * membership changes, already read).
+         */shouldDisplay: Bool, 
+        /**
+         * Unix milliseconds: when the message was sent, or now.
+         */timestamp: UInt64) {
+        self.chatId = chatId
+        self.chatTitle = chatTitle
+        self.senderUserId = senderUserId
+        self.senderDisplayName = senderDisplayName
+        self.body = body
+        self.messageId = messageId
+        self.collapseId = collapseId
+        self.kind = kind
+        self.shouldDisplay = shouldDisplay
+        self.timestamp = timestamp
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NotificationContent: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNotificationContent: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NotificationContent {
+        return
+            try NotificationContent(
+                chatId: FfiConverterOptionString.read(from: &buf), 
+                chatTitle: FfiConverterOptionString.read(from: &buf), 
+                senderUserId: FfiConverterOptionString.read(from: &buf), 
+                senderDisplayName: FfiConverterOptionString.read(from: &buf), 
+                body: FfiConverterString.read(from: &buf), 
+                messageId: FfiConverterOptionString.read(from: &buf), 
+                collapseId: FfiConverterOptionString.read(from: &buf), 
+                kind: FfiConverterTypeNotificationKind.read(from: &buf), 
+                shouldDisplay: FfiConverterBool.read(from: &buf), 
+                timestamp: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NotificationContent, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.chatId, into: &buf)
+        FfiConverterOptionString.write(value.chatTitle, into: &buf)
+        FfiConverterOptionString.write(value.senderUserId, into: &buf)
+        FfiConverterOptionString.write(value.senderDisplayName, into: &buf)
+        FfiConverterString.write(value.body, into: &buf)
+        FfiConverterOptionString.write(value.messageId, into: &buf)
+        FfiConverterOptionString.write(value.collapseId, into: &buf)
+        FfiConverterTypeNotificationKind.write(value.kind, into: &buf)
+        FfiConverterBool.write(value.shouldDisplay, into: &buf)
+        FfiConverterUInt64.write(value.timestamp, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNotificationContent_lift(_ buf: RustBuffer) throws -> NotificationContent {
+    return try FfiConverterTypeNotificationContent.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNotificationContent_lower(_ value: NotificationContent) -> RustBuffer {
+    return FfiConverterTypeNotificationContent.lower(value)
+}
+
+
+/**
+ * The device's push registration on its hubs (contract `push.md` §1).
+ * Every field is opaque to the hub and passed to the push server.
+ */
+public struct PushRegistration: Equatable, Hashable {
+    /**
+     * Push platform for the push server (`apns`, `fcm`, `unifiedpush`,
+     * ...): 1-64 characters of `a-z 0-9 . _ -`.
+     */
+    public var provider: String
+    /**
+     * Platform token: 1-4096 bytes without control characters.
+     */
+    public var token: String
+    /**
+     * App identifier (e.g. the bundle ID): 1-255 characters of
+     * `A-Z a-z 0-9 . - _ :`.
+     */
+    public var appId: String?
+    /**
+     * Platform sandbox flag (e.g. the APNs development environment).
+     */
+    public var sandbox: Bool?
+    /**
+     * Web Push `p256dh` key: 1-256 characters of base64url.
+     */
+    public var p256dh: String?
+    /**
+     * Web Push `auth` secret: 1-256 characters of base64url.
+     */
+    public var auth: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Push platform for the push server (`apns`, `fcm`, `unifiedpush`,
+         * ...): 1-64 characters of `a-z 0-9 . _ -`.
+         */provider: String, 
+        /**
+         * Platform token: 1-4096 bytes without control characters.
+         */token: String, 
+        /**
+         * App identifier (e.g. the bundle ID): 1-255 characters of
+         * `A-Z a-z 0-9 . - _ :`.
+         */appId: String?, 
+        /**
+         * Platform sandbox flag (e.g. the APNs development environment).
+         */sandbox: Bool?, 
+        /**
+         * Web Push `p256dh` key: 1-256 characters of base64url.
+         */p256dh: String?, 
+        /**
+         * Web Push `auth` secret: 1-256 characters of base64url.
+         */auth: String?) {
+        self.provider = provider
+        self.token = token
+        self.appId = appId
+        self.sandbox = sandbox
+        self.p256dh = p256dh
+        self.auth = auth
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PushRegistration: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePushRegistration: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PushRegistration {
+        return
+            try PushRegistration(
+                provider: FfiConverterString.read(from: &buf), 
+                token: FfiConverterString.read(from: &buf), 
+                appId: FfiConverterOptionString.read(from: &buf), 
+                sandbox: FfiConverterOptionBool.read(from: &buf), 
+                p256dh: FfiConverterOptionString.read(from: &buf), 
+                auth: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PushRegistration, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.provider, into: &buf)
+        FfiConverterString.write(value.token, into: &buf)
+        FfiConverterOptionString.write(value.appId, into: &buf)
+        FfiConverterOptionBool.write(value.sandbox, into: &buf)
+        FfiConverterOptionString.write(value.p256dh, into: &buf)
+        FfiConverterOptionString.write(value.auth, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePushRegistration_lift(_ buf: RustBuffer) throws -> PushRegistration {
+    return try FfiConverterTypePushRegistration.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePushRegistration_lower(_ value: PushRegistration) -> RustBuffer {
+    return FfiConverterTypePushRegistration.lower(value)
+}
+
+
 public struct ReactionGroup: Equatable, Hashable {
     public var emoji: String
     public var count: UInt32
@@ -6177,6 +6524,111 @@ public func FfiConverterTypeMessageContent_lower(_ value: MessageContent) -> Rus
 
 
 
+/**
+ * What a notification is about.
+ */
+
+public enum NotificationKind: Equatable, Hashable {
+    
+    /**
+     * A text or media message (also the silent edit or delete of one).
+     */
+    case message
+    /**
+     * A reaction to a message.
+     */
+    case reaction
+    /**
+     * The user was added to a chat.
+     */
+    case invite
+    /**
+     * A member was added to or removed from a chat.
+     */
+    case membership
+    /**
+     * Content unknown: show `body` ("New message").
+     */
+    case generic
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NotificationKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNotificationKind: FfiConverterRustBuffer {
+    typealias SwiftType = NotificationKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NotificationKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .message
+        
+        case 2: return .reaction
+        
+        case 3: return .invite
+        
+        case 4: return .membership
+        
+        case 5: return .generic
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NotificationKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .message:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .reaction:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .invite:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .membership:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .generic:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNotificationKind_lift(_ buf: RustBuffer) throws -> NotificationKind {
+    return try FfiConverterTypeNotificationKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNotificationKind_lower(_ value: NotificationKind) -> RustBuffer {
+    return FfiConverterTypeNotificationKind.lower(value)
+}
+
+
+
 
 public enum SendState: Equatable, Hashable {
     
@@ -6559,6 +7011,30 @@ fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterUInt32.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionBool: FfiConverterRustBuffer {
+    typealias SwiftType = Bool?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterBool.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterBool.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -7220,7 +7696,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_gim_core_checksum_method_gimclient_mark_read() != 19929) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_gim_core_checksum_method_gimclient_process_push() != 42819) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_gim_core_checksum_method_gimclient_react() != 11948) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_gim_core_checksum_method_gimclient_register_push() != 42844) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_gimclient_release_handle() != 61692) {
@@ -7290,6 +7772,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_gimclient_unreact() != 48531) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_gim_core_checksum_method_gimclient_unregister_push() != 33447) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_gimclient_user_devices() != 3625) {
