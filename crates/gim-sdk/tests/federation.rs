@@ -12,8 +12,9 @@ use std::time::{Duration, Instant};
 use gim_base::model::{
     GroupMessage, IncomingEvent, MembershipChangeKind, MessageContent, MessageKind, StateChange,
 };
-use gim_base::{MemoryStore, StateReader, StateStore, StoreTxn};
-use gim_common::{now_ms, GroupId};
+use gim_base::{BaseError, MemoryStore, StateReader, StateStore, StoreTxn};
+use gim_common::{now_ms, GroupId, UserId};
+use gim_identity::RootKey;
 use gim_sdk::testing::{FakeTransport, MemorySecretStorage};
 use gim_sdk::transport::{HubEvent, TransportError};
 use gim_sdk::{ClientBuilder, ClientError, SecretStorage, SyncSettings};
@@ -166,6 +167,102 @@ async fn direct_chat_with_an_unreachable_user_is_created_with_the_invite_pending
         gim_base::model::ChatKind::Direct
     );
     assert!(hub_members(&transport, &h).contains(&carol.user_id()));
+}
+
+/// A well-formed user id nobody registered.
+fn unknown_user(seed: u8) -> UserId {
+    RootKey::from_seed(&[seed; 32]).public().user_id()
+}
+
+fn removals(changes: &mut tokio::sync::broadcast::Receiver<StateChange>) -> Vec<UserId> {
+    std::iter::from_fn(|| changes.try_recv().ok())
+        .filter_map(|c| match c {
+            StateChange::MembershipChanged(e) if e.kind == MembershipChangeKind::Removed => {
+                Some(e.user_id)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn direct_chat_with_an_unknown_user_is_not_found() {
+    let transport = FlakyTransport::new();
+    let settings = invite_settings(Duration::from_secs(3600));
+    let alice = device(&transport, "alice", settings).await;
+
+    let created = alice.client.create_direct_chat(&unknown_user(201)).await;
+    assert!(
+        matches!(created, Err(ClientError::Base(BaseError::NotFound(_)))),
+        "{created:?}"
+    );
+    assert!(alice.store.chats().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn unknown_invitees_are_skipped_unless_all_are_unknown() {
+    let transport = FlakyTransport::new();
+    let settings = invite_settings(Duration::from_secs(3600));
+    let alice = device(&transport, "alice", settings).await;
+    let bob = device(&transport, "bob", settings).await;
+    let carol = device(&transport, "carol", settings).await;
+    let dave = device(&transport, "dave", settings).await;
+    transport
+        .faults
+        .unreachable
+        .lock()
+        .unwrap()
+        .insert(carol.user_id());
+    let (nobody, nemo) = (unknown_user(202), unknown_user(203));
+
+    // Only unknown users: nothing is created.
+    let created = alice
+        .client
+        .create_group_chat(Some("ghosts".into()), &[nobody.clone(), nemo.clone()])
+        .await;
+    assert!(
+        matches!(created, Err(ClientError::Base(BaseError::NotFound(_)))),
+        "{created:?}"
+    );
+    assert!(alice.store.chats().unwrap().is_empty());
+
+    // Bob is added, Carol's hub is unavailable, Nobody is reported removed.
+    let mut changes = alice.client.subscribe_changes();
+    let g = alice
+        .client
+        .create_group_chat(
+            Some("crew".into()),
+            &[bob.user_id(), carol.user_id(), nobody.clone()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(alice.store.chats().unwrap().len(), 1);
+    let members = hub_members(&transport, &g);
+    assert!(members.contains(&bob.user_id()));
+    assert!(!members.contains(&nobody));
+    assert_eq!(alice.client.pending_invites(&g), vec![carol.user_id()]);
+    assert_eq!(removals(&mut changes), vec![nobody.clone()]);
+
+    // Adding only unknown users fails; mixed with a known one, that one is added.
+    let added = alice
+        .client
+        .add_members(&g, std::slice::from_ref(&nemo))
+        .await;
+    assert!(
+        matches!(added, Err(ClientError::Base(BaseError::NotFound(_)))),
+        "{added:?}"
+    );
+    assert!(removals(&mut changes).is_empty());
+    alice
+        .client
+        .add_members(&g, &[nemo.clone(), dave.user_id()])
+        .await
+        .unwrap();
+    let members = hub_members(&transport, &g);
+    assert!(members.contains(&dave.user_id()));
+    assert!(!members.contains(&nemo));
+    assert_eq!(removals(&mut changes), vec![nemo]);
+    assert_eq!(alice.client.pending_invites(&g), vec![carol.user_id()]);
 }
 
 #[tokio::test]

@@ -41,7 +41,8 @@ docker run --rm --label ai-agent=true -v "$PWD:$PWD" -w "$PWD" \
 ## Integration tests
 
 `scripts/integration-test.sh` builds gim-hub from `GIM_HUB_SRC` (default
-`/srv/gimhq/im-client/hub`) at `GIM_HUB_REV` (default `9608f34`, exported with
+`/srv/gimhq/im-client/hub`) at `GIM_HUB_REV` (default
+`18afc7bdde8cd643e4f4e21a35758fdb3a0bc155`, exported with
 `git archive`, so local changes in the checkout are ignored) as
 `ai-agent/gim-hub`, runs it on the `traefik` network, waits for `/healthz`,
 prints the hub commit and runs `testing/gim-integration-testing` in a `rust:1`
@@ -104,9 +105,9 @@ either hub, messages both ways, leave by Proposal from `hub-b`, remove);
 concurrent Commits from both hubs (one 409, catch up, recommit); `hub-b`
 down: a post to a `hub-b`-owned group (503) and an invite of a `hub-b` user
 (claim `unavailable`) go through once it is back; `hub-x` refused (`hub-a`
-logs `Hello refused`, nothing reaches either side). `cross_hub_image_fetch`
-fails against gim-hub `9608f34`: blobs stay on the hub they were uploaded to
-(hub-v2 multihoming.md Q6) and the receiver's hub answers 404.
+logs `Hello refused`, nothing reaches either side); `cross_hub_image_fetch`:
+the receiver's hub fetches an image uploaded on the sender's hub from its
+origin (hub-v2 federation.md §5.6, gim-hub H5).
 
 `GIM_FEDERATION=1 testing/gim-cli-interop.sh` runs the cross-hub CLI variant
 (`cli_to_cli_interop_across_hubs`): profiles on `hub-a` and `hub-b`, naming

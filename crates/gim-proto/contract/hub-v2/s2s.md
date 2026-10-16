@@ -46,6 +46,10 @@ Design: [`federation.md`](federation.md) §3.
 - `client_id`: client-chosen idempotency key, unique per sender device.
 - `message_id`: globally unique id assigned by the owning hub to every sequenced message and
   Welcome.
+- `blob_id`: `<origin hub_id>/b_<base64url, no padding, of 16 random bytes>`. The origin is the
+  hub the blob was uploaded to and the only hub that serves it over S2S. Legacy ids `b_<...>`
+  (without `/`, uploaded before origin-qualified ids) mean "the hub the client talks to" and are
+  never fetched over S2S.
 - Identity objects (`DeviceList`, `UserHostingRecord`, ...) appear only as opaque CBOR `bytes`.
 
 ## Envelope
@@ -58,9 +62,10 @@ Error       { ErrorCode code; string message; optional uint64 current_epoch; str
 
 - `request_id` is echoed back for correlation and logging; it is not an idempotency key.
 - A response sets exactly one of `result` (same field number as the request op) or `error`.
-- Field numbers 18-29 of both oneofs hold multi-homing (M2c) operations (`NotifyHostingRecord` =
-  18, `SeedReplica` = 19, `CopyPendingWelcomes` = 20; 21-29 reserved); 30-39 are reserved for push
-  (P) operations; 40-49 hold federation (M2b) operations (`Hello` = 40, `NotifyDeviceList` = 41).
+- Field numbers 18-20 of both oneofs hold multi-homing (M2c) operations (`NotifyHostingRecord` =
+  18, `SeedReplica` = 19, `CopyPendingWelcomes` = 20); 21-29 blob operations (`FetchBlob` = 21;
+  22-29 reserved); 30-39 are reserved for push (P) operations; 40-49 hold federation (M2b)
+  operations (`Hello` = 40, `NotifyDeviceList` = 41).
 - `Error.current_epoch` is set with `STALE_EPOCH` / `CONFLICT`: the group's current epoch at the
   owning hub. `Error.client_code` is the client API error code a member hub should surface when the
   owning hub rejected on behalf of group policy or validation (e.g. `not_member`, `forbidden`,
@@ -114,6 +119,7 @@ Every operation except `Hello` first requires a binding and the policy's admissi
 | `NotifyHostingRecord` | a user's hub (under the new or the superseded record) -> co-hosts, removed hubs, owners and member hubs sharing groups with the user | `user_id, hosting_record_cbor` -> `{}` | Caller listed in the sent record or in the stored record it supersedes. Fails with `UNAUTHORIZED`, or `INVALID` when the record does not verify. The answer is `{}` for an applied, stale or identical record. |
 | `SeedReplica` | owning hub -> a hub newly listed for a member | `gid, user_id, group` -> `{}` | Caller owns `gid`; responder hosts `user_id`; `user_id` is in `group.members`. Fails with `UNAUTHORIZED`, `NOT_FOUND`, `INVALID`. |
 | `CopyPendingWelcomes` | co-host -> newly listed hub | `user_id, welcomes: [PendingWelcome{device_id, gid, message_id, payload_json, created_at}]` -> `{}` | Caller listed for `user_id`; responder hosts `user_id`. Fails with `UNAUTHORIZED`, `NOT_FOUND`. |
+| `FetchBlob` | any hub -> the blob's origin hub | `blob_id, offset, max_len` -> `size, offset, data` | `blob_id` names the responder as origin (`UNAUTHORIZED` otherwise; `INVALID` for a legacy or malformed id); the blob was uploaded on the responder, never a copy it fetched (`NOT_FOUND` if unknown); the caller hosts a user sharing a group with the uploader, owns such a group, or is a co-host of the uploader (`UNAUTHORIZED`). Rate limited per caller. |
 
 Notes:
 
@@ -160,13 +166,21 @@ Notes:
 - The multi-homing operations (`NotifyHostingRecord`, `SeedReplica`, `CopyPendingWelcomes`) are
   specified in [`multihoming.md`](multihoming.md) §4.2-§4.4. All three are served with
   federation.
+- `FetchBlob` returns bytes `[offset, offset + len(data))` of the blob and its total `size`;
+  `max_len = 0` means the responder's chunk size, and the responder caps `max_len` at 4 MiB.
+  `data` is empty only when `offset = size`; `offset > size` fails with `INVALID`. The requester
+  loops with `offset += len(data)` until it holds `size` bytes, checks that every chunk reports
+  the same `size` and echoes its `offset`, and refuses a blob larger than its own
+  `GIM_HUB_MAX_BLOB_BYTES`. It writes into a temp file and renames it only when complete, so a
+  partial fetch is never served; an interrupted fetch (failure, restart) starts over. Specified
+  in [`federation.md`](federation.md) §5.6.
 
 ## Error codes
 
 | Code | Meaning | Caller action |
 |---|---|---|
 | `UNSPECIFIED` | Default value; never sent intentionally. | Treat as `INTERNAL`. |
-| `UNAUTHORIZED` | `Hello` refused (invalid certificate or hub not allowed by federation policy); caller's `hub_id` not listed in the acting user's current hosting record, or not the owning hub for `Deliver` / `DeliverWelcome`; or a Commit rejected by group policy (then `client_code` says why, e.g. `not_member`). | Do not retry; refresh the hosting record if it may be stale. |
+| `UNAUTHORIZED` | `Hello` refused (invalid certificate or hub not allowed by federation policy); caller's `hub_id` not listed in the acting user's current hosting record, or not the owning hub for `Deliver` / `DeliverWelcome`; a Commit rejected by group policy (then `client_code` says why, e.g. `not_member`); or a `FetchBlob` for a blob of another origin or by a hub without a relationship to the uploader. | Do not retry; refresh the hosting record if it may be stale. |
 | `NOT_FOUND` | Unknown user, device, group, record, or no KeyPackage available. | Do not retry the same request. |
 | `STALE_EPOCH` | An application message or Proposal for an epoch other than the group's current epoch; `current_epoch` is set. | Client fetches the latest state (via `FetchLog`) and resubmits. |
 | `CONFLICT` | A Commit whose epoch already has a sequenced Commit; `current_epoch` is set. | Client fetches the latest state and retries on top of it. |
@@ -184,6 +198,8 @@ Notes:
   length-delimited encoding); request and response frames are at most 8 MiB.
 - `Deliver`: at most 256 messages and 4 MiB encoded per request.
 - `FetchLog`: the owning hub caps `limit` at 256.
+- `FetchBlob`: at most 4 MiB of `data` per response; `GIM_HUB_FETCH_BLOB_PER_MINUTE` requests
+  (default 600) per caller hub and minute.
 - DHT values: at most 8192 bytes.
 
 ## Idempotency
@@ -201,7 +217,8 @@ hub of a multi-homed user.
 - `SeedReplica` and `CopyPendingWelcomes` are idempotent (receiver ignores a seed for a live
   replica and dedups Welcomes by `message_id`); `NotifyHostingRecord` follows the record seq rules.
 - `ClaimKeyPackage` is not idempotent: each successful call consumes one-time KeyPackages.
-- `FetchLog`, `GetDeviceList`, `GetHostingRecord` are read-only.
+- `FetchLog`, `GetDeviceList`, `GetHostingRecord` and `FetchBlob` are read-only. Blobs are
+  immutable, so chunks of one blob fetched in separate requests always fit together.
 
 ## Ordering
 
@@ -217,9 +234,9 @@ hub of a multi-homed user.
 
 ## Extensibility
 
-- Request/response oneof fields 18-29 are multi-homing (M2c) operations (`NotifyHostingRecord`,
-  `SeedReplica`, `CopyPendingWelcomes` = 18-20; 21-29 reserved); 30-39 for push (P); 40-49 are
-  federation (M2b) operations.
+- Request/response oneof fields 18-20 are multi-homing (M2c) operations (`NotifyHostingRecord`,
+  `SeedReplica`, `CopyPendingWelcomes`); 21-29 blob operations (`FetchBlob` = 21; 22-29
+  reserved); 30-39 for push (P); 40-49 are federation (M2b) operations.
 - Per-message reserved ranges (`SubmitCommitRequest` 9-15, `SubmitMessageRequest` 6-15,
   `DeliverWelcomeRequest` 8-15, `SequencedMessage` 12-19) hold future delivery-strategy hints,
   push collapse ids and priorities.
