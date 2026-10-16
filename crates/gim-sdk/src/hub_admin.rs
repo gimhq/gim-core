@@ -275,7 +275,7 @@ impl<S: StateStore + 'static> Client<S> {
         let listed: Option<Vec<String>> =
             record.map(|r| r.hubs().iter().map(HostingEntry::hub_id).collect());
         let mut hubs: Vec<HubRecord> = self
-            .run(|store, _| Ok(store.hubs()?))
+            .read(|store, _| Ok(store.hubs()?))
             .await?
             .into_iter()
             .filter(|h| h.state != HubState::Removed)
