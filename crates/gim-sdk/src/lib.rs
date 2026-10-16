@@ -17,6 +17,7 @@ mod error;
 mod history;
 mod hosting;
 pub mod http;
+mod hub_admin;
 mod hubs;
 mod identity;
 mod invites;

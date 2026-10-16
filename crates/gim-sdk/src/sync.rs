@@ -35,7 +35,7 @@ use tokio::time::Instant;
 
 use crate::client::Session;
 use crate::hubs::{hub_urls_changed, Listed};
-use crate::routing::HubTarget;
+use crate::routing::{hub_unreachable, HubTarget};
 use crate::stream::{Backoff, ConnectionState};
 use crate::transport::{
     AccessToken, EventBatch, GroupInfo, HubEvent, Transport, TransportError, TransportResult,
@@ -136,7 +136,25 @@ struct HubLoops {
     running: HashMap<String, (String, AbortHandle)>,
 }
 
+/// The best of the loops' states: `Connected` over `Syncing` over
+/// `Connecting` over `Offline`.
+fn best_state(states: &HashMap<Option<String>, ConnectionState>) -> ConnectionState {
+    let rank = |state: &ConnectionState| match state {
+        ConnectionState::Offline => 0,
+        ConnectionState::Connecting => 1,
+        ConnectionState::Syncing => 2,
+        ConnectionState::Connected => 3,
+    };
+    states
+        .values()
+        .copied()
+        .max_by_key(rank)
+        .unwrap_or(ConnectionState::Offline)
+}
+
 impl<S: StateStore + 'static> Client<S> {
+    /// The state of the sync loop: the best over the listed hubs it
+    /// follows, so `Connected` while at least one of them is reachable.
     pub fn connection_state(&self) -> ConnectionState {
         *self
             .inner
@@ -169,6 +187,7 @@ impl<S: StateStore + 'static> Client<S> {
         if task.as_ref().is_some_and(|t| !t.is_finished()) {
             return Ok(());
         }
+        self.link_states().clear();
         let client = self.clone();
         *task = Some(tokio::spawn(async move { client.sync_loop(session).await }));
         Ok(())
@@ -206,6 +225,7 @@ impl<S: StateStore + 'static> Client<S> {
             }
             None => Ok(()),
         };
+        self.link_states().clear();
         self.set_connection_state(ConnectionState::Offline);
         result
     }
@@ -236,6 +256,37 @@ impl<S: StateStore + 'static> Client<S> {
     async fn sync_hub_once(&self, session: &Session, link: &HubLink) -> Result<Vec<StateChange>> {
         let fetched = self.fetch(link, Duration::ZERO).await?;
         self.apply_fetched(session, link, fetched).await
+    }
+
+    /// Reads the events of the listed hub `hub_id` (not the home hub) up
+    /// to its head, then joins and acknowledges the Welcomes pending there:
+    /// the drain check before the hub is removed. `false` if this device
+    /// cannot reach the hub (not verified in this run, network, 5xx).
+    pub(crate) async fn drain_hub(&self, session: &Session, hub_id: &str) -> Result<bool> {
+        let Some(link) = self.hub_links().into_iter().find(|l| l.name() == hub_id) else {
+            return Ok(false);
+        };
+        let drained = async {
+            loop {
+                let fetched = self.fetch(&link, Duration::ZERO).await?;
+                let caught_up = matches!(&fetched, Fetched::Batch(b) if b.events.is_empty());
+                self.apply_fetched(session, &link, fetched).await?;
+                if caught_up {
+                    break;
+                }
+            }
+            let _guard = self.inner.group_lock.lock().await;
+            self.join_pending_welcomes(session, &link).await
+        }
+        .await;
+        match drained {
+            Ok(_) => Ok(true),
+            Err(ClientError::Transport(err)) if hub_unreachable(&err) => {
+                tracing::warn!(%hub_id, error = %err, "cannot drain an unreachable hub");
+                Ok(false)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// The home hub: the client's own transport.
@@ -313,12 +364,16 @@ impl<S: StateStore + 'static> Client<S> {
     /// hubs, the hosting record renewal and the pending invite retries
     /// alongside.
     async fn sync_loop(&self, session: Session) -> Result<()> {
-        tokio::select! {
+        let result = tokio::select! {
             result = self.follow_events(session.clone()) => result,
             never = self.maintain_hub_loops(session) => match never {},
             never = self.maintain_hosting_record() => match never {},
             never = self.maintain_pending_invites() => match never {},
-        }
+        };
+        // The other hubs' loops stopped with it.
+        self.link_states().clear();
+        self.set_connection_state(ConnectionState::Offline);
+        result
     }
 
     /// Keeps one loop per listed hub with a verified URL other than the
@@ -337,6 +392,7 @@ impl<S: StateStore + 'static> Client<S> {
                 }
                 keep
             });
+            self.forget_stopped_links(&loops);
             for (hub_id, url, transport) in hubs {
                 if loops.running.contains_key(&hub_id) {
                     continue;
@@ -361,9 +417,8 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// The loop of a listed hub other than the home hub: as the home loop,
-    /// but it reports no connection state and never stops by itself; any
-    /// failure (also a hub refusing the session) is retried with backoff
-    /// until the hub leaves the registry.
+    /// but it never stops by itself; any failure (also a hub refusing the
+    /// session) is retried with backoff until the hub leaves the registry.
     async fn follow_hub(&self, session: Session, link: HubLink) {
         let settings = self.inner.sync_settings;
         let mut backoff = Backoff::new(settings.backoff_min, settings.backoff_max);
@@ -376,6 +431,7 @@ impl<S: StateStore + 'static> Client<S> {
                 continue;
             };
             stream_retry_at = None;
+            self.report(&link, ConnectionState::Offline);
             let delay = backoff.next_delay();
             tracing::debug!(hub_id = link.name(), error = %err, ?delay, "hub sync failed; reconnecting");
             tokio::time::sleep(delay).await;
@@ -388,14 +444,14 @@ impl<S: StateStore + 'static> Client<S> {
         let mut stream_retry_at = None;
         let home = self.home_link();
         loop {
-            self.set_connection_state(ConnectionState::Connecting);
+            self.report(&home, ConnectionState::Connecting);
             let Err(err) = self
                 .follow(&session, &home, &mut backoff, &mut stream_retry_at)
                 .await
             else {
                 continue;
             };
-            self.set_connection_state(ConnectionState::Offline);
+            self.report(&home, ConnectionState::Offline);
             if let ClientError::DeviceNotActive(_) = err {
                 tracing::warn!(error = %err, "sync stopped");
                 return Err(err);
@@ -416,12 +472,36 @@ impl<S: StateStore + 'static> Client<S> {
         }
     }
 
-    /// The connection state of the home hub's loop; the other hubs' loops
-    /// report none.
+    /// Records the state of the loop of `link` and reports the best state
+    /// of all loops: connected while at least one listed hub is reachable.
     fn report(&self, link: &HubLink, state: ConnectionState) {
-        if link.is_home() {
-            self.set_connection_state(state);
-        }
+        let best = {
+            let mut states = self.link_states();
+            states.insert(link.hub_id.clone(), state);
+            best_state(&states)
+        };
+        self.set_connection_state(best);
+    }
+
+    /// Drops the states of the other hubs' loops that no longer run.
+    fn forget_stopped_links(&self, loops: &HubLoops) {
+        let best = {
+            let mut states = self.link_states();
+            states.retain(|hub_id, _| {
+                hub_id
+                    .as_ref()
+                    .is_none_or(|hub_id| loops.running.contains_key(hub_id))
+            });
+            best_state(&states)
+        };
+        self.set_connection_state(best);
+    }
+
+    fn link_states(&self) -> std::sync::MutexGuard<'_, HashMap<Option<String>, ConnectionState>> {
+        self.inner
+            .link_states
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// One connection to the hub of `link`: catches up over HTTP, then
@@ -574,6 +654,7 @@ impl<S: StateStore + 'static> Client<S> {
         if self.inner.hosting_updated.swap(false, Ordering::SeqCst) {
             self.refresh_hubs_logged(Listed::Fetch).await;
         } else if hub_urls_changed(&urls, &self.hub_urls().await?) {
+            self.notify_hub_changes();
             self.refresh_hubs_logged(Listed::Stored).await;
         }
         self.wake_outbox();

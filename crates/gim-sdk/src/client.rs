@@ -68,6 +68,8 @@ const DATABASE_KEY_LEN: usize = 32;
 const CHANGES_CAPACITY: usize = 1024;
 /// Buffered [`ConnectionState`]s per subscriber before it lags.
 const CONNECTION_CAPACITY: usize = 64;
+/// Buffered hub registry notifications per subscriber before it lags.
+const HUB_CHANGES_CAPACITY: usize = 16;
 /// Delay before re-posting a commit after an unknown outcome, times the
 /// attempt number.
 const COMMIT_REPOST_DELAY: Duration = Duration::from_millis(100);
@@ -257,6 +259,9 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
                 persist_lock: Default::default(),
                 hosting_updated: AtomicBool::new(false),
                 hubs_changed: Notify::new(),
+                hub_admin_lock: Mutex::new(()),
+                hub_changes: broadcast::channel(HUB_CHANGES_CAPACITY).0,
+                link_states: Default::default(),
             }),
         })
     }
@@ -370,6 +375,13 @@ pub(crate) struct Inner<S> {
     /// The hub registry changed: the sync loop starts and stops the loops
     /// of the other hubs.
     pub(crate) hubs_changed: Notify,
+    /// Serializes adding and removing hubs and changing the primary hub.
+    pub(crate) hub_admin_lock: Mutex<()>,
+    /// Sent whenever the hub registry may have changed, for the UI.
+    pub(crate) hub_changes: broadcast::Sender<()>,
+    /// The connection state of each sync loop (home hub: `None`); the
+    /// reported state is the best of them.
+    pub(crate) link_states: std::sync::Mutex<HashMap<Option<String>, ConnectionState>>,
 }
 
 #[derive(Clone)]
@@ -920,9 +932,9 @@ impl<S: StateStore + 'static> Client<S> {
         let mut failed = None;
         for user_id in missing {
             let looked_up = self
-                .authed(|t| {
+                .read_routed(|transport, t| {
                     let user_id = user_id.clone();
-                    async move { self.inner.transport.user(Some(&t), &user_id).await }
+                    async move { transport.user(Some(&t), &user_id).await }
                 })
                 .await;
             match looked_up {

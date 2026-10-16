@@ -5,10 +5,16 @@
 //! its own disjoint KeyPackages; an Add is claimed and committed through
 //! one hub.
 //!
-//! Hub A owns the groups. Hub B is a co-host: it keeps its own users,
-//! sessions and KeyPackages, claims the packages of users it does not host
-//! from A, enforces the claim ledger for Adds (`kp_not_claimed`) and
-//! forwards group requests to A, which dedups them as an owner does.
+//! Hub management (§4.1, §7.1): adding a hub, removing one (with the
+//! warning for the groups it owns and the drain check), changing the
+//! primary hub, the hub map after a restore, and reads that fall back to
+//! the other hub while the home hub is down.
+//!
+//! Hub A owns the groups (hub B with [`Options::owner_b`]). Hub B is a
+//! co-host: it keeps its own users, sessions and KeyPackages, claims the
+//! packages of users it does not host from the owner, enforces the claim
+//! ledger for Adds (`kp_not_claimed`) and forwards group requests to the
+//! owner, which dedups them as an owner does.
 
 mod common;
 
@@ -24,7 +30,7 @@ use common::{server_handshakes, server_messages, Device, FlakyTransport};
 use gim_base::model::{ChatKind, GroupMessage, KeyPackageRecord, SendState, StateChange};
 use gim_base::{MemoryStore, StateReader};
 use gim_common::{now_ms, ClientId, DeviceRef, GroupId, UserId};
-use gim_identity::{HostingEntry, RootKey, UserHostingRecord};
+use gim_identity::{HostingEntry, RootKey, SignedHostingRecord, UserHostingRecord};
 use gim_sdk::testing::{FakeTransport, MemorySecretStorage};
 use gim_sdk::transport::{
     AccessToken, Challenge, ClaimedKeyPackage, CommitAccepted, EventBatch, GroupInfo,
@@ -33,8 +39,8 @@ use gim_sdk::transport::{
     UserRecord,
 };
 use gim_sdk::{
-    Client, ClientBuilder, ClientError, HubConnector, SecretStorage, HOSTING_RECORD_LIFETIME,
-    KEY_PACKAGE_BATCH, ROOT_KEY_SECRET_KEY,
+    Client, ClientBuilder, ClientError, HubConnector, HubStatus, RecoveryCode, SecretStorage,
+    HOSTING_RECORD_LIFETIME, KEY_PACKAGE_BATCH, ROOT_KEY_SECRET_KEY,
 };
 use tempfile::TempDir;
 
@@ -48,6 +54,9 @@ enum Call {
     Post(ClientId, Vec<u8>),
     Claim(Vec<UserId>),
     Upload(Vec<Vec<u8>>, bool),
+    Fetch,
+    /// A DeviceList (`"device_list"`) or directory (`"user"`) read.
+    Read(&'static str, UserId),
 }
 
 /// What a hub does with the next request of a kind.
@@ -85,6 +94,8 @@ struct Hub {
     own: FakeTransport,
     owner: FakeTransport,
     state: Arc<HubState>,
+    /// The client API base URL the transport reports.
+    url: Option<String>,
 }
 
 impl Hub {
@@ -93,7 +104,25 @@ impl Hub {
             own: own.clone(),
             owner: owner.clone(),
             state: Arc::default(),
+            url: None,
         }
+    }
+
+    fn fetches(&self) -> usize {
+        self.calls()
+            .iter()
+            .filter(|c| matches!(c, Call::Fetch))
+            .count()
+    }
+
+    fn reads(&self) -> Vec<(&'static str, UserId)> {
+        self.calls()
+            .into_iter()
+            .filter_map(|c| match c {
+                Call::Read(what, user_id) => Some((what, user_id)),
+                _ => None,
+            })
+            .collect()
     }
 
     fn calls(&self) -> Vec<Call> {
@@ -181,13 +210,22 @@ impl Hub {
 
 #[async_trait]
 impl Transport for Hub {
+    fn base_url(&self) -> Option<String> {
+        self.url.clone()
+    }
+
     async fn hub_info(&self) -> TransportResult<HubIdentity> {
         self.up()?;
         self.own.hub_info().await
     }
 
+    /// The owning hub learns the list too (federation), so that this
+    /// hub's users can sign in there.
     async fn put_device_list(&self, u: &UserId, list: Vec<u8>) -> TransportResult<()> {
         self.up()?;
+        if self.own.service().hub_id() != self.owner.service().hub_id() {
+            self.owner.put_device_list(u, list.clone()).await?;
+        }
         self.own.put_device_list(u, list).await
     }
 
@@ -244,6 +282,7 @@ impl Transport for Hub {
         u: &UserId,
     ) -> TransportResult<Option<Vec<u8>>> {
         self.up()?;
+        self.log(Call::Read("device_list", u.clone()));
         self.owner.device_list(t, u).await
     }
 
@@ -253,6 +292,7 @@ impl Transport for Hub {
         u: &UserId,
     ) -> TransportResult<Option<UserRecord>> {
         self.up()?;
+        self.log(Call::Read("user", u.clone()));
         self.owner.user(t, u).await
     }
 
@@ -425,6 +465,7 @@ impl Transport for Hub {
         wait: Duration,
     ) -> TransportResult<EventBatch> {
         self.up()?;
+        self.log(Call::Fetch);
         // A co-host's own events (`keypackages.low`); the owner's for A.
         self.own.fetch_events(t, cursor, wait).await
     }
@@ -498,26 +539,49 @@ impl Transport for Hub {
     }
 }
 
+/// How [`Setup`] is built.
+#[derive(Debug, Clone, Copy, Default)]
+struct Options {
+    /// Hub B owns the groups (and bob is on B).
+    owner_b: bool,
+    /// Alice's record lists hub A only.
+    unlisted_b: bool,
+}
+
 /// Alice, listing hub A (primary, her home hub) and hub B, with bob (and
-/// carol) on A only.
+/// carol) on the owning hub only.
 struct Setup {
     fake_a: FakeTransport,
     fake_b: FakeTransport,
     /// Alice's view of each hub.
     hub_a: Hub,
     hub_b: Hub,
+    connector: HubConnector,
     alice: Client<MemoryStore>,
     store: Arc<MemoryStore>,
+    secrets: Arc<MemorySecretStorage>,
+    recovery_code: RecoveryCode,
     bob: Device,
+    _data_dir: TempDir,
+}
+
+/// Another device of alice's user.
+struct OwnDevice {
+    client: Client<MemoryStore>,
     _data_dir: TempDir,
 }
 
 impl Setup {
     async fn new() -> Self {
+        Self::build(Options::default()).await
+    }
+
+    async fn build(options: Options) -> Self {
         let fake_a = FakeTransport::new();
         let fake_b = FakeTransport::with_hub_seed(SEED_B);
-        let hub_a = Hub::new(&fake_a, &fake_a);
-        let hub_b = Hub::new(&fake_b, &fake_a);
+        let owner = if options.owner_b { &fake_b } else { &fake_a };
+        let hub_a = Hub::new(&fake_a, owner);
+        let hub_b = Hub::new(&fake_b, owner);
         let connected = hub_b.clone();
         let connector: HubConnector = Arc::new(move |url: &str| {
             assert_eq!(url, HUB_B_URL);
@@ -532,42 +596,113 @@ impl Setup {
             secrets.clone() as Arc<dyn SecretStorage>,
         )
         .data_dir(data_dir.path())
-        .hub_connector(connector)
+        .hub_connector(connector.clone())
         .build()
         .unwrap();
-        alice.register("alice", "Alice").await.unwrap();
-        let user_id = alice.session().unwrap().device.user_id;
-        // The add-hub procedure: the DeviceList and a record listing B.
-        let list = fake_a.service().device_list(&user_id).unwrap();
-        fake_b.put_device_list(&user_id, list).await.unwrap();
-        let seed = secrets.get(ROOT_KEY_SECRET_KEY).unwrap().unwrap();
-        let root = RootKey::from_seed(&seed.try_into().unwrap());
-        let entries = [(&fake_a, 0), (&fake_b, 1)]
-            .iter()
-            .map(|(hub, priority)| HostingEntry::sign(hub.hub_root_key(), &user_id, *priority))
-            .collect();
-        let expires_at = now_ms() + HOSTING_RECORD_LIFETIME.as_millis() as u64;
-        let record = UserHostingRecord::new(root.public(), 2, expires_at, entries)
-            .and_then(|record| record.sign(&root))
-            .unwrap()
-            .to_bytes();
-        fake_a.set_hosting_record(&user_id, Some(record));
-        alice.refresh_hubs().await.unwrap();
-        alice
-            .set_hub_url(fake_b.service().hub_id(), HUB_B_URL)
-            .await
-            .unwrap();
-        let bob = Device::register(&FlakyTransport::over(fake_a.clone()), "bob").await;
-        Self {
+        let recovery_code = alice.register("alice", "Alice").await.unwrap();
+        let bob = Device::register(&FlakyTransport::over(owner.clone()), "bob").await;
+        let s = Self {
             fake_a,
             fake_b,
             hub_a,
             hub_b,
+            connector,
             alice,
             store,
+            secrets,
+            recovery_code,
             bob,
             _data_dir: data_dir,
+        };
+        if !options.unlisted_b {
+            // The add-hub procedure: the DeviceList and a record listing B.
+            let user_id = s.user_id();
+            let list = s.fake_a.service().device_list(&user_id).unwrap();
+            s.fake_b.put_device_list(&user_id, list).await.unwrap();
+            let record = s.record(2, &[(&s.fake_a, 0), (&s.fake_b, 1)]);
+            s.fake_a.set_hosting_record(&user_id, Some(record));
+            s.alice.refresh_hubs().await.unwrap();
+            s.alice
+                .set_hub_url(s.fake_b.service().hub_id(), HUB_B_URL)
+                .await
+                .unwrap();
         }
+        s
+    }
+
+    fn user_id(&self) -> UserId {
+        self.device().user_id
+    }
+
+    /// A record of alice listing `hubs` (hub, priority).
+    fn record(&self, seq: u64, hubs: &[(&FakeTransport, u8)]) -> Vec<u8> {
+        let seed = self.secrets.get(ROOT_KEY_SECRET_KEY).unwrap().unwrap();
+        let root = RootKey::from_seed(&seed.try_into().unwrap());
+        let entries = hubs
+            .iter()
+            .map(|(hub, priority)| {
+                HostingEntry::sign(hub.hub_root_key(), &self.user_id(), *priority)
+            })
+            .collect();
+        let expires_at = now_ms() + HOSTING_RECORD_LIFETIME.as_millis() as u64;
+        UserHostingRecord::new(root.public(), seq, expires_at, entries)
+            .and_then(|record| record.sign(&root))
+            .unwrap()
+            .to_bytes()
+    }
+
+    /// The record `fake` stores for alice: its seq and its hubs (hub id,
+    /// priority) in canonical order.
+    fn stored_record(&self, fake: &FakeTransport) -> (u64, Vec<(String, u8)>) {
+        let bytes = fake.stored_hosting_record(&self.user_id()).unwrap();
+        let record = SignedHostingRecord::from_bytes(&bytes)
+            .and_then(|signed| signed.verify(now_ms()))
+            .unwrap();
+        let hubs = record
+            .hubs()
+            .iter()
+            .map(|e| (e.hub_id(), e.priority()))
+            .collect();
+        (record.seq(), hubs)
+    }
+
+    /// A client of a new device over `transport`, with alice's connector.
+    fn client(&self, transport: Hub) -> OwnDevice {
+        let data_dir = tempfile::tempdir().unwrap();
+        let client = ClientBuilder::new(
+            Arc::new(MemoryStore::new()),
+            Arc::new(transport),
+            Arc::new(MemorySecretStorage::new()) as Arc<dyn SecretStorage>,
+        )
+        .data_dir(data_dir.path())
+        .hub_connector(self.connector.clone())
+        .build()
+        .unwrap();
+        OwnDevice {
+            client,
+            _data_dir: data_dir,
+        }
+    }
+
+    /// A tablet linked to alice over hub A, in the self group.
+    async fn link_tablet(&self) -> OwnDevice {
+        let tablet = self.client(self.hub_a.clone());
+        let session = tablet.client.start_link(vec!["hub-a.test".into()]).unwrap();
+        let approval = self.alice.approve_link(&session.qr_string).await.unwrap();
+        let linked = tablet.client.wait_link(&session).await.unwrap();
+        assert_eq!(linked.sas, approval.sas);
+        tablet.client.confirm_link(true).await.unwrap();
+        self.alice.confirm_approval(&approval, true).await.unwrap();
+        tablet.client.sync_once().await.unwrap();
+        tablet
+    }
+
+    fn status(&self, hubs: &[HubStatus], fake: &FakeTransport) -> HubStatus {
+        let hub_id = Self::hub_id(fake);
+        hubs.iter()
+            .find(|h| h.hub.hub_id == hub_id)
+            .unwrap_or_else(|| panic!("{hub_id} not in {hubs:?}"))
+            .clone()
     }
 
     fn device(&self) -> DeviceRef {
@@ -911,5 +1046,304 @@ async fn kp_not_claimed_claims_again_and_rebuilds_the_commit() {
     let on_a = &s.hub_a.commits()[commits_a..];
     assert_eq!(on_a.len(), 2);
     assert_ne!(on_a[0], on_a[1]);
+    assert!(s.members(&g).contains(&carol.device()));
+}
+
+/// Polls `done` until it holds, for up to 10 s.
+async fn wait_for(what: &str, done: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !done() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn texts(messages: &[gim_base::model::Message]) -> Vec<String> {
+    messages
+        .iter()
+        .filter_map(|m| match &m.content {
+            gim_base::model::MessageContent::Text { body } => Some(body.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn added_hub_is_listed_signed_in_followed_and_shared_with_the_own_devices() {
+    let s = Setup::build(Options {
+        unlisted_b: true,
+        ..Options::default()
+    })
+    .await;
+    let tablet = s.link_tablet().await;
+    let (a, b) = (Setup::hub_id(&s.fake_a), Setup::hub_id(&s.fake_b));
+    let device = s.device();
+    assert_eq!(s.alice.hubs().await.unwrap().len(), 1);
+
+    let added = s.alice.add_hub(HUB_B_URL).await.unwrap();
+    assert_eq!(added.hub.hub_id, b);
+    assert_eq!(added.hub.url.as_deref(), Some(HUB_B_URL));
+    assert_eq!(added.hub.state, gim_base::model::HubState::Verified);
+    assert_eq!(added.hub.priority, 1);
+    assert!(added.signed_in && !added.home);
+    // B co-signed its entry; both hubs store the new record.
+    let (seq, hubs) = s.stored_record(&s.fake_a);
+    assert_eq!(hubs, [(a.clone(), 0), (b.clone(), 1)]);
+    assert_eq!(s.stored_record(&s.fake_b), (seq, hubs));
+    // This device's own KeyPackages and the recovery backup went to B.
+    let batch = KEY_PACKAGE_BATCH as usize;
+    assert_eq!(s.fake_b.service().key_package_count(&device), batch);
+    assert!(s.fake_b.service().has_last_resort_key_package(&device));
+    assert_eq!(s.ledger(&s.fake_b).len(), batch + 1);
+    let backup = s.fake_a.recovery_backup(&device.user_id).await.unwrap();
+    assert!(backup.is_some());
+    assert_eq!(
+        s.fake_b.recovery_backup(&device.user_id).await.unwrap(),
+        backup
+    );
+
+    // Adding it again changes nothing.
+    let uploads = s.hub_b.uploads().len();
+    assert_eq!(s.alice.add_hub(HUB_B_URL).await.unwrap(), added);
+    assert_eq!(s.stored_record(&s.fake_a).0, seq);
+    assert_eq!(s.hub_b.uploads().len(), uploads);
+
+    // The sync loop follows B.
+    let fetches = s.hub_b.fetches();
+    s.alice.start_sync().unwrap();
+    wait_for("a fetch on B", || s.hub_b.fetches() > fetches).await;
+    s.alice.stop_sync().unwrap();
+
+    // The tablet learns B's URL through the self group but does not
+    // contact it (interim gate).
+    tablet.client.sync_once().await.unwrap();
+    let hubs = tablet.client.hubs().await.unwrap();
+    let on_tablet = s.status(&hubs, &s.fake_b);
+    assert_eq!(on_tablet.hub.url.as_deref(), Some(HUB_B_URL));
+    assert!(on_tablet.hub.url_shared);
+    assert_eq!(on_tablet.hub.state, gim_base::model::HubState::Unverified);
+    assert!(!on_tablet.signed_in);
+    let tablet_device = tablet.client.session().unwrap().device;
+    assert_eq!(s.fake_b.service().key_package_count(&tablet_device), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn removing_a_hub_owning_groups_needs_a_confirmation_then_it_is_no_longer_used() {
+    let s = Setup::build(Options {
+        owner_b: true,
+        ..Options::default()
+    })
+    .await;
+    let (a, b) = (Setup::hub_id(&s.fake_a), Setup::hub_id(&s.fake_b));
+    let g = s.direct_chat().await;
+    assert!(g.as_str().starts_with(&format!("{b}/")));
+    let owned = {
+        let mut groups: Vec<GroupId> = s
+            .store
+            .chats()
+            .unwrap()
+            .into_iter()
+            .map(|c| c.group_id)
+            .collect();
+        groups.extend(s.store.self_groups().unwrap());
+        groups
+            .iter()
+            .filter(|g| g.as_str().starts_with(&format!("{b}/")))
+            .count() as u32
+    };
+    assert!(owned >= 1);
+    let ledger = s.ledger(&s.fake_b);
+    assert!(!ledger.is_empty());
+    s.alice.start_sync().unwrap();
+    let fetches = s.hub_b.fetches();
+    wait_for("a fetch on B", || s.hub_b.fetches() > fetches).await;
+
+    let refused = s.alice.remove_hub(&b, false).await;
+    match refused {
+        Err(ClientError::HubOwnsGroups {
+            hub_id,
+            group_count,
+        }) => assert_eq!((hub_id, group_count), (b.clone(), owned)),
+        other => panic!("{other:?}"),
+    }
+    let (seq, _) = s.stored_record(&s.fake_a);
+
+    s.alice.remove_hub(&b, true).await.unwrap();
+    let (removed_seq, hubs) = s.stored_record(&s.fake_a);
+    assert_eq!((removed_seq, hubs.clone()), (seq + 1, vec![(a.clone(), 0)]));
+    // B learns it too, so it stops hosting alice.
+    assert_eq!(s.stored_record(&s.fake_b), (removed_seq, hubs));
+    let status = s.status(&s.alice.hubs().await.unwrap(), &s.fake_b);
+    assert_eq!(status.hub.state, gim_base::model::HubState::Removed);
+    assert!(!status.signed_in);
+    // B's KeyPackages stay recorded: never uploaded anywhere again.
+    assert_eq!(s.ledger(&s.fake_b), ledger);
+    // B's loop stopped.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let fetches = s.hub_b.fetches();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(s.hub_b.fetches(), fetches);
+
+    // The group B owns is still reached, through A.
+    let posts_b = s.hub_b.posts().len();
+    let id = s.alice.send_text(&g, "via A", None).await.unwrap();
+    assert_eq!(
+        s.store.message(&id).unwrap().unwrap().send_state,
+        Some(SendState::Sent)
+    );
+    assert_eq!(s.hub_b.posts().len(), posts_b);
+    assert_eq!(
+        s.hub_a.posts().last().map(|(c, _)| c.as_str().to_string()),
+        Some(id.as_str().to_string())
+    );
+    s.alice.stop_sync().unwrap();
+    s.bob.sync().await;
+    assert_eq!(texts(&s.bob.messages(&g)), ["via A"]);
+}
+
+#[tokio::test]
+async fn the_home_hub_and_the_only_listed_hub_are_never_removed() {
+    let s = Setup::new().await;
+    let (a, b) = (Setup::hub_id(&s.fake_a), Setup::hub_id(&s.fake_b));
+    let home = s.alice.remove_hub(&a, true).await;
+    assert!(
+        matches!(&home, Err(ClientError::HomeHub(hub_id)) if *hub_id == a),
+        "{home:?}"
+    );
+    let unknown = s.alice.remove_hub("hnotlisted", true).await;
+    assert!(
+        matches!(unknown, Err(ClientError::InvalidInput(_))),
+        "{unknown:?}"
+    );
+    assert_eq!(s.stored_record(&s.fake_a).0, 2);
+
+    // Another device dropped A from the record: B is the only hub left.
+    let record = s.record(3, &[(&s.fake_b, 0)]);
+    s.fake_a.set_hosting_record(&s.user_id(), Some(record));
+    s.alice.refresh_hubs().await.unwrap();
+    let last = s.alice.remove_hub(&b, true).await;
+    assert!(
+        matches!(&last, Err(ClientError::LastHub(hub_id)) if *hub_id == b),
+        "{last:?}"
+    );
+    assert_eq!(s.stored_record(&s.fake_a).0, 3);
+}
+
+#[tokio::test]
+async fn new_primary_hub_gets_the_submissions_first() {
+    let s = Setup::new().await;
+    let (a, b) = (Setup::hub_id(&s.fake_a), Setup::hub_id(&s.fake_b));
+    let g = s.direct_chat().await;
+
+    s.alice.set_primary_hub(&b).await.unwrap();
+    let (seq, hubs) = s.stored_record(&s.fake_a);
+    assert_eq!(hubs, [(b.clone(), 0), (a.clone(), 1)]);
+    let order: Vec<(String, u8)> = s
+        .alice
+        .hubs()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|h| (h.hub.hub_id, h.hub.priority))
+        .collect();
+    assert_eq!(order, hubs);
+
+    let (posts_a, posts_b) = (s.hub_a.posts().len(), s.hub_b.posts().len());
+    let id = s.alice.send_text(&g, "primary B", None).await.unwrap();
+    assert_eq!(
+        s.store.message(&id).unwrap().unwrap().send_state,
+        Some(SendState::Sent)
+    );
+    assert_eq!(s.hub_a.posts().len(), posts_a);
+    let on_b = &s.hub_b.posts()[posts_b..];
+    assert_eq!(on_b.len(), 1);
+    assert_eq!(on_b[0].0.as_str(), id.as_str());
+
+    // Already primary: nothing to publish.
+    s.alice.set_primary_hub(&b).await.unwrap();
+    assert_eq!(s.stored_record(&s.fake_a).0, seq);
+    let unknown = s.alice.set_primary_hub("hnotlisted").await;
+    assert!(
+        matches!(unknown, Err(ClientError::InvalidInput(_))),
+        "{unknown:?}"
+    );
+}
+
+#[tokio::test]
+async fn restore_reads_the_hub_list_and_shares_the_hub_map_with_the_devices_linked_next() {
+    let s = Setup::new().await;
+    let user_id = s.user_id();
+    let mut hub_a = s.hub_a.clone();
+    hub_a.url = Some("https://hub-a.test".into());
+    let restored = s.client(hub_a);
+    restored
+        .client
+        .restore_from_recovery(&user_id, &s.recovery_code, false)
+        .await
+        .unwrap();
+
+    // The hub list comes from the record, which still lists both hubs.
+    let hubs = restored.client.hubs().await.unwrap();
+    let a = s.status(&hubs, &s.fake_a);
+    assert!(a.home && a.signed_in);
+    assert_eq!(a.hub.url.as_deref(), Some("https://hub-a.test"));
+    let b = s.status(&hubs, &s.fake_b);
+    assert_eq!(b.hub.priority, 1);
+    assert_eq!(b.hub.state, gim_base::model::HubState::Unverified);
+    assert_eq!(s.stored_record(&s.fake_a).1.len(), 2);
+
+    // B's URL entered on the restored device reaches a device linked from
+    // it through the new self group.
+    restored
+        .client
+        .set_hub_url(&Setup::hub_id(&s.fake_b), HUB_B_URL)
+        .await
+        .unwrap();
+    let tablet = s.client(s.hub_a.clone());
+    let session = tablet.client.start_link(vec!["hub-a.test".into()]).unwrap();
+    let approval = restored
+        .client
+        .approve_link(&session.qr_string)
+        .await
+        .unwrap();
+    tablet.client.wait_link(&session).await.unwrap();
+    tablet.client.confirm_link(true).await.unwrap();
+    restored
+        .client
+        .confirm_approval(&approval, true)
+        .await
+        .unwrap();
+    tablet.client.sync_once().await.unwrap();
+    let on_tablet = s.status(&tablet.client.hubs().await.unwrap(), &s.fake_b);
+    assert_eq!(on_tablet.hub.url.as_deref(), Some(HUB_B_URL));
+    assert!(on_tablet.hub.url_shared);
+}
+
+#[tokio::test]
+async fn device_lists_and_the_directory_are_read_from_the_other_hub_while_home_is_down() {
+    let s = Setup::new().await;
+    let carol = Device::register(&FlakyTransport::over(s.fake_a.clone()), "carol").await;
+    let g = s
+        .alice
+        .create_group_chat(Some("Crew".into()), &[s.bob.user_id()])
+        .await
+        .unwrap();
+    // A definite answer of the home hub is final.
+    let unknown = RootKey::from_seed(&[9; 32]).public().user_id();
+    let reads_b = s.hub_b.reads().len();
+    assert!(s.alice.user_devices(&unknown).await.unwrap().is_empty());
+    assert_eq!(s.hub_b.reads().len(), reads_b);
+
+    s.hub_a.state.down.store(true, Ordering::SeqCst);
+    let devices = s.alice.user_devices(&carol.user_id()).await.unwrap();
+    assert_eq!(devices.len(), 1);
+    assert!(s.hub_b.reads().contains(&("device_list", carol.user_id())));
+    // Adding carol resolves her profile in the directory, through B.
+    s.alice
+        .add_members(&g, std::slice::from_ref(&carol.user_id()))
+        .await
+        .unwrap();
+    assert!(s.hub_b.reads().contains(&("user", carol.user_id())));
+    assert!(s.store.user(&carol.user_id()).unwrap().is_some());
     assert!(s.members(&g).contains(&carol.device()));
 }
