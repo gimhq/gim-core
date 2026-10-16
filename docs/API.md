@@ -458,6 +458,10 @@ KeyPackages or download media. What it does depends on the payload type:
 
 When an invitation or member change push joins a chat, it also applies the messages the hub
 already has after the join (as sync does), so the invitation names the group and the inviter.
+The hub keeps no display names: the inviter's name comes from their profile announcement in the
+chat, which their device sends right after the invitation. If it is not on the hub yet,
+`senderDisplayName` is the inviter's handle (or user id) until the profile is known;
+`senderUserId` is always set.
 
 The hub keeps one pending push per device: a later push replaces an earlier one, keeps the
 higher priority and carries the newest payload, so an alert may arrive for a read receipt, a
