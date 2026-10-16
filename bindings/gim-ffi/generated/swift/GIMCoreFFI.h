@@ -446,6 +446,11 @@ uint64_t uniffi_gim_core_fn_method_gimclient_chat_list(uint64_t ptr, uint64_t li
 uint64_t uniffi_gim_core_fn_method_gimclient_chat_members(uint64_t ptr, RustBuffer chat_id
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_CHAT_STATE
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_CHAT_STATE
+uint64_t uniffi_gim_core_fn_method_gimclient_chat_state(uint64_t ptr, RustBuffer chat_id
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_CLAIM_HANDLE
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_CLAIM_HANDLE
 uint64_t uniffi_gim_core_fn_method_gimclient_claim_handle(uint64_t ptr, RustBuffer handle
@@ -804,6 +809,11 @@ uint64_t uniffi_gim_core_fn_method_timeline_add_listener(uint64_t ptr, uint64_t 
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_TIMELINE_CHAT_ID
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_TIMELINE_CHAT_ID
 RustBuffer uniffi_gim_core_fn_method_timeline_chat_id(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_TIMELINE_CHAT_STATE
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_TIMELINE_CHAT_STATE
+RustBuffer uniffi_gim_core_fn_method_timeline_chat_state(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_TIMELINE_PAGINATE_BACKWARDS
@@ -1168,6 +1178,12 @@ uint16_t uniffi_gim_core_checksum_method_gimclient_chat_members(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_CHAT_STATE
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_CHAT_STATE
+uint16_t uniffi_gim_core_checksum_method_gimclient_chat_state(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_CLAIM_HANDLE
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_CLAIM_HANDLE
 uint16_t uniffi_gim_core_checksum_method_gimclient_claim_handle(void
@@ -1495,6 +1511,12 @@ uint16_t uniffi_gim_core_checksum_method_timeline_add_listener(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_TIMELINE_CHAT_ID
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_TIMELINE_CHAT_ID
 uint16_t uniffi_gim_core_checksum_method_timeline_chat_id(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_TIMELINE_CHAT_STATE
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_TIMELINE_CHAT_STATE
+uint16_t uniffi_gim_core_checksum_method_timeline_chat_state(void
     
 );
 #endif
