@@ -383,7 +383,7 @@ fn cases() -> Vec<Case> {
         ),
         case::<BlobCreated>(
             "BlobCreated",
-            json!({"blob_id": "b1", "size": 1024}),
+            json!({"blob_id": "hciqgtrdldzdkwq3c7fkmzvld7djgm3waetwtedhujnndujzulpgk6vq/b_Hk4dN7sL2pX9cV0mB5qT1g", "size": 1024}),
             json!({"blob_id": "b1", "size": 0}),
         ),
         case::<ErrorResponse>(
@@ -637,6 +637,42 @@ fn paths_cover_openapi() {
     );
     ours.extend(DEFERRED_ROUTES.iter().map(|route| (*route).to_owned()));
     assert_eq!(routes, ours);
+}
+
+/// Blob ids are opaque: an origin-prefixed id (`<hub_id>/b_<base64url>`)
+/// stays one path segment, its `/` percent-encoded.
+#[test]
+fn blob_path_encodes_origin_prefixed_ids() {
+    assert_eq!(paths::blob("hxxxx/b_abc-_"), "/v2/blobs/hxxxx%2Fb_abc-_");
+    assert_eq!(paths::blob("b_abc-_"), "/v2/blobs/b_abc-_");
+
+    // The spec's examples: the created id, encoded, is the path parameter.
+    let spec = spec();
+    let created = spec["components"]["schemas"]["BlobCreated"]["properties"]["blob_id"]["example"]
+        .as_str()
+        .unwrap();
+    let download = &spec["paths"]["/v2/blobs/{blob_id}"]["get"];
+    let param = download["parameters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "blob_id")
+        .unwrap();
+    assert_eq!(
+        paths::blob(created),
+        format!("/v2/blobs/{}", param["example"].as_str().unwrap())
+    );
+    // A foreign blob is fetched from its origin: peer failures are errors
+    // of the download.
+    let responses = &download["responses"];
+    for (status, code) in [("502", PEER_REFUSED), ("503", PEER_UNAVAILABLE)] {
+        let description = responses[status]["description"].as_str().unwrap();
+        assert!(description.contains(code), "{status}: {description}");
+        assert_eq!(
+            responses[status]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/Error"
+        );
+    }
 }
 
 #[test]

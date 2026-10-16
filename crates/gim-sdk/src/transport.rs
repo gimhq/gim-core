@@ -202,9 +202,9 @@ pub enum TransportError {
     /// or its keys are broken.
     #[error("device not active: {0}")]
     DeviceNotActive(String),
-    /// 429 `rate_limited` or 503 `peer_unavailable` of a public read that
-    /// kept failing within its retry budget; try again after
-    /// `retry_after_secs`.
+    /// 429 `rate_limited` or 503 `peer_unavailable` of a public read or a
+    /// blob download that kept failing within its retry budget; try again
+    /// after `retry_after_secs`.
     #[error("retry after {retry_after_secs} s ({status}): {reason}")]
     RetryLater {
         status: u16,
@@ -516,7 +516,8 @@ pub trait Transport: Send + Sync {
     /// Uploads the already-encrypted blob in `file`; returns its id.
     async fn upload_blob(&self, token: &AccessToken, file: &Path) -> TransportResult<String>;
 
-    /// Downloads a blob, or the given byte range of it.
+    /// Downloads a blob, or the given byte range of it. `blob_id` is opaque
+    /// (`<origin hub_id>/b_<random>` or a legacy `b_<random>`).
     async fn download_blob(
         &self,
         token: &AccessToken,

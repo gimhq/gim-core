@@ -44,7 +44,8 @@ Arguments:
 
 Env:
   GIM_HUB_SRC      gim-hub git checkout (default /srv/gimhq/im-client/hub)
-  GIM_HUB_REV      commit to build (default 9608f34); exported with
+  GIM_HUB_REV      commit to build (default
+                   18afc7bdde8cd643e4f4e21a35758fdb3a0bc155); exported with
                    `git archive`, so local changes in the checkout are ignored
   GIM_HUB_NAME     container name (default ai-agent-gim-hub-dev)
   GIM_HUB_IMAGE    image tag (default ai-agent/gim-hub)
@@ -59,7 +60,7 @@ EOF
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 GIM_HUB_SRC=${GIM_HUB_SRC:-/srv/gimhq/im-client/hub}
-GIM_HUB_REV=${GIM_HUB_REV:-9608f34}
+GIM_HUB_REV=${GIM_HUB_REV:-18afc7bdde8cd643e4f4e21a35758fdb3a0bc155}
 GIM_HUB_IMAGE=${GIM_HUB_IMAGE:-ai-agent/gim-hub}
 GIM_HUB_NETWORK=${GIM_HUB_NETWORK:-traefik}
 GIM_HUB_BUILD=${GIM_HUB_BUILD:-1}

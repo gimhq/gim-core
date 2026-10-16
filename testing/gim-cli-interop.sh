@@ -9,7 +9,8 @@
 # (`gim-hub-dev.sh fed-start`, removed on exit) and runs the cross-hub
 # variant (cli_to_cli_interop_across_hubs): profiles on hub a and hub b.
 #
-# Env: GIM_HUB_SRC, GIM_HUB_REV (default 9608f34), GIM_HUB_BUILD,
+# Env: GIM_HUB_SRC, GIM_HUB_REV (default
+# 18afc7bdde8cd643e4f4e21a35758fdb3a0bc155), GIM_HUB_BUILD,
 # GIM_HUB_IMAGE (see scripts/gim-hub-dev.sh); GIM_FEDERATION=1.
 set -euo pipefail
 
