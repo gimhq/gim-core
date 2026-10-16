@@ -36,6 +36,7 @@ struct Rows {
     messages: BTreeMap<MessageId, Message>,
     outbox: BTreeMap<MessageId, OutboxEntry>,
     global_cursor: Option<u64>,
+    hub_cursors: BTreeMap<String, u64>,
     group_cursors: BTreeMap<GroupId, GroupCursor>,
     parked: BTreeMap<(GroupId, u64), GroupMessage>,
     media: BTreeMap<String, MediaCacheEntry>,
@@ -200,6 +201,10 @@ impl StateReader for MemoryStore {
         read(&self.rows)?.global_cursor()
     }
 
+    fn hub_cursor(&self, hub_id: &str) -> StoreResult<Option<u64>> {
+        Ok(read(&self.rows)?.hub_cursors.get(hub_id).copied())
+    }
+
     fn group_cursor(&self, group_id: &GroupId) -> StoreResult<GroupCursor> {
         read(&self.rows)?.group_cursor(group_id)
     }
@@ -309,6 +314,10 @@ impl StateReader for MemoryTxn {
 
     fn global_cursor(&self) -> StoreResult<Option<u64>> {
         self.rows.global_cursor()
+    }
+
+    fn hub_cursor(&self, hub_id: &str) -> StoreResult<Option<u64>> {
+        Ok(self.rows.hub_cursors.get(hub_id).copied())
     }
 
     fn group_cursor(&self, group_id: &GroupId) -> StoreResult<GroupCursor> {
@@ -427,6 +436,12 @@ impl StoreTxn for MemoryTxn {
     fn set_global_cursor(&mut self, cursor: u64) -> StoreResult<()> {
         self.check(WriteTarget::GroupCursor)?;
         self.rows.global_cursor = Some(cursor);
+        Ok(())
+    }
+
+    fn set_hub_cursor(&mut self, hub_id: &str, cursor: u64) -> StoreResult<()> {
+        self.check(WriteTarget::GroupCursor)?;
+        self.rows.hub_cursors.insert(hub_id.to_string(), cursor);
         Ok(())
     }
 

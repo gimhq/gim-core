@@ -2,6 +2,12 @@
 //! uses, over the shared [`FakeDeliveryService`] of a [`FakeTransport`],
 //! with fault controls. Other devices of a test talk to the same service
 //! through the `FakeTransport` directly.
+//!
+//! [`MockServer::replica`] serves a second listed hub of a multi-homed
+//! user: its own identity and sessions, and the events, groups, history and
+//! pending Welcomes of another hub's service, as the owner fans everything
+//! out to every listed hub (contract `multihoming.md` §2.2); Welcome
+//! acknowledgements stay on the replica.
 
 #![allow(dead_code)]
 
@@ -11,8 +17,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, RawQuery, State};
+use axum::extract::{Path, Query, RawQuery, Request, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -72,11 +79,33 @@ pub struct Controls {
     /// Messages (group, seq) served with this kind instead of their own,
     /// in events and history.
     pub relabeled: Mutex<BTreeMap<(GroupId, u64), v2::MessageKind>>,
+    /// The hub is down: every request answers 503 and open streams drop.
+    pub down: AtomicBool,
+    /// `(device, group)` of every Welcome acknowledgement served.
+    pub acked: Mutex<Vec<(DeviceRef, GroupId)>>,
+    /// `GET /v2/events` answered 410.
+    pub expired_served: AtomicUsize,
+}
+
+impl Controls {
+    pub fn acked(&self, device: &DeviceRef, group_id: &GroupId) -> bool {
+        self.acked
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(d, g)| d == device && g == group_id)
+    }
 }
 
 #[derive(Clone)]
 struct AppState {
+    /// Identity, sessions, DeviceLists and writes.
     transport: FakeTransport,
+    /// Events, groups, history and pending Welcomes: `transport`'s, or
+    /// the replicated hub's.
+    data: FakeTransport,
+    /// `data` is another hub's.
+    replica: bool,
     controls: Arc<Controls>,
 }
 
@@ -104,9 +133,21 @@ impl MockServer {
     }
 
     pub async fn start(transport: FakeTransport) -> Self {
+        Self::serve(transport.clone(), transport, false).await
+    }
+
+    /// A hub with its own identity and sessions (`transport`) serving the
+    /// events, groups, history and pending Welcomes of `owner`.
+    pub async fn replica(transport: FakeTransport, owner: FakeTransport) -> Self {
+        Self::serve(transport, owner, true).await
+    }
+
+    async fn serve(transport: FakeTransport, data: FakeTransport, replica: bool) -> Self {
         let controls = Arc::new(Controls::default());
         let state = AppState {
             transport,
+            data,
+            replica,
             controls: controls.clone(),
         };
         let app = Router::new()
@@ -148,6 +189,7 @@ impl MockServer {
             .route("/v2/welcomes/{gid}/ack", post(ack_welcome))
             .route(v2::paths::EVENTS, get(events))
             .route(v2::paths::STREAM, get(stream))
+            .layer(middleware::from_fn_with_state(controls.clone(), down))
             .with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -160,6 +202,13 @@ impl MockServer {
             task,
         }
     }
+}
+
+async fn down(State(controls): State<Arc<Controls>>, request: Request, next: Next) -> Response {
+    if controls.down.load(Ordering::SeqCst) {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "unavailable");
+    }
+    next.run(request).await
 }
 
 fn error(status: StatusCode, code: &str) -> Response {
@@ -265,10 +314,24 @@ impl AppState {
         Ok(self.transport.service().authenticate(token.as_str())?)
     }
 
+    /// The device of the token if it is a member of the group.
+    fn member(&self, headers: &HeaderMap, group_id: &GroupId) -> Result<DeviceRef, TransportError> {
+        let device = self.authenticate(headers)?;
+        let group = self.data.service().group(group_id)?;
+        if !group.members.contains(&device) {
+            return Err(TransportError::Rejected {
+                status: 403,
+                code: "not_member".into(),
+                message: "not a member".into(),
+            });
+        }
+        Ok(device)
+    }
+
     /// Events of `device` after `cursor` minus the hidden ones, and the
     /// cursor after all of them.
     fn visible(&self, device: &DeviceRef, cursor: u64, limit: usize) -> (Vec<v2::Event>, u64) {
-        let (events, next) = self.transport.service().events(device, cursor, limit);
+        let (events, next) = self.data.service().events(device, cursor, limit);
         let hidden = self.controls.hidden.lock().unwrap();
         let events = events
             .into_iter()
@@ -295,7 +358,7 @@ impl AppState {
     }
 
     fn head(&self, device: &DeviceRef) -> u64 {
-        self.transport.service().events(device, 0, usize::MAX).1
+        self.data.service().events(device, 0, usize::MAX).1
     }
 }
 
@@ -724,9 +787,14 @@ async fn group(
     Path(gid): Path<String>,
 ) -> Response {
     let result = async {
-        let (token, group_id) = (state.token(&headers)?, group_id(&gid)?);
-        state.transport.group_info(&token, &group_id).await?;
-        Ok(group_dto(state.transport.service().group(&group_id)?))
+        let group_id = group_id(&gid)?;
+        if state.replica {
+            state.member(&headers, &group_id)?;
+        } else {
+            let token = state.token(&headers)?;
+            state.transport.group_info(&token, &group_id).await?;
+        }
+        Ok(group_dto(state.data.service().group(&group_id)?))
     }
     .await;
     reply(result)
@@ -735,7 +803,7 @@ async fn group(
 async fn groups(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let result = async {
         let device = state.authenticate(&headers)?;
-        let groups = state.transport.service().groups_of(&device);
+        let groups = state.data.service().groups_of(&device);
         Ok(v2::GroupList {
             groups: groups.into_iter().map(group_dto).collect(),
         })
@@ -830,17 +898,21 @@ async fn messages(
             .unwrap()
             .push((group_id.clone(), after_seq));
         let limit = query.limit.unwrap_or(100);
-        // Membership check of the fake transport.
-        let readable: Vec<GroupMessage> = state
-            .transport
-            .group_messages(&token, &group_id, after_seq.unwrap_or(0) + 1, limit)
-            .await?;
-        let messages = state.transport.service().messages(
-            &group_id,
-            after_seq.unwrap_or(0),
-            limit as usize,
-        )?;
-        assert_eq!(readable.len(), messages.len());
+        let messages =
+            state
+                .data
+                .service()
+                .messages(&group_id, after_seq.unwrap_or(0), limit as usize)?;
+        if state.replica {
+            state.member(&headers, &group_id)?;
+        } else {
+            // Membership check of the fake transport.
+            let readable: Vec<GroupMessage> = state
+                .transport
+                .group_messages(&token, &group_id, after_seq.unwrap_or(0) + 1, limit)
+                .await?;
+            assert_eq!(readable.len(), messages.len());
+        }
         Ok(v2::MessageList {
             messages: messages
                 .into_iter()
@@ -865,7 +937,20 @@ async fn pending_welcomes(
     let result = async {
         let device = state.authenticate(&headers)?;
         let limit = query.limit.unwrap_or(50) as usize;
-        let welcomes = state.transport.service().pending_welcomes(&device, limit);
+        let welcomes = if state.replica {
+            // Acknowledgements are per hub.
+            let acked = state.controls.acked.lock().unwrap().clone();
+            state
+                .data
+                .service()
+                .pending_welcomes(&device, usize::MAX)
+                .into_iter()
+                .filter(|w| !acked.contains(&(device.clone(), w.group_id.clone())))
+                .take(limit)
+                .collect()
+        } else {
+            state.transport.service().pending_welcomes(&device, limit)
+        };
         Ok(v2::PendingWelcomeList {
             welcomes: welcomes
                 .into_iter()
@@ -887,7 +972,17 @@ async fn ack_welcome(
 ) -> Response {
     let result = async {
         let (token, group_id) = (state.token(&headers)?, group_id(&gid)?);
-        state.transport.ack_welcome(&token, &group_id).await
+        let device = state.authenticate(&headers)?;
+        if !state.replica {
+            state.transport.ack_welcome(&token, &group_id).await?;
+        }
+        state
+            .controls
+            .acked
+            .lock()
+            .unwrap()
+            .push((device, group_id));
+        Ok(())
     }
     .await;
     no_content(result)
@@ -917,6 +1012,7 @@ async fn events(
             },
             cursor: state.head(&device),
         };
+        state.controls.expired_served.fetch_add(1, Ordering::SeqCst);
         return (StatusCode::GONE, Json(body)).into_response();
     }
     let limit = query.limit.unwrap_or(100) as usize;
@@ -1008,7 +1104,7 @@ async fn serve_stream(
         if controls.reject.load(Ordering::SeqCst) || service.authenticate(&token).is_err() {
             return close(&mut socket, v2::STREAM_CLOSE_UNAUTHORIZED).await;
         }
-        if controls.kick.swap(false, Ordering::SeqCst) {
+        if controls.kick.swap(false, Ordering::SeqCst) || controls.down.load(Ordering::SeqCst) {
             return;
         }
         let (events, next) = state.visible(&device, cursor, 100);

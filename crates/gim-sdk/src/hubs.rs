@@ -187,6 +187,7 @@ impl<S: StateStore + 'static> Client<S> {
         self.sign_in_hub(hub_id).await;
         // Sending may publish the hosting record, which refreshes the hubs.
         drop(guard);
+        self.inner.hubs_changed.notify_one();
         self.share_hub_locations().await;
         Ok(())
     }
@@ -236,6 +237,7 @@ impl<S: StateStore + 'static> Client<S> {
         }
         // Sending may publish the hosting record, which refreshes the hubs.
         drop(guard);
+        self.inner.hubs_changed.notify_one();
         if shared {
             self.share_hub_locations().await;
         }
@@ -406,46 +408,78 @@ impl<S: StateStore + 'static> Client<S> {
     /// fresh token there; the challenge must name `hub_id`. Failures are
     /// logged: they never touch the home session.
     async fn sign_in_hub(&self, hub_id: &str) {
-        let transport = {
+        {
             let handles = self.handles();
             let Some(handle) = handles.get(hub_id) else {
                 return;
             };
-            if handle.token.as_ref().is_some_and(HubToken::fresh) {
+            if handle.token.as_ref().is_some_and(HubToken::fresh) || handle.verified.is_none() {
                 return;
             }
-            match &handle.verified {
-                Some((_, transport)) => transport.clone(),
-                None => return,
-            }
-        };
-        let Some(session) = self.session() else {
-            return;
-        };
-        let signed_in = match device_key(&*self.inner.secrets) {
-            Ok(key) => {
-                self.sign_in_on(&*transport, &session.device, &key, Some(hub_id))
-                    .await
-            }
-            Err(err) => Err(err),
-        };
-        match signed_in {
-            Ok((token, _)) => {
-                tracing::info!(%hub_id, "signed in on a listed hub");
-                if let Some(handle) = self.handles().get_mut(hub_id) {
-                    handle.token = Some(HubToken {
-                        token: token.token,
-                        expires_at_ms: token.expires_at_ms,
-                    });
-                }
-                // The home session may have been renewed meanwhile.
-                let persisted = self.session().map(|current| self.persist_session(&current));
-                if let Some(Err(err)) = persisted {
-                    tracing::warn!(error = %err, "cannot persist the hub session");
-                }
-            }
-            Err(err) => tracing::warn!(%hub_id, error = %err, "cannot sign in on a listed hub"),
         }
+        if let Err(err) = self.renew_hub_token(hub_id).await {
+            tracing::warn!(%hub_id, error = %err, "cannot sign in on a listed hub");
+        }
+    }
+
+    /// A valid session token on the verified hub `hub_id`: the held one,
+    /// unless it expired or is `rejected`, else a new sign-in.
+    pub(crate) async fn hub_token(
+        &self,
+        hub_id: &str,
+        rejected: Option<&AccessToken>,
+    ) -> TransportResult<AccessToken> {
+        let held = self.handles().get(hub_id).and_then(|h| h.token.clone());
+        match held {
+            Some(held) if held.fresh() && Some(&held.token) != rejected => Ok(held.token),
+            _ => self.renew_hub_token(hub_id).await,
+        }
+    }
+
+    /// Signs in on the verified hub `hub_id`; the challenge must name
+    /// `hub_id`. Keeps and persists the new token.
+    async fn renew_hub_token(&self, hub_id: &str) -> TransportResult<AccessToken> {
+        let transport = self
+            .handles()
+            .get(hub_id)
+            .and_then(|h| h.verified.as_ref())
+            .map(|(_, transport)| transport.clone())
+            .ok_or(TransportError::Unauthorized)?;
+        let session = self.session().ok_or(TransportError::Unauthorized)?;
+        let key = device_key(&*self.inner.secrets)?;
+        let (token, _) = self
+            .sign_in_on(&*transport, &session.device, &key, Some(hub_id))
+            .await?;
+        tracing::info!(%hub_id, "signed in on a listed hub");
+        if let Some(handle) = self.handles().get_mut(hub_id) {
+            handle.token = Some(HubToken {
+                token: token.token.clone(),
+                expires_at_ms: token.expires_at_ms,
+            });
+        }
+        // The home session may have been renewed meanwhile.
+        let persisted = self.session().map(|current| self.persist_session(&current));
+        if let Some(Err(err)) = persisted {
+            tracing::warn!(error = %err, "cannot persist the hub session");
+        }
+        Ok(token.token)
+    }
+
+    /// The listed hubs other than the home hub whose URL was verified in
+    /// this run, with that URL and its transport, by hub id.
+    pub(crate) fn verified_hubs(&self) -> Vec<(String, String, Arc<dyn Transport>)> {
+        let home = self.home_hub();
+        let mut hubs: Vec<_> = self
+            .handles()
+            .iter()
+            .filter(|(hub_id, _)| home.as_ref() != Some(*hub_id))
+            .filter_map(|(hub_id, h)| {
+                let (url, transport) = h.verified.as_ref()?;
+                Some((hub_id.clone(), url.clone(), transport.clone()))
+            })
+            .collect();
+        hubs.sort_by(|a, b| a.0.cmp(&b.0));
+        hubs
     }
 
     /// Sends the URLs of the listed hubs to the own other devices. Best

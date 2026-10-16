@@ -12,6 +12,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0002_pending_leaves.sql"),
     include_str!("../migrations/0003_pending_invites.sql"),
     include_str!("../migrations/0004_hubs.sql"),
+    include_str!("../migrations/0005_hub_cursors.sql"),
 ];
 
 /// Schema version written by this build.
@@ -86,6 +87,7 @@ mod tests {
             "device_lists",
             "membership_events",
             "hubs",
+            "hub_cursors",
         ] {
             assert!(tables.iter().any(|t| t == table), "{table} in {tables:?}");
         }
@@ -162,6 +164,27 @@ mod tests {
         assert!(tables(&conn).iter().any(|t| t == "hubs"));
         let kept: i64 = conn
             .query_row("SELECT COUNT(*) FROM pending_invites", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(kept, 1);
+    }
+
+    #[test]
+    fn migrates_a_v4_database_keeping_its_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for sql in &MIGRATIONS[..4] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 4).unwrap();
+        conn.execute(
+            "INSERT INTO hubs (hub_id, priority, state) VALUES ('h1', 0, 'verified')",
+            [],
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert!(tables(&conn).iter().any(|t| t == "hub_cursors"));
+        let kept: i64 = conn
+            .query_row("SELECT COUNT(*) FROM hubs", [], |row| row.get(0))
             .unwrap();
         assert_eq!(kept, 1);
     }

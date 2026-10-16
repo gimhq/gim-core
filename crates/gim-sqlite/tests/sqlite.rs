@@ -366,6 +366,7 @@ fn write_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
     txn.upsert_outbox(&upload)?;
 
     txn.set_global_cursor(42)?;
+    txn.set_hub_cursor("hb", 17)?;
     txn.set_group_cursor(
         &group("crew"),
         &GroupCursor {
@@ -520,6 +521,8 @@ fn update_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
     txn.upsert_outbox(&failed)?;
     txn.remove_outbox(&id("o2"))?;
     txn.set_global_cursor(43)?;
+    txn.set_hub_cursor("hb", 18)?;
+    txn.set_hub_cursor("hc", 1)?;
     txn.unpark_message(&group("crew"), 6)?;
     txn.remove_media("b1")?;
     txn.upsert_user(&UserInfo {
@@ -661,6 +664,12 @@ fn assert_same_reads(expected: &impl StateReader, actual: &impl StateReader) {
         actual.global_cursor().unwrap(),
         expected.global_cursor().unwrap()
     );
+    for hub_id in ["ha", "hb", "hc"] {
+        assert_eq!(
+            actual.hub_cursor(hub_id).unwrap(),
+            expected.hub_cursor(hub_id).unwrap()
+        );
+    }
     assert_eq!(
         actual.media_entries().unwrap(),
         expected.media_entries().unwrap()

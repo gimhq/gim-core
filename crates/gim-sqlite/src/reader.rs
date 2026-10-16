@@ -320,6 +320,14 @@ impl StateReader for Reader<'_> {
         )
     }
 
+    fn hub_cursor(&self, hub_id: &str) -> StoreResult<Option<u64>> {
+        self.query_one(
+            "SELECT cursor FROM hub_cursors WHERE hub_id = ?1",
+            [hub_id],
+            |row| get(row, 0),
+        )
+    }
+
     fn group_cursor(&self, group_id: &GroupId) -> StoreResult<GroupCursor> {
         Ok(self
             .query_one(
