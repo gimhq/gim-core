@@ -1260,7 +1260,8 @@ public protocol GimClientProtocol: AnyObject, Sendable {
     func setTyping(chatId: String, active: Bool) async throws 
     
     /**
-     * Stops sync and deletes the session, local data and keystore secrets.
+     * Stops sync and the listeners and deletes the session, local data and
+     * keystore secrets. No callback runs once it returned.
      */
     func signOut() async throws 
     
@@ -2056,7 +2057,8 @@ open func setTyping(chatId: String, active: Bool)async throws   {
 }
     
     /**
-     * Stops sync and deletes the session, local data and keystore secrets.
+     * Stops sync and the listeners and deletes the session, local data and
+     * keystore secrets. No callback runs once it returned.
      */
 open func signOut()async throws   {
     return
@@ -6363,7 +6365,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_gim_core_checksum_method_gimclient_set_typing() != 10433) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_gim_core_checksum_method_gimclient_sign_out() != 6926) {
+    if (uniffi_gim_core_checksum_method_gimclient_sign_out() != 25532) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_gim_core_checksum_method_gimclient_start_link() != 4052) {

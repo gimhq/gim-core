@@ -1427,7 +1427,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_gim_core_checksum_method_gimclient_set_typing() and 0xFFFF) != 10433) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_gim_core_checksum_method_gimclient_sign_out() and 0xFFFF) != 6926) {
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_sign_out() and 0xFFFF) != 25532) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_start_link() and 0xFFFF) != 4052) {
@@ -2897,7 +2897,8 @@ public interface GimClientInterface {
     suspend fun `setTyping`(`chatId`: kotlin.String, `active`: kotlin.Boolean)
     
     /**
-     * Stops sync and deletes the session, local data and keystore secrets.
+     * Stops sync and the listeners and deletes the session, local data and
+     * keystore secrets. No callback runs once it returned.
      */
     suspend fun `signOut`()
     
@@ -3990,7 +3991,8 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
 
     
     /**
-     * Stops sync and deletes the session, local data and keystore secrets.
+     * Stops sync and the listeners and deletes the session, local data and
+     * keystore secrets. No callback runs once it returned.
      */
     @Throws(GimException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
