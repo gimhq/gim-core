@@ -41,6 +41,8 @@ pub struct Faults {
     /// Answers the next event fetch with 410 at the hub's head cursor, as
     /// if the events after the device's cursor had been pruned.
     pub expire_cursor: AtomicBool,
+    /// The group and error of every commit the hub refused, in order.
+    pub commit_errors: Mutex<Vec<(GroupId, String)>>,
     /// Every commit result the hub returned, in order.
     pub commit_results: Mutex<Vec<CommitAccepted>>,
     /// Every application message post the hub accepted: its `client_id`
@@ -54,6 +56,9 @@ pub struct Faults {
     /// Every 502/503 peer hub failure of a commit or message post, in
     /// order.
     pub peer_failures: Mutex<Vec<TransportError>>,
+    /// The users of every federated KeyPackage claim sent to the hub, in
+    /// order.
+    pub claim_requests: Mutex<Vec<Vec<UserId>>>,
     /// Every user a KeyPackage claim reported `unavailable`, in order.
     pub unavailable_claims: Mutex<Vec<UserId>>,
     /// Every KeyPackage the hub handed out to claims, in order.
@@ -236,6 +241,11 @@ impl Transport for FaultyHub {
         t: &AccessToken,
         users: &[UserId],
     ) -> TransportResult<KeyPackageClaim> {
+        self.faults
+            .claim_requests
+            .lock()
+            .unwrap()
+            .push(users.to_vec());
         let claim = self.inner.claim_key_packages_federated(t, users).await?;
         self.faults
             .unavailable_claims
@@ -270,6 +280,10 @@ impl Transport for FaultyHub {
     ) -> Result<CommitAccepted, PostError> {
         let result = self.inner.submit_commit(t, g, commit).await;
         self.faults.record(&result);
+        if let Err(err) = &result {
+            let error = (g.clone(), err.to_string());
+            self.faults.commit_errors.lock().unwrap().push(error);
+        }
         let accepted = result?;
         self.faults.commit_results.lock().unwrap().push(accepted);
         if self.faults.lose_commit_reply.swap(false, Ordering::SeqCst) {

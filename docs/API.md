@@ -143,20 +143,29 @@ user's signed DeviceList. Handles are optional directory entries pointing at a u
     `Retry-After`, never sent elsewhere; a definite rejection (4xx) is never resent. Member
     additions claim KeyPackages and commit through the same hub; if that hub becomes unreachable
     or answers `kp_not_claimed`, gim-core claims again through the hub in use and rebuilds the
-    change.
+    change. A 404 from a hub that does not own the chat (it has no copy of the chat yet) sends
+    the same request to the next listed hub; a 404 from the owning hub is final.
+  - Chat creation: a chat (and a new self group) is created on the primary hub, or the next
+    listed hub while it cannot be reached, which then owns it; its KeyPackages are claimed and
+    its first member addition committed through that hub.
   - KeyPackages: each listed hub the device is signed in to gets its own one-time KeyPackages and
     last-resort KeyPackage; a KeyPackage is uploaded to one hub only, ever (also after that hub
     is removed). A hub's `keypackages.low` (or an expired cursor there) tops up that hub only.
   - Reads of DeviceLists, of the user directory and of the hosting record go to the home hub and,
     while it cannot be reached (network error, 5xx), to the other listed hubs in priority order; a
     definite answer (also a rejection) is never retried elsewhere.
-  - Uploads, chat creation, handles, linking and all other requests still go through the home hub.
+  - `findUser(handle)`: handles belong to one hub. The handle is looked up on the home hub, then
+    on the other listed hubs in priority order while the hub asked does not know it or cannot be
+    reached; the profile is read from the hub that knows it. `null` only if no reachable hub
+    knows the handle.
+  - Uploads, claiming and releasing handles, linking and all other requests still go through the
+    home hub.
   - After a restore from the recovery code the hub list is read again from the hosting record and
     the hub map is sent to the new self group, so devices linked from the restored one learn the
     hub URLs; a newly linked device gets the map from the device approving it.
 - **Federation**: users are addressed by user id everywhere; a remote user may have no handle and is
-  shown by display name, else a short user id. A chat is created on the own hub, which owns it (the
-  `<hub_id>/` prefix of its id); in chats owned by another hub, messages and member changes of
+  shown by display name, else a short user id. A chat is created on the own hub (the primary hub
+  of a user on several hubs), which owns it (the `<hub_id>/` prefix of its id); in chats owned by another hub, messages and member changes of
   others arrive once the owner has sequenced and delivered them (seconds normally, longer during
   an outage), and the history starts where the own hub joined.
   - Invitees whose hub is unreachable when a chat is created or members are added (`unavailable`

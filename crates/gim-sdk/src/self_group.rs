@@ -168,13 +168,12 @@ impl<S: StateStore + 'static> Client<S> {
         Ok(())
     }
 
-    /// Creates a self group on the hub and locally, as the current one.
+    /// Creates a self group on the primary hub and locally, as the
+    /// current one.
     pub(crate) async fn create_self_group(&self) -> Result<GroupId> {
         let session = self.require_session()?;
         let _guard = self.inner.group_lock.lock().await;
-        let group_id = self
-            .authed(|t| async move { self.inner.transport.create_group(&t, ChatKind::Group).await })
-            .await?;
+        let group_id = self.create_group_routed(ChatKind::Group, None).await?;
         let (gid, base) = (group_id.clone(), BaseClient::new(session.device));
         self.run(move |store, engine| base.create_self_group(store, engine, &gid, now_ms()))
             .await?;
