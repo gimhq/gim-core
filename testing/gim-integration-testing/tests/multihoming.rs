@@ -29,7 +29,7 @@ use gim_integration_testing::push::{
     process_in_extension, push_log, pushes,
 };
 use gim_integration_testing::sdk::{FaultyHub, SdkDevice};
-use gim_integration_testing::{eventually_within, messages, text, TestUser};
+use gim_integration_testing::{eventually_within, messages, text, unique_handle, TestUser};
 use gim_proto::envelope::{Content, HubLocation};
 use gim_sdk::transport::Transport;
 use gim_sdk::{ClientError, HubStatus};
@@ -921,6 +921,7 @@ async fn only_the_primary_hub_pushes_and_a_fallback_takes_over() {
         )
         .await
         .unwrap();
+    assert!(owned_by(&group, &c), "created on bob's primary c: {group}");
     for user in [&alice, &carol] {
         let (chats, _handle) = user.chat_list().await;
         chats
@@ -1061,4 +1062,136 @@ async fn only_the_primary_hub_pushes_and_a_fallback_takes_over() {
     assert_eq!(pushed_seqs(&fed.a, &device, &group), a_before);
     fed.b.start().await;
     drop(restart);
+}
+
+/// The users of `claimer`'s KeyPackage claims on the hub at `url`.
+fn claims_on(claimer: &SdkDevice, url: &str) -> Vec<Vec<UserId>> {
+    claimer
+        .hub(url)
+        .faults
+        .claim_requests
+        .lock()
+        .unwrap()
+        .clone()
+}
+
+/// Alice is homed on a and listed on b, with b made her primary hub. She
+/// creates a group with bob (homed on a only) and carol (c only), adds
+/// dave (a only) and frank (b only, found by a handle a does not know) and
+/// opens a direct chat with erin (a only): the chats are created on b,
+/// every invited user joins and messages flow both ways.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs 3 federated hubs: GIM_MULTIHOMING=1 scripts/integration-test.sh"]
+async fn multi_homed_user_with_non_home_primary_creates_a_group_with_users_homed_elsewhere() {
+    let Some((fed, c)) = three_hubs(
+        "multi_homed_user_with_non_home_primary_creates_a_group_with_users_homed_elsewhere",
+    ) else {
+        return;
+    };
+    let alice = homed_on_two(&fed.a, &fed.b).await;
+    alice.client.set_primary_hub(&fed.b.hub_id).await.unwrap();
+    let bob = SdkDevice::create(&fed.a.url, "Bob").await;
+    let carol = SdkDevice::create(&c.url, "Carol").await;
+    let dave = SdkDevice::create(&fed.a.url, "Dave").await;
+    let erin = SdkDevice::create(&fed.a.url, "Erin").await;
+
+    let g = alice
+        .client
+        .create_group_chat(Some("Kornati".into()), &[bob.user_id(), carol.user_id()])
+        .await;
+    let g = g.unwrap_or_else(|err| {
+        let on = |url: &str| {
+            let hub = alice.hub(url);
+            let errors = hub.faults.commit_errors.lock().unwrap().clone();
+            format!(
+                "claims {:?}, commit errors {errors:?}",
+                claims_on(&alice, url)
+            )
+        };
+        panic!(
+            "create_group_chat: {err:?}\non a: {}\non b: {}",
+            on(&fed.a.url),
+            on(&fed.b.url)
+        )
+    });
+    assert!(owned_by(&g, &fed.b), "created on the primary b: {g}");
+    assert!(
+        !claims_on(&alice, &fed.b.url).is_empty(),
+        "the claim went through the primary b"
+    );
+    for (name, device) in [("bob", &bob), ("carol", &carol)] {
+        sync_until(&format!("{name} joined"), device, |d| joined(d, &g)).await;
+    }
+    alice
+        .client
+        .send_text(&g, "Leaving Zadar", None)
+        .await
+        .unwrap();
+    bob.client.send_text(&g, "Bob aboard", None).await.unwrap();
+    carol
+        .client
+        .send_text(&g, "Carol aboard", None)
+        .await
+        .unwrap();
+    let all = ["Leaving Zadar", "Bob aboard", "Carol aboard"];
+    for (name, device) in [("alice", &alice), ("bob", &bob), ("carol", &carol)] {
+        sync_until(&format!("every message at {name}"), device, |d| {
+            has_texts(d, &g, &all)
+        })
+        .await;
+    }
+
+    alice
+        .client
+        .add_members(&g, &[dave.user_id()])
+        .await
+        .unwrap();
+    sync_until("dave joined", &dave, |d| joined(d, &g)).await;
+    dave.client
+        .send_text(&g, "Dave aboard", None)
+        .await
+        .unwrap();
+    sync_until("dave's message at alice", &alice, |d| {
+        has_texts(d, &g, &["Dave aboard"])
+    })
+    .await;
+
+    // The app path: a handle first. Frank's is known on b only, so it is
+    // looked up there after alice's home hub a does not know it.
+    let frank = SdkDevice::create(&fed.b.url, "Frank").await;
+    let handle = unique_handle("frank");
+    frank.client.claim_handle(&handle).await.unwrap();
+    let found = alice.client.find_user(&handle).await.unwrap().unwrap();
+    assert_eq!(found.user_id, frank.user_id());
+    alice
+        .client
+        .add_members(&g, &[found.user_id])
+        .await
+        .unwrap();
+    sync_until("frank joined", &frank, |d| joined(d, &g)).await;
+
+    let direct = alice
+        .client
+        .create_direct_chat(&erin.user_id())
+        .await
+        .unwrap();
+    assert!(owned_by(&direct, &fed.b), "{direct}");
+    sync_until("erin joined", &erin, |d| joined(d, &direct)).await;
+    erin.client
+        .send_text(&direct, "Fair winds", None)
+        .await
+        .unwrap();
+    sync_until("erin's message at alice", &alice, |d| {
+        has_texts(d, &direct, &["Fair winds"])
+    })
+    .await;
+    alice
+        .client
+        .send_text(&direct, "Thanks", None)
+        .await
+        .unwrap();
+    sync_until("alice's message at erin", &erin, |d| {
+        has_texts(d, &direct, &["Thanks"])
+    })
+    .await;
 }
