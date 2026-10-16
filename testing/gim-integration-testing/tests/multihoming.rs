@@ -921,7 +921,10 @@ async fn only_the_primary_hub_pushes_and_a_fallback_takes_over() {
         )
         .await
         .unwrap();
-    assert!(owned_by(&group, &c), "created on bob's primary c: {group}");
+    assert!(
+        owned_by(&GroupId::new(group.as_str()).unwrap(), &c),
+        "created on bob's primary c: {group}"
+    );
     for user in [&alice, &carol] {
         let (chats, _handle) = user.chat_list().await;
         chats
