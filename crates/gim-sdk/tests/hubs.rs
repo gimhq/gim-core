@@ -267,8 +267,8 @@ async fn hosting_record_updates_and_the_self_group_spread_the_hubs() {
     assert_eq!(b.hub.priority, 1);
     assert_eq!(hub_b.faults.challenges.load(Ordering::SeqCst), 0);
 
-    // Alice learns B's URL; the tablet gets it through the self group,
-    // checks it and signs in on B too.
+    // Alice learns B's URL; the tablet gets it through the self group but
+    // never contacts it: no sign-in, no KeyPackages, no submission.
     alice
         .client
         .set_hub_url(&hub_id(&hub_b.inner), "fake://b")
@@ -277,12 +277,43 @@ async fn hosting_record_updates_and_the_self_group_spread_the_hubs() {
     assert!(status(&alice.client.hubs().await.unwrap(), &hub_b.inner).signed_in);
     assert_eq!(hub_b.faults.challenges.load(Ordering::SeqCst), 1);
     tablet.client.sync_once().await.unwrap();
+    tablet.client.refresh_hubs().await.unwrap();
+    tablet.client.replenish_key_packages().await.unwrap();
+    let self_group = gim_base::StateReader::self_groups(&*tablet.store)
+        .unwrap()
+        .pop()
+        .unwrap();
+    let note = gim_proto::envelope::Content::Text {
+        body: "ahoy".into(),
+    };
+    tablet.client.send(&self_group, note).await.unwrap();
+    let hubs = tablet.client.hubs().await.unwrap();
+    let b = status(&hubs, &hub_b.inner);
+    assert_eq!(b.hub.state, HubState::Unverified);
+    assert_eq!(b.hub.url.as_deref(), Some("fake://b"));
+    assert!(b.hub.url_shared);
+    assert!(!b.signed_in);
+    let tablet_device = tablet.client.session().unwrap().device;
+    assert_eq!(hub_b.faults.challenges.load(Ordering::SeqCst), 1);
+    assert_eq!(hub_b.inner.service().key_package_count(&tablet_device), 0);
+    assert!(hub_b.faults.message_posts.lock().unwrap().is_empty());
+    assert!(hub_b.faults.commit_posts.lock().unwrap().is_empty());
+    // The same URL set on the tablet: checked, signed in, KeyPackages.
+    tablet
+        .client
+        .set_hub_url(&hub_id(&hub_b.inner), "fake://b")
+        .await
+        .unwrap();
     let hubs = tablet.client.hubs().await.unwrap();
     let b = status(&hubs, &hub_b.inner);
     assert_eq!(b.hub.state, HubState::Verified);
-    assert_eq!(b.hub.url.as_deref(), Some("fake://b"));
+    assert!(!b.hub.url_shared);
     assert!(b.signed_in);
     assert_eq!(hub_b.faults.challenges.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        hub_b.inner.service().key_package_count(&tablet_device),
+        gim_sdk::KEY_PACKAGE_BATCH as usize
+    );
 
     // A record without B: B is marked removed.
     let record = alice.record(3, &[(&hub_a.inner, 0)]);
@@ -325,6 +356,7 @@ async fn a_shared_url_serving_another_hub_stays_unverified() {
     let b = status(&hubs, &hub_b.inner);
     assert_eq!(b.hub.state, HubState::Unverified);
     assert_eq!(b.hub.url.as_deref(), Some("fake://c"));
+    assert!(b.hub.url_shared);
     assert!(!b.signed_in);
     assert_eq!(hub_c.faults.challenges.load(Ordering::SeqCst), 0);
 }
