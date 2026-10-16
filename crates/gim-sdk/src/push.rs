@@ -698,8 +698,8 @@ impl<S: StateStore + 'static> Client<S> {
     /// Groups with an own commit not settled yet are left to the stream.
     /// Fails only with [`ClientError::InvalidInput`] if `payload` is not a
     /// JSON object; any other failure, and running out of time, give the
-    /// generic content (see [`NotificationContent`]), silent for
-    /// membership pushes.
+    /// generic content (see [`NotificationContent`]), silent only for a
+    /// membership push that did not add this device.
     pub async fn process_push_within(
         &self,
         payload: &str,
@@ -712,8 +712,23 @@ impl<S: StateStore + 'static> Client<S> {
             Err(_) => format!("not done within {timeout:?}"),
         };
         tracing::warn!(kind = ?push.kind, error = %failure, "push not processed; generic notification");
-        let display = !matches!(push.kind, PushKind::Membership { .. });
+        // Silent only for a member change that did not add this device.
+        let display = match &push.kind {
+            PushKind::Membership { group_id, seq } => self.joined_at(group_id, *seq).await,
+            _ => true,
+        };
         Ok(self.generic(&push, display).await)
+    }
+
+    /// Whether this device is in `group_id`, added by the Commit at `seq`.
+    async fn joined_at(&self, group_id: &GroupId, seq: u64) -> bool {
+        let Some(session) = self.session() else {
+            return false;
+        };
+        matches!(
+            self.joined_actor(&session, group_id, Some(seq)).await,
+            Ok(Some(_))
+        )
     }
 
     async fn handle_push(&self, push: &Push) -> Result<NotificationContent> {
@@ -972,13 +987,43 @@ impl<S: StateStore + 'static> Client<S> {
         group_id: &GroupId,
         seq: u64,
     ) -> Result<NotificationContent> {
-        if !self.applied_seq(group_id, seq).await?.0 {
+        let joining = !self.applied_seq(group_id, seq).await?.0;
+        if joining {
             self.join_pending(session, group_id, Some(seq)).await?;
         }
         let Some(actor) = self.joined_actor(session, group_id, Some(seq)).await? else {
             return Ok(self.generic(push, true).await);
         };
+        if joining {
+            self.catch_up_joined(session, group_id).await;
+        }
         self.invite(session, push, group_id, actor).await
+    }
+
+    /// After joining `group_id` through a push: applies the messages the
+    /// hub has after the join (bounded by [`MAX_CATCH_UP`]), e.g. the
+    /// group's name and the inviter's profile sent right after the Commit,
+    /// so the invite names the group. Best effort.
+    async fn catch_up_joined(&self, session: &Session, group_id: &GroupId) {
+        let result = async {
+            let (_, contiguous) = self.applied_seq(group_id, 0).await?;
+            let until = contiguous.saturating_add(MAX_CATCH_UP);
+            let history = self
+                .group_history_from(&self.home_link(), group_id, contiguous, Some(until))
+                .await?
+                .unwrap_or_default();
+            if history.is_empty() {
+                return Ok(());
+            }
+            let events = history.into_iter().map(IncomingEvent::Message).collect();
+            self.apply_pushed(session, &self.home_link(), events, None)
+                .await
+                .map(drop)
+        }
+        .await;
+        if let Err(err) = result {
+            tracing::info!(%group_id, error = %err, "cannot catch up the joined group");
+        }
     }
 
     /// Joins the pending Welcomes of every reachable hub, the home hub
@@ -1082,9 +1127,10 @@ impl<S: StateStore + 'static> Client<S> {
             .await
     }
 
-    /// A member change: joins the group first if the change added this
-    /// device, then catches the group up to the pushed seq; shows a message
-    /// that brought, else the invite of a group joined now, else nothing.
+    /// A member change. If it added this device (its Welcome push coalesced
+    /// into this one), joins through the pending Welcomes and shows the
+    /// invite. Else catches the group up to the pushed seq and shows a
+    /// message that brought, else nothing.
     async fn push_membership(
         &self,
         session: &Session,
@@ -1092,24 +1138,33 @@ impl<S: StateStore + 'static> Client<S> {
         group_id: &GroupId,
         seq: u64,
     ) -> Result<NotificationContent> {
-        let before = self.cursors([group_id.clone()]).await?;
-        // The Commit may have added this device: its Welcome push coalesced
-        // into this one.
-        let mut joined_now = None;
         if !self.is_joined(group_id).await? {
+            // The Commit may have added this device: its Welcome push
+            // coalesced into this one.
             self.join_pending(session, group_id, Some(seq)).await?;
-            joined_now = self.joined_actor(session, group_id, Some(seq)).await?;
+            let Some(actor) = self.joined_actor(session, group_id, Some(seq)).await? else {
+                // Not joined: nothing to catch up; the stream joins it.
+                return self.silent_membership(session, push, group_id).await;
+            };
+            // The invite, like a Welcome push. Later messages caught up
+            // here have pushes of their own.
+            self.catch_up_joined(session, group_id).await;
+            return self.invite(session, push, group_id, actor).await;
         }
+        let before = self.cursors([group_id.clone()]).await?;
         self.catch_up(session, group_id, seq).await?;
-        if let Some(actor) = &joined_now {
-            self.joined(session, group_id, actor.as_ref()).await;
-        }
         if let Some(newest) = self.newest_obtained(session, push, before).await? {
             return Ok(newest);
         }
-        if let Some(actor) = joined_now {
-            return self.describe_invite(session, push, group_id, actor).await;
-        }
+        self.silent_membership(session, push, group_id).await
+    }
+
+    async fn silent_membership(
+        &self,
+        session: &Session,
+        push: &Push,
+        group_id: &GroupId,
+    ) -> Result<NotificationContent> {
         let gid = group_id.clone();
         self.describe(Some(session), push, move |d| {
             d.base(Some(&gid), NotificationKind::Membership, false)

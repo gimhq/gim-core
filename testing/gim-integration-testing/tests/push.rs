@@ -131,7 +131,8 @@ async fn pushed_message_is_shown_by_the_extension_and_applied_once() {
 }
 
 /// Bob adds alice to a group: the Welcome is pushed (or a push replacing
-/// it), the extension joins the group and shows the invite once, and the
+/// it), the extension (`ClientMode::Extension`) joins the group and shows
+/// the invite once, with the group's name and Bob as the inviter, and the
 /// app lists the group once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs a gim-hub: scripts/integration-test.sh"]
@@ -160,9 +161,19 @@ async fn pushed_invite_joins_the_group_once() {
     assert_eq!(shown.len(), 1, "{shown:?}");
     let shown = shown[0];
     assert_eq!(shown.kind, NotificationKind::Invite, "{shown:?}");
+    assert!(shown.should_display, "{shown:?}");
     assert_eq!(shown.chat_id.as_deref(), Some(group.as_str()));
-    assert!(shown.chat_title.is_some(), "{shown:?}");
+    assert_eq!(
+        shown.chat_title.as_deref(),
+        Some("Crew Kornati"),
+        "{shown:?}"
+    );
     assert_eq!(shown.sender_user_id.as_deref(), Some(bob.user_id.as_str()));
+    assert_eq!(
+        shown.sender_display_name.as_deref(),
+        Some("Bob"),
+        "{shown:?}"
+    );
 
     alice.client.start_sync().await.unwrap();
     bob.client

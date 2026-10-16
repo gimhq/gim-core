@@ -376,6 +376,7 @@ async fn welcome_push_joins_through_the_pending_welcomes() {
     assert_eq!(content.kind, NotificationKind::Invite);
     assert!(content.should_display);
     assert_eq!(content.chat_id.as_ref(), Some(&group_id));
+    assert_eq!(content.chat_title.as_deref(), Some("bob"));
     assert_eq!(content.sender_user_id, Some(bob.user_id()));
     assert_eq!(content.sender_display_name.as_deref(), Some("bob"));
     assert!(alice.has_chat(&group_id));
@@ -420,7 +421,9 @@ async fn coalesced_welcome_push_joins_and_shows_the_invite() {
     assert_eq!(content.kind, NotificationKind::Invite, "{content:?}");
     assert!(content.should_display);
     assert_eq!(content.chat_id.as_ref(), Some(&group_id));
+    assert_eq!(content.chat_title.as_deref(), Some("bob"));
     assert_eq!(content.sender_user_id, Some(bob.user_id()));
+    assert_eq!(content.sender_display_name.as_deref(), Some("bob"));
     assert!(alice.has_chat(&group_id));
     assert!(hub
         .service()
@@ -851,10 +854,44 @@ async fn membership_push_adding_this_device_joins_and_shows_the_invite() {
     assert_eq!(content.kind, NotificationKind::Invite, "{content:?}");
     assert!(content.should_display);
     assert_eq!(content.chat_id.as_ref(), Some(&group_id));
+    assert_eq!(content.chat_title.as_deref(), Some("Regatta"));
     assert_eq!(content.sender_user_id, Some(bob.user_id()));
+    assert_eq!(content.sender_display_name.as_deref(), Some("bob"));
     assert!(alice.has_chat(&group_id));
     assert!(hub
         .service()
         .pending_welcomes(&alice.device(), 10)
         .is_empty());
+}
+
+/// A Welcome push whose Welcome cannot be joined (here the hub no longer
+/// has it) still gives a displayed notification: generic content. A member
+/// change of that group that did not add this device stays silent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn welcome_push_that_cannot_join_gives_displayed_generic_content() {
+    let hub = FakeTransport::new();
+    let alice = Peer::fake(&hub, "alice").await;
+    let bob = Peer::fake(&hub, "bob").await;
+    let group_id = bob
+        .client
+        .create_group_chat(Some("Regatta".into()), &[alice.user_id()])
+        .await
+        .unwrap();
+    let welcome = hub
+        .service()
+        .pending_welcomes(&alice.device(), 10)
+        .pop()
+        .unwrap();
+    hub.service().ack_welcome(&alice.device(), &group_id);
+
+    let payload = target_payload("welcome", &group_id, welcome.seq);
+    let content = alice.client.process_push(&payload).await.unwrap();
+    assert_eq!(content.kind, NotificationKind::Generic, "{content:?}");
+    assert_eq!(content.body, GENERIC_BODY);
+    assert!(content.should_display);
+    assert!(!alice.has_chat(&group_id));
+
+    let payload = target_payload("group.member_added", &group_id, welcome.seq);
+    let content = alice.client.process_push(&payload).await.unwrap();
+    assert!(!content.should_display, "{content:?}");
 }
