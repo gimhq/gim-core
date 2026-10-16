@@ -712,15 +712,25 @@ impl GimClient {
     }
 
     /// Stops sync and the listeners and deletes the session, local data and
-    /// keystore secrets. No callback runs once it returned.
+    /// keystore secrets. No callback runs once it returned. The deletion
+    /// waits (up to 5 s, then goes ahead) for a change of the local state
+    /// in an app extension; the extension's client then fails with
+    /// `Storage`. `InvalidInput` in `ClientMode::Extension`: only the app
+    /// signs out.
     pub async fn sign_out(&self) -> Result<(), GimError> {
         let sdk = self.sdk()?;
+        if sdk.mode() == gim_sdk::ClientMode::Extension {
+            return Err(GimError::InvalidInput {
+                reason: "an app extension cannot sign out".to_string(),
+            });
+        }
         // Best effort (gim-sdk logs failures), while the keystore hooks
         // still run: the hubs stop pushing to this device.
         let _ = tokio::time::timeout(SIGN_OUT_PUSH_TIMEOUT, sdk.unregister_push()).await;
         self.callbacks.close();
         self.stop_sync_tasks();
         self.signed_out.store(true, Ordering::SeqCst);
+        let sdk = sdk.clone();
         let callbacks = self.callbacks.clone();
         let hooks = self.hooks.clone();
         let data_dir = self.data_dir.clone();
@@ -729,20 +739,24 @@ impl GimClient {
         tokio::task::spawn_blocking(move || {
             // Bounded: a callback that never returns does not hang sign-out.
             callbacks.drain(DRAIN_TIMEOUT);
-            for key in [
-                SESSION_SECRET_KEY,
-                DEVICE_KEY_SECRET_KEY,
-                ROOT_KEY_SECRET_KEY,
-                PUSH_REGISTRATION_SECRET_KEY,
-                ClientBuilder::<SqliteStore>::DB_KEY_SECRET_KEY,
-            ] {
-                hooks.call(move |hooks| hooks.secure_store_delete(key.to_string()));
-            }
-            for suffix in ["", "-wal", "-shm", "-journal"] {
-                remove_if_exists(&data_dir.join(format!("{DATABASE_FILE_NAME}{suffix}")))?;
-            }
-            remove_if_exists(&data_dir.join("tmp"))?;
-            remove_if_exists(&data_dir.join(OUTGOING_DIR))
+            // Under the store lock, so that an extension never writes to a
+            // database being deleted; gim.lock itself stays.
+            sdk.wipe_store(|| {
+                for key in [
+                    SESSION_SECRET_KEY,
+                    DEVICE_KEY_SECRET_KEY,
+                    ROOT_KEY_SECRET_KEY,
+                    PUSH_REGISTRATION_SECRET_KEY,
+                    ClientBuilder::<SqliteStore>::DB_KEY_SECRET_KEY,
+                ] {
+                    hooks.call(move |hooks| hooks.secure_store_delete(key.to_string()));
+                }
+                for suffix in ["", "-wal", "-shm", "-journal"] {
+                    remove_if_exists(&data_dir.join(format!("{DATABASE_FILE_NAME}{suffix}")))?;
+                }
+                remove_if_exists(&data_dir.join("tmp"))?;
+                Ok(remove_if_exists(&data_dir.join(OUTGOING_DIR))?)
+            })
         })
         .await??;
         Ok(())

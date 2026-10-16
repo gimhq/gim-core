@@ -47,6 +47,11 @@ pub enum ClientError {
     /// did not run. It is retried later; nothing was lost.
     #[error("store is locked by another process (waited {0:?})")]
     StoreBusy(std::time::Duration),
+    /// The app signed out and deleted the local store after this client
+    /// opened it (see [`crate::StoreLock::wipe`]): the client cannot read
+    /// or write it any more. Create a new client.
+    #[error("the local store was deleted by sign-out")]
+    StoreWiped,
     /// [`crate::Client::remove_hub`] without `confirm_owned_groups`: the hub
     /// owns (sequences) `group_count` groups this user is in. They stay
     /// reachable through the other members' hubs after the removal, but

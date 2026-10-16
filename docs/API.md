@@ -253,6 +253,16 @@ open timelines receive the changed chats and the new messages through their list
 checks for such changes first, so the app needs no extra call: call `startSync()` when it returns
 to the foreground, as usual.
 
+**Sign-out.** Only the app signs out: `signOut()` on an extension client fails with
+`InvalidInput` and deletes nothing. The app's `signOut()` deletes the database and the keystore
+secrets under the store lock, so an extension's change in flight finishes first. If the extension
+holds the lock longer than 5 s, sign-out goes ahead anyway (logged) rather than keep the user signed
+in; the timeout is fixed. Afterwards every client opened before the sign-out, in any process,
+fails its changes of the local state with `Storage("the local store was deleted by sign-out")` (the
+lock file counts the sign-outs), and a new extension client fails with `InvalidInput` (no database
+key) and creates nothing: show the generic notification and release the client. `gim.lock` itself
+is never deleted, so that both processes always lock the same file.
+
 ## GimClient
 
 | Method | Returns | Notes |

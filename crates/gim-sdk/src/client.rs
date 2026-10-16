@@ -1894,6 +1894,18 @@ impl<S: StateStore + 'static> Client<S> {
         self.locked(false, |_, _| Ok(())).await
     }
 
+    /// Runs `wipe`, which deletes the local store and the secrets
+    /// (sign-out), under the store lock: after this process's store
+    /// mutations in flight, and after another process's one, waiting up to
+    /// the store lock timeout; after the timeout it runs anyway. Every
+    /// client opened on the data directory before, this one included,
+    /// fails its store mutations with [`ClientError::StoreWiped`]
+    /// afterwards. See [`crate::StoreLock::wipe`]. Blocking; stop sync
+    /// first.
+    pub fn wipe_store(&self, wipe: impl FnOnce() -> Result<()>) -> Result<()> {
+        self.inner.store_lock.wipe(wipe)
+    }
+
     async fn locked<R, F>(&self, writes: bool, f: F) -> Result<R>
     where
         R: Send + 'static,

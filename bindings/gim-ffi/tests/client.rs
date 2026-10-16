@@ -1257,3 +1257,30 @@ async fn extension_mode_opens_the_app_state_and_never_resets_it() {
     assert_eq!(app.session().await.unwrap(), session);
     app.start_sync().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_the_app_signs_out_and_the_extension_fails_after() {
+    let transport = FakeTransport::new();
+    let alice = User::register(&transport, "alice", "Alice").await;
+    let config = ClientConfig {
+        server_url: "https://gim.example.org".to_string(),
+        mode: Some(ClientMode::Extension),
+    };
+    let nse = create_client_with_fake_transport(config, alice.hooks.clone(), transport.clone())
+        .await
+        .unwrap();
+    assert!(matches!(
+        nse.sign_out().await,
+        Err(GimError::InvalidInput { .. })
+    ));
+    assert!(alice.hooks.path("gim.sqlite3").is_file());
+    nse.set_display_name("Alice N.".to_string()).await.unwrap();
+
+    alice.client.sign_out().await.unwrap();
+    assert!(!alice.hooks.path("gim.sqlite3").exists());
+    assert!(matches!(
+        nse.set_display_name("Alice S.".to_string()).await,
+        Err(GimError::Storage { .. })
+    ));
+    assert!(!alice.hooks.path("gim.sqlite3").exists());
+}
