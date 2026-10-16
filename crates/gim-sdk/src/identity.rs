@@ -342,9 +342,9 @@ impl<S: StateStore + 'static> Client<S> {
             return Ok(None);
         };
         let record = self
-            .authed(|t| {
+            .read_routed(|transport, t| {
                 let user_id = user_id.clone();
-                async move { self.inner.transport.user(Some(&t), &user_id).await }
+                async move { transport.user(Some(&t), &user_id).await }
             })
             .await?;
         let Some(record) = record else {
@@ -439,7 +439,9 @@ impl<S: StateStore + 'static> Client<S> {
     /// skipped; network and auth errors are returned.
     pub(crate) async fn refresh_device_list(&self, user_id: &UserId) -> Result<Vec<DeviceRef>> {
         let fetched = self
-            .authed(|t| async move { self.inner.transport.device_list(Some(&t), user_id).await })
+            .read_routed(
+                |transport, t| async move { transport.device_list(Some(&t), user_id).await },
+            )
             .await;
         let bytes = match fetched {
             Ok(Some(bytes)) => bytes,

@@ -663,6 +663,9 @@ internal interface UniffiCallbackInterfaceChatListListenerMethod0 : com.sun.jna.
 internal interface UniffiCallbackInterfaceConnectionStateListenerMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`state`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
+internal interface UniffiCallbackInterfaceHubListListenerMethod0 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`hubs`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
 internal interface UniffiCallbackInterfaceTypingListenerMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`userIds`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
@@ -722,6 +725,25 @@ internal open class UniffiVTableCallbackInterfaceConnectionStateListener(
         `uniffiFree` = other.`uniffiFree`
         `uniffiClone` = other.`uniffiClone`
         `onChange` = other.`onChange`
+    }
+
+}
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "onUpdate")
+internal open class UniffiVTableCallbackInterfaceHubListListener(
+    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+    @JvmField internal var `onUpdate`: UniffiCallbackInterfaceHubListListenerMethod0? = null,
+) : Structure() {
+    class UniffiByValue(
+        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+        `onUpdate`: UniffiCallbackInterfaceHubListListenerMethod0? = null,
+    ): UniffiVTableCallbackInterfaceHubListListener(`uniffiFree`,`uniffiClone`,`onUpdate`,), Structure.ByValue
+
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceHubListListener) {
+        `uniffiFree` = other.`uniffiFree`
+        `uniffiClone` = other.`uniffiClone`
+        `onUpdate` = other.`onUpdate`
     }
 
 }
@@ -848,6 +870,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_gim_core_checksum_method_connectionstatelistener_on_change(
     ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_add_hub(
+    ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_add_members(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_approve_link(
@@ -886,6 +910,10 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_find_user(
     ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_hub_list(
+    ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_hubs(
+    ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_leave_chat(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_local_state_reset(
@@ -895,6 +923,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_gim_core_checksum_method_gimclient_react(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_release_handle(
+    ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_remove_hub(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_remove_member(
     ): Int
@@ -917,6 +947,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_gim_core_checksum_method_gimclient_set_local_time_zone(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_set_network_reachable(
+    ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_set_primary_hub(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_set_typing(
     ): Int
@@ -941,6 +973,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_gim_core_checksum_method_gimclient_user_id(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_wait_link(
+    ): Int
+    external fun uniffi_gim_core_checksum_method_hublistlistener_on_update(
     ): Int
     external fun uniffi_gim_core_checksum_method_typinglistener_on_update(
     ): Int
@@ -994,6 +1028,7 @@ internal object UniffiLib {
         Native.register(UniffiLib::class.java, findLibraryName(componentName = "gim_core"))
         uniffiCallbackInterfaceChatListListener.register(this)
         uniffiCallbackInterfaceConnectionStateListener.register(this)
+        uniffiCallbackInterfaceHubListListener.register(this)
         uniffiCallbackInterfaceLocalTimeZone.register(this)
         uniffiCallbackInterfacePlatformHooks.register(this)
         uniffiCallbackInterfaceTimelineListener.register(this)
@@ -1022,6 +1057,8 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_gim_core_fn_free_gimclient(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_gim_core_fn_method_gimclient_add_hub(`ptr`: Long,`url`: RustBuffer.ByValue,
+    ): Long
     external fun uniffi_gim_core_fn_method_gimclient_add_members(`ptr`: Long,`chatId`: RustBuffer.ByValue,`userIds`: RustBuffer.ByValue,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_approve_link(`ptr`: Long,`qrString`: RustBuffer.ByValue,
@@ -1060,6 +1097,10 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_find_user(`ptr`: Long,`handle`: RustBuffer.ByValue,
     ): Long
+    external fun uniffi_gim_core_fn_method_gimclient_hub_list(`ptr`: Long,`listener`: Long,
+    ): Long
+    external fun uniffi_gim_core_fn_method_gimclient_hubs(`ptr`: Long,
+    ): Long
     external fun uniffi_gim_core_fn_method_gimclient_leave_chat(`ptr`: Long,`chatId`: RustBuffer.ByValue,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_local_state_reset(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1069,6 +1110,8 @@ internal object UniffiLib {
     external fun uniffi_gim_core_fn_method_gimclient_react(`ptr`: Long,`chatId`: RustBuffer.ByValue,`messageId`: RustBuffer.ByValue,`emoji`: RustBuffer.ByValue,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_release_handle(`ptr`: Long,
+    ): Long
+    external fun uniffi_gim_core_fn_method_gimclient_remove_hub(`ptr`: Long,`hubId`: RustBuffer.ByValue,`confirmOwnedGroups`: Byte,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_remove_member(`ptr`: Long,`chatId`: RustBuffer.ByValue,`userId`: RustBuffer.ByValue,
     ): Long
@@ -1092,6 +1135,8 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_gim_core_fn_method_gimclient_set_network_reachable(`ptr`: Long,`reachable`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_gim_core_fn_method_gimclient_set_primary_hub(`ptr`: Long,`hubId`: RustBuffer.ByValue,
+    ): Long
     external fun uniffi_gim_core_fn_method_gimclient_set_typing(`ptr`: Long,`chatId`: RustBuffer.ByValue,`active`: Byte,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_sign_out(`ptr`: Long,
@@ -1116,6 +1161,14 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_gim_core_fn_method_gimclient_wait_link(`ptr`: Long,`link`: Long,
     ): Long
+    external fun uniffi_gim_core_fn_clone_hublistlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_gim_core_fn_free_hublistlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_gim_core_fn_init_callback_vtable_hublistlistener(`vtable`: UniffiVTableCallbackInterfaceHubListListener,
+    ): Unit
+    external fun uniffi_gim_core_fn_method_hublistlistener_on_update(`ptr`: Long,`hubs`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_gim_core_fn_clone_typinglistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_gim_core_fn_free_typinglistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1330,6 +1383,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_gim_core_checksum_method_connectionstatelistener_on_change() and 0xFFFF) != 1846) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_add_hub() and 0xFFFF) != 18081) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_add_members() and 0xFFFF) != 22623) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1387,6 +1443,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_gim_core_checksum_method_gimclient_find_user() and 0xFFFF) != 25186) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_hub_list() and 0xFFFF) != 18852) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_hubs() and 0xFFFF) != 23286) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_leave_chat() and 0xFFFF) != 60569) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1400,6 +1462,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_release_handle() and 0xFFFF) != 61692) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_remove_hub() and 0xFFFF) != 44259) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_remove_member() and 0xFFFF) != 31958) {
@@ -1433,6 +1498,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_set_network_reachable() and 0xFFFF) != 23325) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_set_primary_hub() and 0xFFFF) != 23675) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_set_typing() and 0xFFFF) != 10433) {
@@ -1469,6 +1537,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_wait_link() and 0xFFFF) != 17553) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_gim_core_checksum_method_hublistlistener_on_update() and 0xFFFF) != 39691) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_typinglistener_on_update() and 0xFFFF) != 51337) {
@@ -1748,6 +1819,33 @@ private class JavaLangRefCleanable(
     val cleanable: java.lang.ref.Cleaner.Cleanable
 ) : UniffiCleaner.Cleanable {
     override fun clean() = cleanable.clean()
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterUByte: FfiConverter<UByte, Byte> {
+    override fun lift(value: Byte): UByte {
+        return value.toUByte()
+    }
+
+    fun lift(value: Int): UByte {
+        return value.toUByte()
+    }
+
+    override fun read(buf: ByteBuffer): UByte {
+        return lift(buf.get())
+    }
+
+    override fun lower(value: UByte): Byte {
+        return value.toByte()
+    }
+
+    override fun allocationSize(value: UByte) = 1UL
+
+    override fun write(value: UByte, buf: ByteBuffer) {
+        buf.put(value.toByte())
+    }
 }
 
 /**
@@ -2707,6 +2805,16 @@ public object FfiConverterTypeConnectionStateListener: FfiConverter<ConnectionSt
  */
 public interface GimClientInterface {
     
+    /**
+     * Adds the hub at `url` (entered by the user) to the hosting record:
+     * checks that it is a gim hub, signs in there, lists it last
+     * (least preferred), uploads this device's KeyPackages there, follows
+     * its events and shares its URL with the own other devices. Adding a
+     * listed hub again only records `url` for it on this device. Returns
+     * the hub.
+     */
+    suspend fun `addHub`(`url`: kotlin.String): HubInfo
+    
     suspend fun `addMembers`(`chatId`: kotlin.String, `userIds`: List<kotlin.String>)
     
     /**
@@ -2812,6 +2920,19 @@ public interface GimClientInterface {
     suspend fun `findUser`(`handle`: kotlin.String): UserProfile?
     
     /**
+     * Subscribes to the user's hubs; the first callback carries the
+     * current list.
+     */
+    suspend fun `hubList`(`listener`: HubListListener): TaskHandle
+    
+    /**
+     * The hubs of the user's hosting record known to this device, primary
+     * first (by priority, then hub id), including removed ones. With a
+     * single hub: the home hub.
+     */
+    suspend fun `hubs`(): List<HubInfo>
+    
+    /**
      * Starts leaving the chat; returns once the hub accepted the request,
      * with the chat `ChatState::Leaving` (see `ChatState`). Calling it again
      * while leaving re-sends the request. `ChatNotActive` once left.
@@ -2839,6 +2960,15 @@ public interface GimClientInterface {
      * there is none.
      */
     suspend fun `releaseHandle`()
+    
+    /**
+     * Removes a hub from the hosting record. `HomeHub` for the hub this
+     * client was created for, `LastHub` for the only listed hub,
+     * `HubOwnsGroups` (with the number of chats) unless
+     * `confirm_owned_groups` if the hub owns chats of this user,
+     * `HubNotDrained` while something sent through it is not settled.
+     */
+    suspend fun `removeHub`(`hubId`: kotlin.String, `confirmOwnedGroups`: kotlin.Boolean)
     
     suspend fun `removeMember`(`chatId`: kotlin.String, `userId`: kotlin.String)
     
@@ -2913,6 +3043,13 @@ public interface GimClientInterface {
      * Reports a reachability change from the platform network monitor.
      */
     fun `setNetworkReachable`(`reachable`: kotlin.Boolean)
+    
+    /**
+     * Makes a listed hub the primary hub (priority 0, the others follow
+     * in their order). Every hub whose priority changes must be reachable
+     * from this device (`HubInfo.signed_in`), else `InvalidInput`.
+     */
+    suspend fun `setPrimaryHub`(`hubId`: kotlin.String)
     
     /**
      * Reports whether the user is typing. Call it with `true` on every
@@ -3094,6 +3231,36 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
         return uniffiRustCall() { status ->
             UniffiLib.uniffi_gim_core_fn_clone_gimclient(handle, status)
         }
+    }
+
+    
+    /**
+     * Adds the hub at `url` (entered by the user) to the hosting record:
+     * checks that it is a gim hub, signs in there, lists it last
+     * (least preferred), uploads this device's KeyPackages there, follows
+     * its events and shares its URL with the own other devices. Adding a
+     * listed hub again only records `url` for it on this device. Returns
+     * the hub.
+     */
+    @Throws(GimException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `addHub`(`url`: kotlin.String) : HubInfo {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_gim_core_fn_method_gimclient_add_hub(
+                uniffiHandle,
+                
+        FfiConverterString.lower(`url`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_gim_core_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_gim_core_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeHubInfo.lift(it) },
+        // Error FFI converter
+        GimException.ErrorHandler,
+    )
     }
 
     
@@ -3599,6 +3766,58 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
 
     
     /**
+     * Subscribes to the user's hubs; the first callback carries the
+     * current list.
+     */
+    @Throws(GimException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `hubList`(`listener`: HubListListener) : TaskHandle {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_gim_core_fn_method_gimclient_hub_list(
+                uniffiHandle,
+                
+        FfiConverterTypeHubListListener.lower(`listener`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_gim_core_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_gim_core_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterTypeTaskHandle.lift(it) },
+        // Error FFI converter
+        GimException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * The hubs of the user's hosting record known to this device, primary
+     * first (by priority, then hub id), including removed ones. With a
+     * single hub: the home hub.
+     */
+    @Throws(GimException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `hubs`() : List<HubInfo> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_gim_core_fn_method_gimclient_hubs(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_gim_core_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_gim_core_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeHubInfo.lift(it) },
+        // Error FFI converter
+        GimException.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * Starts leaving the chat; returns once the hub accepted the request,
      * with the chat `ChatState::Leaving` (see `ChatState`). Calling it again
      * while leaving re-sends the request. `ChatNotActive` once left.
@@ -3710,6 +3929,37 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
             UniffiLib.uniffi_gim_core_fn_method_gimclient_release_handle(
                 uniffiHandle,
                 
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_gim_core_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_gim_core_rust_future_free_void(future) },
+        // lift function
+        { },
+        
+        // Error FFI converter
+        GimException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Removes a hub from the hosting record. `HomeHub` for the hub this
+     * client was created for, `LastHub` for the only listed hub,
+     * `HubOwnsGroups` (with the number of chats) unless
+     * `confirm_owned_groups` if the hub owns chats of this user,
+     * `HubNotDrained` while something sent through it is not settled.
+     */
+    @Throws(GimException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `removeHub`(`hubId`: kotlin.String, `confirmOwnedGroups`: kotlin.Boolean) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_gim_core_fn_method_gimclient_remove_hub(
+                uniffiHandle,
+                
+        FfiConverterString.lower(`hubId`),
+        FfiConverterBoolean.lower(`confirmOwnedGroups`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_void(future, callback, continuation) },
@@ -4015,6 +4265,34 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
     }
     
     
+
+    
+    /**
+     * Makes a listed hub the primary hub (priority 0, the others follow
+     * in their order). Every hub whose priority changes must be reachable
+     * from this device (`HubInfo.signed_in`), else `InvalidInput`.
+     */
+    @Throws(GimException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `setPrimaryHub`(`hubId`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_gim_core_fn_method_gimclient_set_primary_hub(
+                uniffiHandle,
+                
+        FfiConverterString.lower(`hubId`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_gim_core_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_gim_core_rust_future_free_void(future) },
+        // lift function
+        { },
+        
+        // Error FFI converter
+        GimException.ErrorHandler,
+    )
+    }
 
     
     /**
@@ -4356,6 +4634,329 @@ public object FfiConverterTypeGimClient: FfiConverter<GimClient, Long> {
     override fun allocationSize(value: GimClient) = 8UL
 
     override fun write(value: GimClient, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+/**
+ * Receives the user's hubs (see `GimClient::hubs`) whenever they may have
+ * changed: added, removed, verified, reprioritized, or a URL shared by
+ * another own device. The first callback carries the current list. Called
+ * on gim-core's callback thread.
+ */
+public interface HubListListener {
+    
+    fun `onUpdate`(`hubs`: List<HubInfo>)
+    
+    companion object
+}
+
+/**
+ * Receives the user's hubs (see `GimClient::hubs`) whenever they may have
+ * changed: added, removed, verified, reprioritized, or a URL shared by
+ * another own device. The first callback carries the current list. Called
+ * on gim-core's callback thread.
+ */
+open class HubListListenerImpl: Disposable, AutoCloseable, HubListListener
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    /**
+     * Whether the current object has been destroyed and its reference is gone in the Rust side.
+     */
+    val uniffiIsDestroyed: Boolean get() = wasDestroyed.get()
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_gim_core_fn_free_hublistlistener(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_gim_core_fn_clone_hublistlistener(handle, status)
+        }
+    }
+
+    override fun `onUpdate`(`hubs`: List<HubInfo>)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_gim_core_fn_method_hublistlistener_on_update(
+        it,
+        
+        FfiConverterSequenceTypeHubInfo.lower(`hubs`),_status)
+}
+    }
+    
+    
+
+    
+
+    
+
+
+    
+    
+    /**
+     * @suppress
+     */
+    companion object
+    
+}
+
+
+
+// Put the implementation in an object so we don't pollute the top-level namespace
+internal object uniffiCallbackInterfaceHubListListener {
+    internal object `onUpdate`: UniffiCallbackInterfaceHubListListenerMethod0 {
+        override fun callback(`uniffiHandle`: Long,`hubs`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeHubListListener.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onUpdate`(
+                    FfiConverterSequenceTypeHubInfo.lift(`hubs`),
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
+        override fun callback(handle: Long) {
+            FfiConverterTypeHubListListener.handleMap.remove(handle)
+        }
+    }
+
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeHubListListener.handleMap.clone(handle)
+        }
+    }
+
+    internal var vtable = UniffiVTableCallbackInterfaceHubListListener.UniffiByValue(
+        uniffiFree,
+        uniffiClone,
+        `onUpdate`,
+    )
+
+    // Registers the foreign callback with the Rust side.
+    // This method is generated for each callback interface.
+    internal fun register(lib: UniffiLib) {
+        lib.uniffi_gim_core_fn_init_callback_vtable_hublistlistener(vtable)
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeHubListListener: FfiConverter<HubListListener, Long> {
+    internal val handleMap = UniffiHandleMap<HubListListener>()
+
+    override fun lower(value: HubListListener): Long {
+        if (value is HubListListenerImpl) {
+             // Rust-implemented object.  Clone the handle and return it
+            return value.uniffiCloneHandle()
+         } else {
+            // Kotlin object, generate a new vtable handle and return that.
+            return handleMap.insert(value)
+         }
+    }
+
+    override fun lift(value: Long): HubListListener {
+        if ((value and 1.toLong()) == 0.toLong()) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return HubListListenerImpl(UniffiWithHandle, value)
+        } else {
+            // Kotlin-generated handle, get the object from the handle map
+            return handleMap.remove(value)
+        }
+    }
+
+    override fun read(buf: ByteBuffer): HubListListener {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: HubListListener) = 8UL
+
+    override fun write(value: HubListListener, buf: ByteBuffer) {
         buf.putLong(lower(value))
     }
 }
@@ -7196,6 +7797,88 @@ public object FfiConverterTypeDeviceInfo: FfiConverterRustBuffer<DeviceInfo> {
 
 
 /**
+ * A hub of the user's hosting record, for the hub settings screen.
+ */
+data class HubInfo (
+    var `hubId`: kotlin.String
+    , 
+    /**
+     * Client API base URL, once known.
+     */
+    var `url`: kotlin.String?
+    , 
+    var `state`: HubState
+    , 
+    /**
+     * Priority in the hosting record; lower is preferred.
+     */
+    var `priority`: kotlin.UByte
+    , 
+    /**
+     * The first listed hub: submissions go there first.
+     */
+    var `isPrimary`: kotlin.Boolean
+    , 
+    /**
+     * The hub this client was created for (`ClientConfig.server_url`);
+     * it cannot be removed.
+     */
+    var `isHome`: kotlin.Boolean
+    , 
+    /**
+     * This device holds a session on the hub.
+     */
+    var `signedIn`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeHubInfo: FfiConverterRustBuffer<HubInfo> {
+    override fun read(buf: ByteBuffer): HubInfo {
+        return HubInfo(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterTypeHubState.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: HubInfo) = (
+            FfiConverterString.allocationSize(value.`hubId`) +
+            FfiConverterOptionalString.allocationSize(value.`url`) +
+            FfiConverterTypeHubState.allocationSize(value.`state`) +
+            FfiConverterUByte.allocationSize(value.`priority`) +
+            FfiConverterBoolean.allocationSize(value.`isPrimary`) +
+            FfiConverterBoolean.allocationSize(value.`isHome`) +
+            FfiConverterBoolean.allocationSize(value.`signedIn`)
+    )
+
+    override fun write(value: HubInfo, buf: ByteBuffer) {
+            FfiConverterString.write(value.`hubId`, buf)
+            FfiConverterOptionalString.write(value.`url`, buf)
+            FfiConverterTypeHubState.write(value.`state`, buf)
+            FfiConverterUByte.write(value.`priority`, buf)
+            FfiConverterBoolean.write(value.`isPrimary`, buf)
+            FfiConverterBoolean.write(value.`isHome`, buf)
+            FfiConverterBoolean.write(value.`signedIn`, buf)
+    }
+}
+
+
+
+/**
  * Handle to an encrypted attachment. Pass it back to `fetch_media` /
  * `fetch_thumbnail`; keys and blob ids never leave Rust.
  */
@@ -8137,6 +8820,59 @@ sealed class GimException: kotlin.Exception() {
             get() = "chatId=${ `chatId` }, state=${ `state` }"
     }
     
+    /**
+     * `remove_hub` without `confirm_owned_groups`: the hub owns
+     * `group_count` chats of this user. They are not moved; after the
+     * removal they stay reachable through the other members' hubs. Ask
+     * the user, then call `remove_hub` again with `confirm_owned_groups`.
+     */
+    class HubOwnsGroups(
+        
+        val `hubId`: kotlin.String, 
+        
+        val `groupCount`: kotlin.UInt
+        ) : GimException() {
+        override val message
+            get() = "hubId=${ `hubId` }, groupCount=${ `groupCount` }"
+    }
+    
+    /**
+     * The hub is the only listed hub and cannot be removed.
+     */
+    class LastHub(
+        
+        val `hubId`: kotlin.String
+        ) : GimException() {
+        override val message
+            get() = "hubId=${ `hubId` }"
+    }
+    
+    /**
+     * The hub is the one this client was created for (`HubInfo.is_home`)
+     * and cannot be removed.
+     */
+    class HomeHub(
+        
+        val `hubId`: kotlin.String
+        ) : GimException() {
+        override val message
+            get() = "hubId=${ `hubId` }"
+    }
+    
+    /**
+     * Messages or membership changes sent through the hub are not settled
+     * yet, so it cannot be removed now; try again later.
+     */
+    class HubNotDrained(
+        
+        val `hubId`: kotlin.String, 
+        
+        val `reason`: kotlin.String
+        ) : GimException() {
+        override val message
+            get() = "hubId=${ `hubId` }, reason=${ `reason` }"
+    }
+    
 
     
 
@@ -8189,6 +8925,20 @@ public object FfiConverterTypeGimError : FfiConverterRustBuffer<GimException> {
             12 -> GimException.ChatNotActive(
                 FfiConverterString.read(buf),
                 FfiConverterTypeChatState.read(buf),
+                )
+            13 -> GimException.HubOwnsGroups(
+                FfiConverterString.read(buf),
+                FfiConverterUInt.read(buf),
+                )
+            14 -> GimException.LastHub(
+                FfiConverterString.read(buf),
+                )
+            15 -> GimException.HomeHub(
+                FfiConverterString.read(buf),
+                )
+            16 -> GimException.HubNotDrained(
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
@@ -8257,6 +9007,28 @@ public object FfiConverterTypeGimError : FfiConverterRustBuffer<GimException> {
                 + FfiConverterString.allocationSize(value.`chatId`)
                 + FfiConverterTypeChatState.allocationSize(value.`state`)
             )
+            is GimException.HubOwnsGroups -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`hubId`)
+                + FfiConverterUInt.allocationSize(value.`groupCount`)
+            )
+            is GimException.LastHub -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`hubId`)
+            )
+            is GimException.HomeHub -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`hubId`)
+            )
+            is GimException.HubNotDrained -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`hubId`)
+                + FfiConverterString.allocationSize(value.`reason`)
+            )
         }
     }
 
@@ -8323,10 +9095,81 @@ public object FfiConverterTypeGimError : FfiConverterRustBuffer<GimException> {
                 FfiConverterTypeChatState.write(value.`state`, buf)
                 Unit
             }
+            is GimException.HubOwnsGroups -> {
+                buf.putInt(13)
+                FfiConverterString.write(value.`hubId`, buf)
+                FfiConverterUInt.write(value.`groupCount`, buf)
+                Unit
+            }
+            is GimException.LastHub -> {
+                buf.putInt(14)
+                FfiConverterString.write(value.`hubId`, buf)
+                Unit
+            }
+            is GimException.HomeHub -> {
+                buf.putInt(15)
+                FfiConverterString.write(value.`hubId`, buf)
+                Unit
+            }
+            is GimException.HubNotDrained -> {
+                buf.putInt(16)
+                FfiConverterString.write(value.`hubId`, buf)
+                FfiConverterString.write(value.`reason`, buf)
+                Unit
+            }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 
 }
+
+
+
+/**
+ * Where a hub of the user's hosting record stands on this device.
+ */
+
+enum class HubState {
+    
+    /**
+     * Listed, but this device has no URL for it that proved the hub's
+     * identity (none known yet, or only one shared by another own device):
+     * never contacted.
+     */
+    UNVERIFIED,
+    /**
+     * Listed, and its URL proved the hub's identity.
+     */
+    VERIFIED,
+    /**
+     * No longer listed by the hosting record.
+     */
+    REMOVED;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeHubState: FfiConverterRustBuffer<HubState> {
+    override fun read(buf: ByteBuffer) = try {
+        HubState.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: HubState) = 4UL
+
+    override fun write(value: HubState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
 
 
 
@@ -9504,6 +10347,34 @@ public object FfiConverterSequenceTypeDeviceInfo: FfiConverterRustBuffer<List<De
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeDeviceInfo.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeHubInfo: FfiConverterRustBuffer<List<HubInfo>> {
+    override fun read(buf: ByteBuffer): List<HubInfo> {
+        val len = buf.getInt()
+        return List<HubInfo>(len) {
+            FfiConverterTypeHubInfo.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<HubInfo>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeHubInfo.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<HubInfo>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeHubInfo.write(it, buf)
         }
     }
 }

@@ -111,13 +111,15 @@ user's signed DeviceList. Handles are optional directory entries pointing at a u
   Publication failures never fail these calls and are retried by sync. A federated request the
   hub rejects with 403 `hosting_record_required` publishes the record and is retried once; only if
   that fails does the call fail with `Server(403, …)`.
-- **Multiple hubs** (multi-homing, groundwork): gim-core keeps a registry of the hubs the hosting
+- **Multiple hubs** (multi-homing): gim-core keeps a registry of the hubs the hosting
   record lists, with each hub's URL and this device's session there; it is persisted and restored
-  with the session. The hub the client was created with is checked with `GET /v2/hub` and
-  recorded. A URL set on this device for another listed hub is used only after `GET /v2/hub`
-  there proves the listed hub id, then the device signs in there too; URLs set on a device are
-  shared with the user's other devices through the hidden self group. The registry follows the record on every publication and on the hub's
-  `hosting_record.updated` event. No API for the app yet.
+  with the session. The hub the client was created with (the home hub) is checked with
+  `GET /v2/hub` and recorded. A URL set on this device for another listed hub is used only after
+  `GET /v2/hub` there proves the listed hub id, then the device signs in there too; URLs set on a
+  device are shared with the user's other devices through the hidden self group. The registry
+  follows the record on every publication and on the hub's `hosting_record.updated` event. The
+  app manages it with `hubs`, `addHub`, `removeHub`, `setPrimaryHub` and `hubList` (see *Hub
+  management*). With a single hub nothing changes: `hubs()` returns the home hub.
   - Hub URLs received from the user's other devices are recorded but not contacted: such a hub
     stays unverified (no `GET /v2/hub`, no sign-in, no KeyPackages, no sending or receiving)
     until URL-bound hub verification lands, because a relay at a wrong URL could pass the
@@ -131,8 +133,8 @@ user's signed DeviceList. Handles are optional directory entries pointing at a u
     other hubs while one is down. A missing message is read from the hub that showed the gap,
     else from another listed hub. A chat invitation is joined once and acknowledged on every hub
     that holds it. An expired cursor on one hub is recovered from that hub alone. `connectionState`
-    reports the hub the client was created with; the other hubs' failures are retried in the
-    background.
+    reports the best state over the followed hubs: `Connected` while at least one of them is
+    reachable; failures are retried in the background per hub.
   - Sending: messages, member changes and leave Proposals go to the primary hub (lowest priority).
     If that hub itself cannot be reached (network error, timeout, 5xx), gim-core sends the same
     request (same `client_id` and bytes) to the next listed hub; the chat's owning hub keeps it
@@ -144,8 +146,13 @@ user's signed DeviceList. Handles are optional directory entries pointing at a u
   - KeyPackages: each listed hub the device is signed in to gets its own one-time KeyPackages and
     last-resort KeyPackage; a KeyPackage is uploaded to one hub only, ever (also after that hub
     is removed). A hub's `keypackages.low` (or an expired cursor there) tops up that hub only.
-  - Uploads, chat creation and all other requests still go through the hub the client was created
-    with.
+  - Reads of DeviceLists, of the user directory and of the hosting record go to the home hub and,
+    while it cannot be reached (network error, 5xx), to the other listed hubs in priority order; a
+    definite answer (also a rejection) is never retried elsewhere.
+  - Uploads, chat creation, handles, linking and all other requests still go through the home hub.
+  - After a restore from the recovery code the hub list is read again from the hosting record and
+    the hub map is sent to the new self group, so devices linked from the restored one learn the
+    hub URLs; a newly linked device gets the map from the device approving it.
 - **Federation**: users are addressed by user id everywhere; a remote user may have no handle and is
   shown by display name, else a short user id. A chat is created on the own hub, which owns it (the
   `<hub_id>/` prefix of its id); in chats owned by another hub, messages and member changes of
@@ -228,12 +235,57 @@ user's signed DeviceList. Handles are optional directory entries pointing at a u
 | `setLocalTimeZone(zone?)` | | Synchronous, never throws. Date separators follow `zone`; `null`/`nil` is UTC (the default). See *Local time zone*. |
 | `connectionState(listener)` | `TaskHandle` | `Offline` until `startSync` and after a failure while waiting to retry; `Connecting` → `Syncing` (catching up) → `Connected`. |
 | `typing(chatId, listener)` | `TaskHandle` | Reports user ids other than the signed-in user. |
+| `hubs()` | `[HubInfo]` | See *Hub management*. |
+| `addHub(url)` | `HubInfo` | See *Hub management*. `InvalidInput` for a URL that is not `http(s)://host…` or does not serve a gim hub, `Network` if it cannot be reached. |
+| `removeHub(hubId, confirmOwnedGroups)` | | See *Hub management*. `HomeHub`, `LastHub`, `HubOwnsGroups`, `HubNotDrained`; `InvalidInput` for a hub that is not listed. |
+| `setPrimaryHub(hubId)` | | See *Hub management*. `InvalidInput` for a hub that is not listed or, when its priority has to change, not reachable from this device. |
+| `hubList(listener)` | `TaskHandle` | `HubListListener.onUpdate(hubs)`: the current `hubs()` first, then again whenever the registry may have changed. |
 
 A message id is the client id chosen when the message is queued; it stays the same from local echo
 to delivery, so native code can key views by it.
 
 `DeviceInfo` is `deviceId`, `createdAtMs` (when the device was certified; 0 for revoked devices),
 `isCurrent` (this client's device) and `revoked`.
+
+### Hub management
+
+For the hub settings screen. A user's hosting record lists 1 to 16 hubs; every own device uses all
+of them (see *Multiple hubs*). `HubInfo` is `hubId`, `url?` (client API base URL, once known),
+`state` (`HubState`), `priority` (lower is preferred), `isPrimary` (the first listed hub:
+messages are submitted there first), `isHome` (the hub of `ClientConfig.serverUrl`) and `signedIn`
+(this device holds a session there). `hubs()` lists them primary first (priority, then hub id),
+including removed ones.
+
+| `HubState` | Meaning |
+|---|---|
+| `Unverified` | Listed, but this device has no URL for it that proved the hub's identity (none yet, or only one shared by another own device, which is never contacted): call `addHub(url)` with its URL on this device. |
+| `Verified` | Listed and in use. |
+| `Removed` | No longer listed by the hosting record. |
+
+- `addHub(url)`: the user enters the URL on this device, so gim-core may contact it. It checks the
+  URL with `GET /v2/hub`, uploads the DeviceList there, signs in, has the hub co-sign its entry
+  (listed last, i.e. least preferred), publishes the new hosting record (to the home hub, the new
+  hub and the other listed hubs), uploads this device's KeyPackages and the recovery backup there,
+  follows its events while sync runs and shares its URL with the user's other devices. Each
+  other device stays `Unverified` for that hub until the URL is entered there too. Calling it for a
+  listed hub only records the URL for it on this device.
+- `removeHub(hubId, confirmOwnedGroups)`: the home hub is never removed (`HomeHub`): to move away
+  from it, make another hub primary and keep it as a secondary hub. The only listed hub is never
+  removed (`LastHub`). If the hub owns chats of this user (the `<hubId>/` prefix of the chat id),
+  the call fails with `HubOwnsGroups(hubId, groupCount)` unless `confirmOwnedGroups`: chats are not
+  moved to another hub; the removed hub keeps running them and this user reaches them through the
+  remaining hubs. Before the record changes, gim-core reads the hub's pending events and chat
+  invitations (skipped if it cannot be reached; the other hubs hold the same messages) and flushes
+  the outbox; `HubNotDrained` while messages or member changes are still unsent (try again later).
+  Then the record without the hub is published (also to the removed hub), its event stream stops
+  and its session is dropped; its KeyPackages are never reused.
+- `setPrimaryHub(hubId)`: gives the hub priority 0, the others follow in their current order;
+  each hub whose priority changes co-signs a new entry, so this device must be signed in there.
+  Messages and member changes are then submitted to the new primary first. Nothing happens for
+  the current primary.
+- Every change re-sends the hub map to the user's other devices; their registries follow the
+  record when their hubs announce it (`hosting_record.updated`). `hubList` reports changes from any
+  of these sources.
 
 ### Chat state
 
@@ -305,8 +357,8 @@ not bucket by day; format its timestamps natively.
 
 ## Listeners and threading
 
-`ChatListListener`, `TimelineListener`, `ConnectionStateListener` and `TypingListener` are
-implemented by the app.
+`ChatListListener`, `TimelineListener`, `ConnectionStateListener`, `TypingListener` and
+`HubListListener` are implemented by the app.
 
 - **Callbacks arrive on gim-core's callback thread** (see *Threading of platform callbacks*). Hop to the main thread (Kotlin:
   `withContext(Dispatchers.Main)` / `Handler(Looper.getMainLooper())`; Swift:
@@ -316,7 +368,8 @@ implemented by the app.
 - **Keep the `TaskHandle`.** Dropping it (Kotlin: `close()` / garbage collection; Swift: releasing
   the last reference) or calling `cancel()` ends the subscription. `isFinished()` reports whether it
   has ended.
-- `ConnectionStateListener.onChange` and `TypingListener.onUpdate` first deliver the current value.
+- `ConnectionStateListener.onChange`, `TypingListener.onUpdate` and `HubListListener.onUpdate`
+  first deliver the current value.
 
 ### Threading of platform callbacks
 
@@ -397,9 +450,14 @@ The chat list is ordered most recently updated first; a timeline oldest first.
 | `NotImplemented` | In the contract but not implemented in this build. | Development builds only. |
 | `Internal(reason)` | Bug, or an unexpected exception thrown by a platform hook. | Report. |
 | `ChatNotActive(chatId, state)` | The call sends to or changes a chat this device is leaving (`state = Leaving`) or has left (`Left`); see *Chat state*. | Show the chat read-only. |
+| `HubOwnsGroups(hubId, groupCount)` | `removeHub` without `confirmOwnedGroups`: the hub owns `groupCount` chats of this user; see *Hub management*. | Ask the user, then call again with `confirmOwnedGroups = true`. |
+| `LastHub(hubId)` | `removeHub` of the only listed hub. | Explain; add another hub first. |
+| `HomeHub(hubId)` | `removeHub` of the hub the client was created for. | Explain; offer `setPrimaryHub` for another hub. |
+| `HubNotDrained(hubId, reason)` | `removeHub` while messages or member changes are not settled yet. | Retry later. |
 
 Kotlin throws `GimException.<Variant>`; Swift throws `GimError.<Variant>`. `ChatNotActive` was added
-after M2b: an exhaustive Swift `switch` / Kotlin `when` over the error needs a new case.
+after M2b, and `HubOwnsGroups`, `LastHub`, `HomeHub` and `HubNotDrained` in M2c: an exhaustive
+Swift `switch` / Kotlin `when` over the error needs the new cases.
 
 ## Other functions
 

@@ -41,6 +41,24 @@ pub enum ClientError {
     Io(#[from] std::io::Error),
     #[error("blocking task failed: {0}")]
     Task(String),
+    /// [`crate::Client::remove_hub`] without `confirm_owned_groups`: the hub
+    /// owns (sequences) `group_count` groups this user is in. They stay
+    /// reachable through the other members' hubs after the removal, but
+    /// the owning hub is not migrated.
+    #[error("hub {hub_id} owns {group_count} groups of this user")]
+    HubOwnsGroups { hub_id: String, group_count: u32 },
+    /// The hub is the only one listed by the hosting record: it cannot be
+    /// removed.
+    #[error("hub {0} is the only listed hub")]
+    LastHub(String),
+    /// The hub is the home hub (the client's own transport): it cannot be
+    /// removed.
+    #[error("hub {0} is the home hub")]
+    HomeHub(String),
+    /// The drain check before removing the hub failed: something sent
+    /// through it is not settled yet. Try again later.
+    #[error("hub {hub_id} is not drained: {reason}")]
+    HubNotDrained { hub_id: String, reason: String },
 }
 
 impl ClientError {

@@ -16,7 +16,7 @@ use gim_identity::{HostingEntry, RootKey, UserHostingRecord};
 use gim_sdk::testing::{FakeTransport, MemorySecretStorage};
 use gim_sdk::transport::Transport;
 use gim_sdk::{
-    Client, ClientBuilder, HttpTransport, SecretStorage, HOSTING_RECORD_LIFETIME,
+    Client, ClientBuilder, ConnectionState, HttpTransport, SecretStorage, HOSTING_RECORD_LIFETIME,
     ROOT_KEY_SECRET_KEY,
 };
 use mock_server::{fast_settings, wait_until, MockServer, Peer};
@@ -386,4 +386,45 @@ async fn restart_resumes_both_cursors() {
     wait_until("the next message", || alice.texts(&group_id).len() == 2).await;
     alice.client.stop_sync().unwrap();
     assert_eq!(alice.texts(&group_id), ["before", "after"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connected_while_at_least_one_listed_hub_is_reachable() {
+    let Setup {
+        server_a,
+        server_b,
+        alice,
+        ..
+    } = setup().await;
+    alice.client.start_sync().unwrap();
+    server_a.streams_served(1).await;
+    server_b.streams_served(1).await;
+    wait_until("connected", || {
+        alice.client.connection_state() == ConnectionState::Connected
+    })
+    .await;
+
+    // Home goes down; B keeps the client connected.
+    let mut states = alice.client.subscribe_connection_state();
+    server_a.controls.down.store(true, Ordering::SeqCst);
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert_eq!(alice.client.connection_state(), ConnectionState::Connected);
+    while let Ok(state) = states.try_recv() {
+        assert_ne!(state, ConnectionState::Offline);
+    }
+
+    // Both down: offline.
+    server_b.controls.down.store(true, Ordering::SeqCst);
+    wait_until("offline", || {
+        alice.client.connection_state() == ConnectionState::Offline
+    })
+    .await;
+    // One back: connected again.
+    server_b.controls.down.store(false, Ordering::SeqCst);
+    wait_until("connected again", || {
+        alice.client.connection_state() == ConnectionState::Connected
+    })
+    .await;
+    alice.client.stop_sync().unwrap();
+    assert_eq!(alice.client.connection_state(), ConnectionState::Offline);
 }
