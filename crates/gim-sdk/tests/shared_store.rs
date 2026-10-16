@@ -15,7 +15,8 @@ use gim_base::{BaseError, StateReader};
 use gim_common::GroupId;
 use gim_sdk::testing::MemorySecretStorage;
 use gim_sdk::{
-    Client, ClientBuilder, ClientError, ClientMode, SecretStorage, StoreLock, LOCK_FILE_NAME,
+    Client, ClientBuilder, ClientError, ClientMode, NotificationKind, PushRegistration,
+    SecretStorage, StoreLock, GENERIC_BODY, LOCK_FILE_NAME,
 };
 use gim_sqlite::{DbKey, SqliteStore};
 use tempfile::TempDir;
@@ -375,5 +376,101 @@ async fn extension_mode_starts_nothing_and_never_resets() {
     assert_eq!(
         app.store().chat(&g).unwrap().unwrap().membership,
         Membership::Joined
+    );
+}
+
+/// The push payload (contract `push.md` §3) of the group's latest
+/// Application message, with the inline MLS message.
+fn latest_message_push(transport: &FlakyTransport, group_id: &GroupId) -> String {
+    use base64::Engine;
+    let delivered = transport
+        .inner
+        .service()
+        .messages(group_id, 0, usize::MAX)
+        .unwrap()
+        .into_iter()
+        .rfind(|m| m.kind == gim_test::MessageKind::Application)
+        .unwrap();
+    let message_id = format!("{:032x}", delivered.seq);
+    serde_json::json!({
+        "v": 1,
+        "type": "message",
+        "gid": group_id.as_str(),
+        "seq": delivered.seq,
+        "message_id": message_id,
+        "collapse_id": message_id,
+        "mls_message": base64::engine::general_purpose::STANDARD.encode(&delivered.payload),
+    })
+    .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn extension_processes_pushes_beside_the_app() {
+    let transport = FlakyTransport::new();
+    let (alice, app) = SharedDevice::register(&transport, "alice").await;
+    let bob = Device::register(&transport, "bob").await;
+    let g = app.create_group_chat(None, &[bob.user_id()]).await.unwrap();
+    bob.sync().await;
+    let extension = Builder::open_extension(
+        Arc::new(transport.clone()),
+        alice.secrets.clone(),
+        |key| {
+            SqliteStore::open_for_extension(alice.dir.path(), &DbKey::new(*key))
+                .map_err(BaseError::from)
+        },
+    )
+    .unwrap()
+    .data_dir(alice.dir.path())
+    .store_lock_timeout(Duration::from_millis(200))
+    .build()
+    .unwrap();
+    assert!(extension.restore_session().await.unwrap());
+
+    // The extension leaves the registration to the app.
+    let registration = PushRegistration {
+        provider: "apns".into(),
+        token: "nse-token".into(),
+        app_id: None,
+        sandbox: None,
+        p256dh: None,
+        auth: None,
+    };
+    extension.register_push(registration).await.unwrap();
+    assert_eq!(extension.push_registration().unwrap(), None);
+    extension.unregister_push().await.unwrap();
+    assert!(transport.inner.push_requests().is_empty());
+
+    // The extension applies the pushed message; the app's stream does not
+    // apply it again.
+    bob.client.send_text(&g, "hello", None).await.unwrap();
+    let content = extension
+        .process_push(&latest_message_push(&transport, &g))
+        .await
+        .unwrap();
+    assert_eq!(content.kind, NotificationKind::Message);
+    assert_eq!(content.body, "hello");
+    assert!(content.should_display);
+    app.sync_once().await.unwrap();
+    assert_eq!(texts(&**app.store(), &g), vec!["hello".to_string()]);
+
+    // Another process holding the store: generic content, nothing applied.
+    bob.client.send_text(&g, "second", None).await.unwrap();
+    let payload = latest_message_push(&transport, &g);
+    let holder = StoreHolder::start(alice.dir.path());
+    let content = extension.process_push(&payload).await.unwrap();
+    assert_eq!(content.kind, NotificationKind::Generic);
+    assert_eq!(content.body, GENERIC_BODY);
+    assert!(content.should_display);
+    holder.release();
+    assert!(!texts(&**extension.store(), &g).contains(&"second".to_string()));
+
+    // Once released, the same push is processed.
+    let content = extension.process_push(&payload).await.unwrap();
+    assert_eq!(content.kind, NotificationKind::Message);
+    assert_eq!(content.body, "second");
+    app.sync_once().await.unwrap();
+    once_each(
+        &texts(&**app.store(), &g),
+        &BTreeSet::from(["hello".to_string(), "second".to_string()]),
     );
 }

@@ -425,7 +425,8 @@ base64url). Call `registerPush` whenever the platform hands out a new token; gim
 registration across restarts and sends it again by itself when a hub is added or becomes
 verified, after a renewed sign-in, after restore or link, and on each connect to a hub that has
 not received it yet. `signOut()` removes it from the hubs (best effort, a few seconds at most)
-before wiping the device.
+before wiping the device. With `ClientConfig.mode` `Extension`, `registerPush` and
+`unregisterPush` do nothing: the app owns the registration.
 
 `processPush(payload)` takes the data payload exactly as delivered (the JSON object the hub sent
 through the push server) and returns within about 15 s; it does not open event streams, top up
@@ -454,9 +455,10 @@ direct chat), `senderUserId?`, `senderDisplayName?`, `body` (text, caption, `Pho
 
 Show the notification only if `shouldDisplay`. It is `false` for own messages, edits, deletes,
 receipts, member changes and messages already read. If the push cannot be decrypted or processed
-in time, the call still succeeds with `Generic` content: body `New message`, `shouldDisplay =
-true`, and `chatId` / `chatTitle` when the chat is known locally. An iOS Notification Service
-Extension can therefore always display the result. Use `collapseId` as the platform collapse key
+in time (also when the other process holds the store lock too long), the call still succeeds with
+`Generic` content: body `New message`, `shouldDisplay = true`, and `chatId` / `chatTitle` when the
+chat is known locally. An iOS Notification Service Extension can therefore always display the
+result. Use `collapseId` as the platform collapse key
 (`apns-collapse-id`, FCM `tag`): every hub of the user may push the same message.
 
 ## Listeners and threading

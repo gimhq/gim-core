@@ -509,9 +509,13 @@ impl<S: StateStore + 'static> Client<S> {
     /// signs in. A hub that cannot be reached now gets it on the sync
     /// loop's next connect. Fails with [`ClientError::InvalidInput`] for a
     /// malformed registration (nothing stored), or with a hub's definite
-    /// rejection after trying every hub.
+    /// rejection after trying every hub. Does nothing in
+    /// [`crate::ClientMode::Extension`]: the app owns the registration.
     pub async fn register_push(&self, registration: PushRegistration) -> Result<()> {
         registration.validate()?;
+        if self.is_extension() {
+            return Ok(());
+        }
         let _guard = self.inner.push_lock.lock().await;
         let encoded = serde_json::to_vec(&registration).expect("a registration serializes");
         self.inner
@@ -542,8 +546,11 @@ impl<S: StateStore + 'static> Client<S> {
     /// copy. The local copy is deleted even if a hub failed; the first
     /// failure is returned after trying every hub. Hubs that could not be
     /// reached keep pushing until the push server reports the token
-    /// invalid.
+    /// invalid. Does nothing in [`crate::ClientMode::Extension`].
     pub async fn unregister_push(&self) -> Result<()> {
+        if self.is_extension() {
+            return Ok(());
+        }
         let _guard = self.inner.push_lock.lock().await;
         let mut failed = None;
         if self.session().is_some() {
@@ -578,7 +585,11 @@ impl<S: StateStore + 'static> Client<S> {
     /// the hub's event loop connected: the sync loop puts the registration
     /// there unless it already did in this run. A new sign-in may follow a
     /// hub losing the registration (a 401), so it is put again.
+    /// Never in [`crate::ClientMode::Extension`], which has no sync loop.
     pub(crate) fn push_hub_changed(&self, hub_id: Option<&str>, signed_in: bool) {
+        if self.is_extension() {
+            return;
+        }
         if signed_in {
             self.push_state()
                 .registered
@@ -918,7 +929,7 @@ impl<S: StateStore + 'static> Client<S> {
         let _guard = self.inner.group_lock.lock().await;
         let snapshot = snapshot.cloned();
         let (pending, before) = self
-            .run(move |store, _| {
+            .read(move |store, _| {
                 let pending: BTreeSet<GroupId> = store
                     .pending_commits()?
                     .into_iter()
