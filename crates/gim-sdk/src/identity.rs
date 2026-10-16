@@ -4,6 +4,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use gim_base::model::UserInfo;
 use gim_base::{BaseClient, StateReader, StateStore, StoreError, StoreTxn};
@@ -18,7 +19,8 @@ use crate::client::{
     SESSION_SECRET_KEY,
 };
 use crate::hosting::Publish;
-use crate::transport::{TransportError, UserRecord};
+use crate::routing::hub_unreachable;
+use crate::transport::{AccessToken, Transport, TransportError, UserRecord};
 use crate::{Client, ClientError, Result};
 
 /// A new device of a user, ready to be enrolled with the hub.
@@ -335,22 +337,23 @@ impl<S: StateStore + 'static> Client<S> {
         self.read(move |store, _| Ok(store.user(&user_id)?)).await
     }
 
-    /// Looks a user up by handle in the hub directory, caches the profile
-    /// and the user's DeviceList.
+    /// Looks a user up by handle in the hub directories (the home hub,
+    /// then the other listed hubs), caches the profile and the user's
+    /// DeviceList.
     pub async fn find_user(&self, handle: &str) -> Result<Option<UserInfo>> {
         self.require_session()?;
-        let user_id = self
-            .authed(|t| async move { self.inner.transport.find_handle(&t, handle).await })
-            .await?;
-        let Some(user_id) = user_id else {
+        let Some((user_id, hub)) = self.find_handle_routed(handle).await? else {
             return Ok(None);
         };
-        let record = self
-            .read_routed(|transport, t| {
-                let user_id = user_id.clone();
-                async move { transport.user(Some(&t), &user_id).await }
-            })
-            .await?;
+        let read = |transport: Arc<dyn Transport>, t: AccessToken| {
+            let user_id = user_id.clone();
+            async move { transport.user(Some(&t), &user_id).await }
+        };
+        // The hub that knows the handle first.
+        let record = match self.authed_on(&hub, read).await {
+            Err(err) if hub_unreachable(&err) => self.read_routed(read).await?,
+            record => record?,
+        };
         let Some(record) = record else {
             return Ok(None);
         };

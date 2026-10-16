@@ -53,6 +53,7 @@ enum Call {
     Commit(Vec<u8>),
     Post(ClientId, Vec<u8>),
     Claim(Vec<UserId>),
+    CreateGroup,
     Upload(Vec<Vec<u8>>, bool),
     Fetch,
     /// A DeviceList (`"device_list"`) or directory (`"user"`) read.
@@ -83,6 +84,9 @@ struct HubState {
     /// DeviceList reads answer 503 `peer_unavailable`, as when the user's
     /// only hub is down.
     device_lists_down: AtomicBool,
+    /// Commits and messages of groups another hub owns answer 404
+    /// `not_found`, as before the owner delivered the group here.
+    no_replicas: AtomicBool,
     /// Adds need their devices' KeyPackages claimed through this hub.
     enforce_claims: AtomicBool,
     claimed: Mutex<HashSet<DeviceRef>>,
@@ -160,6 +164,25 @@ impl Hub {
                 _ => None,
             })
             .collect()
+    }
+
+    fn groups_created(&self) -> usize {
+        self.calls()
+            .iter()
+            .filter(|c| matches!(c, Call::CreateGroup))
+            .count()
+    }
+
+    /// 404 `not_found` for a group owned by another hub while
+    /// [`HubState::no_replicas`] is set.
+    fn replica(&self, g: &GroupId) -> TransportResult<()> {
+        let owner = g.as_str().split_once('/').map(|(hub, _)| hub);
+        if self.state.no_replicas.load(Ordering::SeqCst)
+            && owner != Some(self.own.service().hub_id())
+        {
+            return Err(TransportError::NotFound("not_found: not found".into()));
+        }
+        Ok(())
     }
 
     fn uploads(&self) -> Vec<(Vec<Vec<u8>>, bool)> {
@@ -390,6 +413,7 @@ impl Transport for Hub {
 
     async fn create_group(&self, t: &AccessToken, kind: ChatKind) -> TransportResult<GroupId> {
         self.up()?;
+        self.log(Call::CreateGroup);
         self.owner.create_group(&self.owner_token(t)?, kind).await
     }
 
@@ -411,6 +435,7 @@ impl Transport for Hub {
     ) -> Result<CommitAccepted, PostError> {
         self.up()?;
         self.log(Call::Commit(commit.mls_message.clone()));
+        self.replica(g)?;
         if self.state.commits_down.load(Ordering::SeqCst) {
             return Err(TransportError::Network("hub down".into()).into());
         }
@@ -453,6 +478,7 @@ impl Transport for Hub {
     ) -> Result<u64, PostError> {
         self.up()?;
         self.log(Call::Post(client_id.clone(), mls_message.clone()));
+        self.replica(g)?;
         let lose = match self.fault(Op::Post) {
             Some(Fault::Fail(err)) => return Err(err.into()),
             Some(Fault::LoseResponse) => true,
@@ -1440,4 +1466,104 @@ async fn device_lists_and_the_directory_are_read_from_the_other_hub_while_home_i
     assert!(s.hub_b.reads().contains(&("user", carol.user_id())));
     assert!(s.store.user(&carol.user_id()).unwrap().is_some());
     assert!(s.members(&g).contains(&carol.device()));
+}
+
+/// With B primary, chats are created on B (contract `multihoming.md`
+/// §2.1), and their KeyPackages claimed and their first Add committed
+/// there: B owns them.
+#[tokio::test]
+async fn chats_are_created_on_the_primary_hub() {
+    let s = Setup::new().await;
+    let b = Setup::hub_id(&s.fake_b);
+    s.alice.set_primary_hub(&b).await.unwrap();
+    let (created_a, created_b) = (s.hub_a.groups_created(), s.hub_b.groups_created());
+    let (claims_a, commits_a) = (s.hub_a.claims().len(), s.hub_a.commits().len());
+
+    s.direct_chat().await;
+    s.alice
+        .create_group_chat(Some("Kornati".into()), &[s.bob.user_id()])
+        .await
+        .unwrap();
+    assert_eq!(s.hub_a.groups_created(), created_a);
+    assert_eq!(s.hub_b.groups_created(), created_b + 2);
+    assert_eq!(s.hub_a.claims().len(), claims_a);
+    assert_eq!(s.hub_a.commits().len(), commits_a);
+    assert!(!s.hub_b.commits().is_empty());
+}
+
+/// A group owned by A that B has no replica of yet: B answers the Add and
+/// the message with 404, so both go to the owner A. The Add's KeyPackages
+/// were claimed through B, so they are claimed again through A and the
+/// Commit rebuilt.
+#[tokio::test]
+async fn a_hub_without_the_group_passes_submissions_to_the_next_hub() {
+    let s = Setup::new().await;
+    let g = s.direct_chat().await;
+    let carol = Device::register(&FlakyTransport::over(s.fake_a.clone()), "carol").await;
+    s.alice
+        .set_primary_hub(&Setup::hub_id(&s.fake_b))
+        .await
+        .unwrap();
+    s.hub_b.state.no_replicas.store(true, Ordering::SeqCst);
+    s.hub_a.state.enforce_claims.store(true, Ordering::SeqCst);
+    let (claims_a, commits_b) = (s.hub_a.claims().len(), s.hub_b.commits().len());
+
+    s.alice.add_members(&g, &[carol.user_id()]).await.unwrap();
+    assert!(s.members(&g).iter().any(|d| d.user_id == carol.user_id()));
+    assert_eq!(s.hub_b.commits().len(), commits_b + 1, "tried on B first");
+    assert_eq!(s.hub_a.claims().len(), claims_a + 1, "claimed again on A");
+
+    let posts_a = s.hub_a.posts().len();
+    let id = s.alice.send_text(&g, "via A", None).await.unwrap();
+    assert_eq!(
+        s.store.message(&id).unwrap().unwrap().send_state,
+        Some(SendState::Sent)
+    );
+    let on_a = &s.hub_a.posts()[posts_a..];
+    assert_eq!(on_a.len(), 1);
+    assert_eq!(on_a[0].0.as_str(), id.as_str());
+}
+
+/// 404 from the hub that owns the group is definite: nothing goes to B.
+#[tokio::test]
+async fn not_found_from_the_owning_hub_never_fails_over() {
+    let s = Setup::new().await;
+    let g = s.direct_chat().await;
+    let carol = Device::register(&FlakyTransport::over(s.fake_a.clone()), "carol").await;
+    let commits_b = s.hub_b.commits().len();
+    s.hub_a.inject(
+        Op::Commit,
+        Fault::Fail(TransportError::NotFound("not_found: not found".into())),
+    );
+
+    let added = s.alice.add_members(&g, &[carol.user_id()]).await;
+    assert!(
+        matches!(
+            added,
+            Err(ClientError::Transport(TransportError::NotFound(_)))
+        ),
+        "{added:?}"
+    );
+    assert_eq!(s.hub_b.commits().len(), commits_b);
+}
+
+/// A handle the home hub A does not know is looked up on B; the profile
+/// is read from B. A handle no hub knows is not found.
+#[tokio::test]
+async fn handles_unknown_on_the_home_hub_are_looked_up_on_the_other_hubs() {
+    let s = Setup::new().await;
+    let dave = Device::register(&FlakyTransport::over(s.fake_b.clone()), "dave").await;
+    // The owner A serves the directory in this fake: it learned dave's
+    // DeviceList (federation).
+    let list = s.fake_b.service().device_list(&dave.user_id()).unwrap();
+    s.fake_a
+        .put_device_list(&dave.user_id(), list)
+        .await
+        .unwrap();
+
+    let found = s.alice.find_user("dave").await.unwrap().unwrap();
+    assert_eq!(found.user_id, dave.user_id());
+    assert_eq!(found.handle, "dave");
+    assert!(s.hub_b.reads().contains(&("user", dave.user_id())));
+    assert!(s.alice.find_user("nobody").await.unwrap().is_none());
 }

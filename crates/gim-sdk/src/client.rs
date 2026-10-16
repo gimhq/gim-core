@@ -958,15 +958,9 @@ impl<S: StateStore + 'static> Client<S> {
         let _guard = self.inner.group_lock.lock().await;
         let claim = self.claim_key_packages(&session, users, &[]).await?;
         claim.check_resolvable()?;
-        // Always on the own hub, which then owns the group.
-        let group_id = self
-            .authed(|t| async move { self.inner.transport.create_group(&t, kind).await })
-            .await?;
-        if owner_hub(&group_id)
-            .is_some_and(|hub| !session.hub_id.is_empty() && hub != session.hub_id)
-        {
-            tracing::warn!(%group_id, hub_id = %session.hub_id, "the own hub created a group it does not own");
-        }
+        // On the hub of the claim (the primary unless it was unreachable),
+        // which then owns the group and takes its first Add.
+        let group_id = self.create_group_routed(kind, Some(&claim.hub)).await?;
         let (gid, base) = (group_id.clone(), BaseClient::new(session.device.clone()));
         let changes = self
             .run(move |store, engine| base.create_chat(store, engine, &gid, kind, name, now_ms()))
