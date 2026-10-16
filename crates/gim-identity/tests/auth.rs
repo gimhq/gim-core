@@ -33,6 +33,7 @@ fn hub_id() -> String {
 fn challenge() -> AuthChallenge {
     AuthChallenge {
         audience: hub_id(),
+        audience_url: None,
         nonce: seed(0xc0),
         issued_at: NOW,
         expires_at: NOW + TTL,
@@ -74,7 +75,7 @@ fn response_round_trip() {
     let parsed = AuthResponse::from_bytes(&response.to_bytes()).unwrap();
     assert_eq!(parsed, response);
     assert_eq!(
-        parsed.verify(&hub_id(), NOW, &list).unwrap(),
+        parsed.verify(&hub_id(), None, NOW, &list).unwrap(),
         DeviceRef::new(
             user_root().public().user_id(),
             device(0x20).public().device_id()
@@ -88,7 +89,7 @@ fn wrong_audience_rejected() {
     let response = respond(&challenge(), &device(0x20));
     let other_hub = HubRootKey::from_seed(&seed(0x80)).public().hub_id();
     assert!(matches!(
-        response.verify(&other_hub, NOW, &list),
+        response.verify(&other_hub, None, NOW, &list),
         Err(IdentityError::AudienceMismatch)
     ));
 }
@@ -97,9 +98,11 @@ fn wrong_audience_rejected() {
 fn expired_challenge_rejected() {
     let (list, _) = device_lists();
     let response = respond(&challenge(), &device(0x20));
-    assert!(response.verify(&hub_id(), NOW + TTL - 1, &list).is_ok());
+    assert!(response
+        .verify(&hub_id(), None, NOW + TTL - 1, &list)
+        .is_ok());
     assert!(matches!(
-        response.verify(&hub_id(), NOW + TTL, &list),
+        response.verify(&hub_id(), None, NOW + TTL, &list),
         Err(IdentityError::Expired)
     ));
 }
@@ -116,20 +119,22 @@ fn challenge_validity_window_enforced() {
         respond(&challenge, &device(0x20))
     };
     assert!(matches!(
-        at(NOW, NOW + TTL).verify(&hub_id(), NOW - 1, &list),
+        at(NOW, NOW + TTL).verify(&hub_id(), None, NOW - 1, &list),
         Err(IdentityError::NotYetValid)
     ));
     assert!(matches!(
-        at(NOW, NOW).verify(&hub_id(), NOW, &list),
+        at(NOW, NOW).verify(&hub_id(), None, NOW, &list),
         Err(IdentityError::InvalidValidityWindow)
     ));
     assert!(matches!(
-        at(NOW + 1, NOW).verify(&hub_id(), NOW, &list),
+        at(NOW + 1, NOW).verify(&hub_id(), None, NOW, &list),
         Err(IdentityError::InvalidValidityWindow)
     ));
-    assert!(at(NOW, NOW + 300_000).verify(&hub_id(), NOW, &list).is_ok());
+    assert!(at(NOW, NOW + 300_000)
+        .verify(&hub_id(), None, NOW, &list)
+        .is_ok());
     assert!(matches!(
-        at(NOW, NOW + 300_001).verify(&hub_id(), NOW, &list),
+        at(NOW, NOW + 300_001).verify(&hub_id(), None, NOW, &list),
         Err(IdentityError::LifetimeTooLong)
     ));
 }
@@ -138,9 +143,9 @@ fn challenge_validity_window_enforced() {
 fn revoked_device_rejected() {
     let (v1, v2) = device_lists();
     let response = respond(&challenge(), &device(0x40));
-    assert!(response.verify(&hub_id(), NOW, &v1).is_ok());
+    assert!(response.verify(&hub_id(), None, NOW, &v1).is_ok());
     assert!(matches!(
-        response.verify(&hub_id(), NOW, &v2),
+        response.verify(&hub_id(), None, NOW, &v2),
         Err(IdentityError::Revoked(_))
     ));
 }
@@ -150,7 +155,7 @@ fn device_not_in_list_rejected() {
     let (list, _) = device_lists();
     let response = respond(&challenge(), &device(0x90));
     assert!(matches!(
-        response.verify(&hub_id(), NOW, &list),
+        response.verify(&hub_id(), None, NOW, &list),
         Err(IdentityError::UnknownDevice(_))
     ));
 }
@@ -165,7 +170,7 @@ fn list_of_another_user_rejected() {
         .unwrap();
     let response = respond(&challenge(), &device(0x20));
     assert!(matches!(
-        response.verify(&hub_id(), NOW, &list),
+        response.verify(&hub_id(), None, NOW, &list),
         Err(IdentityError::UserIdMismatch)
     ));
 }
@@ -188,7 +193,7 @@ fn signature_from_another_device_rejected() {
     let response = AuthResponse::from_bytes(&forged).unwrap();
     assert_eq!(response.device_id(), &id_20);
     assert!(matches!(
-        response.verify(&hub_id(), NOW, &list),
+        response.verify(&hub_id(), None, NOW, &list),
         Err(IdentityError::BadSignature)
     ));
 }
@@ -203,7 +208,7 @@ fn tampered_challenge_rejected() {
     bytes[pos] ^= 1;
     let response = AuthResponse::from_bytes(&bytes).unwrap();
     assert!(matches!(
-        response.verify(&hub_id(), NOW, &list),
+        response.verify(&hub_id(), None, NOW, &list),
         Err(IdentityError::BadSignature)
     ));
 }
@@ -244,7 +249,7 @@ fn vectors_match() {
     let list = SignedDeviceList::from_bytes(&hex(&file["device_list"])).unwrap();
     let device = AuthResponse::from_bytes(&hex(&file["response"]))
         .unwrap()
-        .verify(file["audience"].as_str().unwrap(), NOW, &list)
+        .verify(file["audience"].as_str().unwrap(), None, NOW, &list)
         .unwrap();
     assert_eq!(device.user_id.as_str(), file["user_id"]);
     assert_eq!(device.device_id.as_str(), file["device_id"]);

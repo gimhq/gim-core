@@ -30,15 +30,15 @@
 //! | `MessageEvent`, `MemberAddedEvent`, `MemberRemovedEvent`, `WelcomeEvent`, `KeyPackagesLowEvent`, `DeviceListUpdatedEvent`, `HostingRecordExpiringEvent`, `HostingRecordUpdatedEvent` | [`EventData`] variants |
 //! | `MembershipChange`, `Welcome`, `KeyPackagesLow`, `HostingRecordExpiring`, `HostingRecordUpdated` | [`MembershipChange`], [`Welcome`], [`KeyPackagesLow`], [`HostingRecordExpiring`], [`HostingRecordUpdated`] |
 //! | `PendingWelcome`, `PendingWelcomeList` | [`PendingWelcome`], [`PendingWelcomeList`] |
-//! | `PushProvider`, `PushRegistration` | [`PushProvider`], [`PushRegistration`] |
+//! | `PushRegistration` | [`PushRegistration`] |
 //! | `BlobCreated` | [`BlobCreated`] |
 //! | `Error`, `ErrorBody`, `StaleEpochError`, `CursorExpiredError` | [`ErrorResponse`], [`ErrorBody`], [`StaleEpochError`], [`CursorExpiredError`] |
 //!
 //! Error codes the SDK branches on are constants ([`STALE_EPOCH`],
 //! [`CURSOR_EXPIRED`], [`HOSTING_RECORD_REQUIRED`], ...).
 //!
-//! Query strings are [`EventsQuery`], [`StreamQuery`], [`MessagesQuery`],
-//! [`PendingWelcomesQuery`] and [`LinkBundleQuery`]. The `/v2/stream`
+//! Query strings are [`HubQuery`], [`EventsQuery`], [`StreamQuery`],
+//! [`MessagesQuery`], [`PendingWelcomesQuery`] and [`LinkBundleQuery`]. The `/v2/stream`
 //! WebSocket frames (described in prose, not as a schema) are
 //! [`StreamFrame`]. Blob bodies are raw `application/octet-stream` bytes and
 //! have no DTO.
@@ -74,7 +74,7 @@ pub use keypackages::{
 };
 pub use service::{
     BlobCreated, CursorExpiredError, ErrorBody, ErrorResponse, Health, HealthStatus, HubInfo,
-    PushProvider, PushRegistration, StaleEpochError, CURSOR_EXPIRED, DUPLICATE_KEY_PACKAGE,
+    HubQuery, PushRegistration, StaleEpochError, CURSOR_EXPIRED, DUPLICATE_KEY_PACKAGE,
     HOSTING_RECORD_REQUIRED, INVALID_HOSTING_RECORD, KP_NOT_CLAIMED, PEER_REFUSED,
     PEER_UNAVAILABLE, STALE_EPOCH, STALE_HOSTING_RECORD,
 };

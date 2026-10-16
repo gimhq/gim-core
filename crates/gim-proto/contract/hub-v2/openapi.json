@@ -37,7 +37,7 @@
           "auth"
         ],
         "summary": "Request a sign-in challenge",
-        "description": "Issues a single-use gim-core AuthChallenge (audience = this hub's `hub_id`, 32-byte random nonce, valid for 5 minutes) for a device listed as active in the user's stored DeviceList. The device signs the challenge bytes into an AuthResponse and answers with POST /v2/auth/session before `expires_at`.",
+        "description": "Issues a single-use gim-core AuthChallenge (audience = this hub's `hub_id`, 32-byte random nonce, valid for 5 minutes) for a device listed as active in the user's stored DeviceList. A hub with a public URL issues version 2, which also carries `audience_url` = its `public_url`; a hub without one issues version 1. The device signs the challenge bytes into an AuthResponse and answers with POST /v2/auth/session before `expires_at`.",
         "operationId": "create_auth_challenge",
         "requestBody": {
           "content": {
@@ -89,7 +89,7 @@
           "auth"
         ],
         "summary": "Answer a challenge and obtain a device token",
-        "description": "Verifies the gim-core AuthResponse against the user's stored DeviceList and this hub's `hub_id`, then consumes the challenge: its nonce must have been issued by this hub for the same user and device, be unexpired and unused. The device must still be active (not revoked). The token is revoked when a later DeviceList revokes the device.",
+        "description": "Verifies the gim-core AuthResponse against the user's stored DeviceList and this hub's `hub_id` (and, with a public URL, a version 2 challenge whose `audience_url` is this hub's `public_url`; without one, only version 1), then consumes the challenge: its nonce must have been issued by this hub for the same user and device, be unexpired and unused. The device must still be active (not revoked). The token is revoked when a later DeviceList revokes the device.",
         "operationId": "create_session",
         "requestBody": {
           "content": {
@@ -123,7 +123,7 @@
             }
           },
           "401": {
-            "description": "Unknown, used or expired challenge, or one issued by another hub or for another device (`invalid_challenge`); bad signature (`invalid_signature`); device revoked or not in the DeviceList (`device_not_active`)",
+            "description": "Unknown, used or expired challenge, one issued by another hub, for another URL or another device, or of the wrong version (`invalid_challenge`); bad signature (`invalid_signature`); device revoked or not in the DeviceList (`device_not_active`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1140,8 +1140,20 @@
           "health"
         ],
         "summary": "This hub's identity",
-        "description": "Unauthenticated. Lets a client check that a URL belongs to the `hub_id` listed in its hosting record before signing in.",
+        "description": "Unauthenticated. Lets a client check that a URL belongs to the `hub_id` listed in its hosting record before signing in. With `?nonce=` (32 random bytes, base64url without padding) the response also carries `proof`, the hub root key's Ed25519 signature over `\"gim-hub-proof-v1\" || 0x00 || nonce(32) || u16be(len(hub_id)) || hub_id || u16be(len(public_url)) || public_url` (UTF-8, lengths in bytes), base64url without padding; the client checks that `hub_id` derives from `hub_root_pubkey`, that `public_url` is the URL it called and verifies `proof` with `hub_root_pubkey`. A hub without a configured `public_url` cannot prove and answers a nonce with 400.",
         "operationId": "get_hub",
+        "parameters": [
+          {
+            "name": "nonce",
+            "in": "query",
+            "description": "Client nonce for a proof of possession: 32 random bytes, base64url\nwithout padding (43 characters). Needs a configured `public_url`.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{43}$"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Hub identity",
@@ -1149,6 +1161,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HubInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed nonce, or a nonce while this hub has no public URL (`validation_failed`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1532,7 +1554,7 @@
           "push"
         ],
         "summary": "Register the calling device for push",
-        "description": "Replaces the calling device's push registration. `unifiedpush` requires `p256dh` and `auth` (RFC 8291 encryption keys); other providers ignore them.",
+        "description": "Replaces the calling device's push registration. `provider`, `token`, `app_id`, `sandbox`, `p256dh` and `auth` are opaque to the hub and passed to the push server's webhook; `log` registrations are only recorded by the hub (tests).",
         "operationId": "put_push_registration",
         "requestBody": {
           "content": {
@@ -3167,6 +3189,22 @@
             "description": "The hub's 32-byte Ed25519 root public key, base64; `hub_id` is\nderived from it.",
             "contentEncoding": "base64"
           },
+          "proof": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Only with `?nonce=`: Ed25519 signature by the hub root key\n(`hub_root_pubkey`) over `\"gim-hub-proof-v1\" || 0x00 || nonce(32) ||\nu16be(len(hub_id)) || hub_id || u16be(len(public_url)) || public_url`\n(UTF-8, lengths in bytes), base64url without padding.",
+            "contentEncoding": "base64url"
+          },
+          "public_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The hub's canonical client-API base URL (`GIM_HUB_PUBLIC_URL`,\nnormalized), if configured.",
+            "example": "https://hub.example.eu"
+          },
           "version": {
             "type": "string",
             "description": "Hub version.",
@@ -3578,18 +3616,9 @@
           }
         }
       },
-      "PushProvider": {
-        "type": "string",
-        "enum": [
-          "apns",
-          "fcm",
-          "unifiedpush",
-          "log"
-        ]
-      },
       "PushRegistration": {
         "type": "object",
-        "description": "Push registration of the calling device.",
+        "description": "Push registration of the calling device. Everything but `log` is opaque\nto the hub and passed to the push server's webhook (`docs/push.md`).",
         "required": [
           "provider",
           "token"
@@ -3600,7 +3629,7 @@
               "string",
               "null"
             ],
-            "description": "APNs topic (app bundle ID) or FCM app ID; ignored by other providers.",
+            "description": "App identifier for the push server (e.g. bundle ID): 1-255\ncharacters of `A-Z a-z 0-9 . - _ :`.",
             "example": "im.g.apps"
           },
           "auth": {
@@ -3608,28 +3637,37 @@
               "string",
               "null"
             ],
-            "description": "UnifiedPush only (required there, ignored otherwise): the RFC 8291\nauthentication secret, base64url of 16 bytes.",
-            "example": "BTBZMqHH6r4Tts7J_aSIgg"
+            "description": "Opaque secret for the push server (e.g. a Web Push `auth`):\nbase64url, padding optional, at most 256 characters.",
+            "example": "BTBZMqHH6r4Tts7J_aSIgg",
+            "maxLength": 256,
+            "minLength": 1
           },
           "p256dh": {
             "type": [
               "string",
               "null"
             ],
-            "description": "UnifiedPush only (required there, ignored otherwise): the device's\nRFC 8291 Web Push public key, base64url of the 65-byte uncompressed\nP-256 point.",
-            "example": "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4"
+            "description": "Opaque key for the push server (e.g. a Web Push `p256dh`): base64url,\npadding optional, at most 256 characters.",
+            "example": "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4",
+            "maxLength": 256,
+            "minLength": 1
           },
           "provider": {
-            "$ref": "#/components/schemas/PushProvider"
+            "type": "string",
+            "description": "Push platform name, interpreted by the push server (e.g. `apns`,\n`fcm`, `unifiedpush`). `log` is the hub's test provider and is never\nsent to the webhook.",
+            "example": "apns",
+            "pattern": "^[a-z0-9._-]{1,64}$"
           },
           "sandbox": {
-            "type": "boolean",
-            "description": "APNs only: deliver through the sandbox environment.",
-            "default": false
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Platform sandbox flag for the push server; absent if not set."
           },
           "token": {
             "type": "string",
-            "description": "Provider token: APNs device token (hex), FCM registration token,\nUnifiedPush endpoint URL, or any string for `log`.",
+            "description": "Platform token, opaque to the hub: 1-4096 bytes without control\ncharacters.",
             "maxLength": 4096,
             "minLength": 1
           }

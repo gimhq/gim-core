@@ -19,6 +19,8 @@ pub const HUB_RUNTIME_CERT_CONTEXT: &[u8] = b"gim/hub-runtime-cert/v1";
 pub const HOSTING_ENTRY_CONTEXT: &[u8] = b"gim/hosting-entry/v1";
 /// Signature context of a [`SignedHostingRecord`].
 pub const HOSTING_RECORD_CONTEXT: &[u8] = b"gim/hosting-record/v1";
+/// Signature context of a hub proof of possession (`GET /v2/hub?nonce=`).
+pub const HUB_PROOF_CONTEXT: &[u8] = b"gim-hub-proof-v1";
 
 /// Maximum number of hubs in a hosting record.
 pub const MAX_HUBS: usize = 16;
@@ -49,6 +51,21 @@ impl HubRootKey {
 
     pub fn public(&self) -> HubRootPublicKey {
         HubRootPublicKey(self.0.public())
+    }
+
+    /// Proves possession of this key, as the hub at `public_url` (already
+    /// normalized, see [`crate::normalize_hub_url`]), to the client that
+    /// sent `nonce`.
+    pub fn sign_hub_proof(
+        &self,
+        nonce: &[u8; 32],
+        public_url: &str,
+    ) -> Result<[u8; 64], IdentityError> {
+        if crate::normalize_hub_url(public_url)? != public_url {
+            return Err(IdentityError::InvalidUrl("not normalized".into()));
+        }
+        let tbs = hub_proof_tbs(nonce, &self.public().hub_id(), public_url)?;
+        Ok(sign(&self.0 .0, HUB_PROOF_CONTEXT, &tbs))
     }
 }
 
@@ -84,6 +101,44 @@ impl HubRootPublicKey {
             BASE32_NOPAD.encode(&multihash).to_ascii_lowercase()
         )
     }
+}
+
+impl HubRootPublicKey {
+    /// Client-side check of a hub proof of possession: `hub_id` derives
+    /// from this key ([`IdentityError::HubKeyMismatch`]) and `proof` is
+    /// its strict Ed25519 signature over the client's `nonce`, `hub_id`
+    /// and `public_url` ([`IdentityError::BadSignature`]). The caller also
+    /// checks that `public_url` is the normalized URL it contacted.
+    pub fn verify_hub_proof(
+        &self,
+        nonce: &[u8; 32],
+        hub_id: &str,
+        public_url: &str,
+        proof: &[u8; 64],
+    ) -> Result<(), IdentityError> {
+        if self.hub_id() != hub_id {
+            return Err(IdentityError::HubKeyMismatch);
+        }
+        let tbs = hub_proof_tbs(nonce, hub_id, public_url)?;
+        verify(&self.0 .0, HUB_PROOF_CONTEXT, &tbs, proof)
+    }
+}
+
+/// `nonce || u16be(len(hub_id)) || hub_id || u16be(len(public_url)) ||
+/// public_url`, signed under [`HUB_PROOF_CONTEXT`].
+fn hub_proof_tbs(
+    nonce: &[u8; 32],
+    hub_id: &str,
+    public_url: &str,
+) -> Result<Vec<u8>, IdentityError> {
+    let mut tbs = nonce.to_vec();
+    for field in [hub_id, public_url] {
+        let len = u16::try_from(field.len())
+            .map_err(|_| IdentityError::Decode("hub proof field longer than 65535 bytes".into()))?;
+        tbs.extend_from_slice(&len.to_be_bytes());
+        tbs.extend_from_slice(field.as_bytes());
+    }
+    Ok(tbs)
 }
 
 impl fmt::Debug for HubRootPublicKey {

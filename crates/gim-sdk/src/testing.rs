@@ -13,8 +13,8 @@ use gim_base::model::{ChatKind, GroupMessage, IncomingEvent, MessageKind};
 use gim_common::{now_ms, ClientId, DeviceRef, GroupId, UserId};
 use gim_crypto::{inspect_handshake, private_message_epoch, HandshakeKind, MlsEngine};
 use gim_identity::{
-    AuthChallenge, AuthResponse, HostingEntry, HubRootKey, IdentityError, SignedDeviceList,
-    SignedHostingRecord, UserHostingRecord,
+    normalize_hub_url, AuthChallenge, AuthResponse, HostingEntry, HubRootKey, IdentityError,
+    SignedDeviceList, SignedHostingRecord, UserHostingRecord,
 };
 use gim_test::{
     Delivered, DeliveryError, Event, FakeDeliveryService, GroupKind, MembershipChange,
@@ -55,6 +55,9 @@ pub struct FakeTransport {
     validator: Arc<MlsEngine>,
     proposals: Arc<Mutex<HashMap<GroupId, Proposals>>>,
     hosting: Arc<FakeHosting>,
+    /// The hub's normalized public URL (`GIM_HUB_PUBLIC_URL`): it proves
+    /// it and issues AuthChallenge v2 for it; without one, v1.
+    public_url: Arc<Mutex<Option<String>>>,
 }
 
 /// Hosting records of the fake hub.
@@ -116,7 +119,31 @@ impl FakeTransport {
                 reads: AtomicUsize::new(0),
                 required: AtomicBool::new(false),
             }),
+            public_url: Arc::default(),
         }
+    }
+
+    /// This fake hub with the public URL `url`; see [`Self::set_public_url`].
+    pub fn with_public_url(self, url: &str) -> Self {
+        self.set_public_url(Some(url));
+        self
+    }
+
+    /// Configures the hub's public URL (normalized; panics if invalid), as
+    /// `GIM_HUB_PUBLIC_URL`: `GET /v2/hub` reports and proves it, and
+    /// challenges are v2 for it. It is also the transport's
+    /// [`Transport::base_url`]. Shared by the clones.
+    pub fn set_public_url(&self, url: Option<&str>) {
+        let url = url.map(|url| normalize_hub_url(url).expect("a valid hub URL"));
+        *self.public_url.lock().unwrap_or_else(|e| e.into_inner()) = url;
+    }
+
+    /// The hub's public URL, if configured.
+    pub fn public_url(&self) -> Option<String> {
+        self.public_url
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// The root key the fake hub signs hosting entries with.
@@ -339,11 +366,37 @@ pub fn hub_events(event: Event) -> Vec<HubEvent> {
 
 #[async_trait]
 impl Transport for FakeTransport {
-    async fn hub_info(&self) -> TransportResult<HubIdentity> {
+    fn base_url(&self) -> Option<String> {
+        self.public_url()
+    }
+
+    /// As the hub: a nonce needs a public URL (400 `validation_failed`
+    /// otherwise) and adds the root key's proof.
+    async fn hub_info(&self, nonce: Option<&[u8; 32]>) -> TransportResult<HubIdentity> {
+        let public_url = self.public_url();
+        let proof = match (nonce, &public_url) {
+            (None, _) => None,
+            (Some(_), None) => {
+                return Err(TransportError::Rejected {
+                    status: 400,
+                    code: "validation_failed".into(),
+                    message: "no public URL: a nonce cannot be proven".into(),
+                })
+            }
+            (Some(nonce), Some(url)) => Some(
+                self.hosting
+                    .hub_key
+                    .sign_hub_proof(nonce, url)
+                    .map_err(|e| TransportError::Server(e.to_string()))?
+                    .to_vec(),
+            ),
+        };
         Ok(HubIdentity {
             hub_id: self.service.hub_id().to_string(),
             hub_root_public_key: self.hosting.hub_key.public().as_bytes().to_vec(),
             version: "fake".into(),
+            public_url,
+            proof,
         })
     }
 
@@ -367,6 +420,7 @@ impl Transport for FakeTransport {
         let issued_at = now_ms();
         let challenge = AuthChallenge {
             audience: self.service.hub_id().to_string(),
+            audience_url: self.public_url(),
             nonce,
             issued_at,
             expires_at: issued_at + CHALLENGE_LIFETIME_MS,
@@ -397,7 +451,12 @@ impl Transport for FakeTransport {
             .and_then(|bytes| SignedDeviceList::from_bytes(&bytes).ok())
             .ok_or_else(not_active)?;
         let device = response
-            .verify(self.service.hub_id(), now_ms(), &list)
+            .verify(
+                self.service.hub_id(),
+                self.public_url().as_deref(),
+                now_ms(),
+                &list,
+            )
             .map_err(|err| match err {
                 IdentityError::Revoked(_) | IdentityError::UnknownDevice(_) => not_active(),
                 IdentityError::BadSignature => SessionError::Rejected("invalid_signature".into()),

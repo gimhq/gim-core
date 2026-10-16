@@ -40,6 +40,10 @@ pub enum IdentityError {
     NotYetValid,
     #[error("challenge audience does not match this hub")]
     AudienceMismatch,
+    #[error("challenge audience_url does not match the hub URL, or wrong challenge version")]
+    AudienceUrlMismatch,
+    #[error("invalid hub URL: {0}")]
+    InvalidUrl(String),
     #[error("hub root key does not match the expected hub")]
     HubKeyMismatch,
     #[error("invalid hub signature on the hosting entry of {0}")]
@@ -85,6 +89,8 @@ impl IdentityError {
             Self::Expired => "expired",
             Self::NotYetValid => "not_yet_valid",
             Self::AudienceMismatch => "audience_mismatch",
+            Self::AudienceUrlMismatch => "audience_url_mismatch",
+            Self::InvalidUrl(_) => "invalid_url",
             Self::HubKeyMismatch => "hub_key_mismatch",
             Self::BadHubSignature(_) => "bad_hub_signature",
             Self::DuplicateHub(_) => "duplicate_hub",

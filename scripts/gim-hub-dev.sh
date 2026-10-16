@@ -13,12 +13,12 @@ Usage: gim-hub-dev.sh <start|stop|ip|url|status|commit|logs> [name]
 
 Commands:
   start   Build the image (unless GIM_HUB_BUILD=0), start the container
-          (reusing it if already running), wait for /healthz and print
-          http://<ip>:8080 on stdout. Status messages, including the hub
-          commit, go to stderr.
+          (reusing it if already running) with GIM_HUB_PUBLIC_URL, wait for
+          /healthz and print that URL on stdout. Status messages, including
+          the hub commit, go to stderr.
   stop    Stop the container (it runs with --rm); no error if already gone.
   ip      Print the container IP on GIM_HUB_NETWORK; exit 1 if not running.
-  url     Print http://<ip>:8080; exit 1 if not running.
+  url     Print the hub's public URL; exit 1 if not running.
   status  Print running/stopped; exit 0 if running, 1 otherwise.
   commit  Print the hub commit the image was built from.
   logs    Pass through to docker logs.
@@ -35,7 +35,8 @@ Closed federation (multi-hub mode):
              allowlist rather than by the network. Waits for every hub's
              /healthz and for a, b (and c) to have bound each other, then
              prints KEY=VALUE lines on stdout: GIM_FED_NETWORK,
-             GIM_FED_HUB_<X>=http://hub-<x>:8080 (reachable on that network),
+             GIM_FED_HUB_<X>=http://hub-<x>:8080 (reachable on that network,
+             and each hub's GIM_HUB_PUBLIC_URL),
              GIM_FED_CONTAINER_<X> and GIM_FED_HUB_ID_<X>.
   fed-stop   Remove the run's containers, network, volumes and config dir
              (everything labelled ai-agent-run=gim-fed-<run>).
@@ -48,7 +49,7 @@ Arguments:
 Env:
   GIM_HUB_SRC      gim-hub git checkout (default /srv/gimhq/im-client/hub)
   GIM_HUB_REV      commit to build (default
-                   18afc7bdde8cd643e4f4e21a35758fdb3a0bc155); exported with
+                   50b3401726c99781e30b7c0311f5c63a56bc5657); exported with
                    `git archive`, so local changes in the checkout are ignored
   GIM_HUB_CHECKOUT directory holding gim-hub at GIM_HUB_REV (e.g. a CI
                    checkout); when set, the image is built from it as is,
@@ -58,16 +59,18 @@ Env:
   GIM_HUB_IMAGE    image tag (default ai-agent/gim-hub)
   GIM_HUB_NETWORK  docker network (default traefik)
   GIM_HUB_BUILD    1 = build image on start (default), 0 = reuse image
+  GIM_HUB_PUBLIC_URL  start: the hub's public URL (default
+                   http://<name>:8080, reachable by name on GIM_HUB_NETWORK).
+                   gim-core signs in only at the URL the hub proves, so
+                   clients must use exactly this URL; set it when they reach
+                   the hub another way (e.g. a published port).
   GIM_FED_HUBS     federation: 2 (default) or 3 allowlisted hubs
-
-Containers on the same network can also reach the hub by name:
-  http://<name>:8080
 EOF
 }
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 GIM_HUB_SRC=${GIM_HUB_SRC:-/srv/gimhq/im-client/hub}
-GIM_HUB_REV=${GIM_HUB_REV:-18afc7bdde8cd643e4f4e21a35758fdb3a0bc155}
+GIM_HUB_REV=${GIM_HUB_REV:-50b3401726c99781e30b7c0311f5c63a56bc5657}
 GIM_HUB_IMAGE=${GIM_HUB_IMAGE:-ai-agent/gim-hub}
 GIM_HUB_NETWORK=${GIM_HUB_NETWORK:-traefik}
 GIM_HUB_BUILD=${GIM_HUB_BUILD:-1}
@@ -115,6 +118,13 @@ container_ip() {
         return 1
     fi
     echo "$ip"
+}
+
+# The public URL the running container was started with.
+public_url() {
+    container_ip >/dev/null || return 1
+    docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$name" |
+        sed -n 's/^GIM_HUB_PUBLIC_URL=//p'
 }
 
 image_commit() {
@@ -181,6 +191,7 @@ start() {
         # Disposable: the hub's data lives in memory and goes with it.
         docker run -d --rm --label ai-agent=true --network "$net" --name "$name" \
             --tmpfs /data:rw,uid=10001,gid=10001,mode=0700 \
+            -e "GIM_HUB_PUBLIC_URL=${GIM_HUB_PUBLIC_URL:-http://$name:8080}" \
             "$image" >/dev/null
     fi
 
@@ -192,10 +203,7 @@ start() {
         exit 1
     fi
     echo "gim-hub commit: $(image_commit)" >&2
-
-    local ip
-    ip=$(container_ip)
-    echo "http://$ip:8080"
+    public_url
 }
 
 
@@ -278,6 +286,7 @@ fed_start() {
             -v "$fed_prefix-$hub:/data" -v "$fed_dir:/config:ro" \
             -e RUST_LOG=info \
             -e GIM_HUB_FEDERATION=true \
+            -e "GIM_HUB_PUBLIC_URL=http://hub-$hub:8080" \
             -e GIM_HUB_P2P_LISTEN=/ip4/0.0.0.0/tcp/4001 \
             -e "GIM_HUB_P2P_EXTERNAL_ADDRS=/dns4/hub-$hub/tcp/4001" \
             -e "GIM_HUB_FEDERATION_ALLOWLIST=/config/$allowlist" \
@@ -322,10 +331,7 @@ case "$cmd" in
     fed-stop) fed_stop ;;
     stop) docker stop "$name" >/dev/null 2>&1 || true ;;
     ip) container_ip ;;
-    url)
-        ip=$(container_ip)
-        echo "http://$ip:8080"
-        ;;
+    url) public_url ;;
     status)
         if is_running; then
             echo running

@@ -211,12 +211,12 @@ impl Hub {
 #[async_trait]
 impl Transport for Hub {
     fn base_url(&self) -> Option<String> {
-        self.url.clone()
+        self.url.clone().or_else(|| self.own.base_url())
     }
 
-    async fn hub_info(&self) -> TransportResult<HubIdentity> {
+    async fn hub_info(&self, nonce: Option<&[u8; 32]>) -> TransportResult<HubIdentity> {
         self.up()?;
-        self.own.hub_info().await
+        self.own.hub_info(nonce).await
     }
 
     /// The owning hub learns the list too (federation), so that this
@@ -578,7 +578,7 @@ impl Setup {
 
     async fn build(options: Options) -> Self {
         let fake_a = FakeTransport::new();
-        let fake_b = FakeTransport::with_hub_seed(SEED_B);
+        let fake_b = FakeTransport::with_hub_seed(SEED_B).with_public_url(HUB_B_URL);
         let owner = if options.owner_b { &fake_b } else { &fake_a };
         let hub_a = Hub::new(&fake_a, owner);
         let hub_b = Hub::new(&fake_b, owner);
@@ -1114,17 +1114,41 @@ async fn added_hub_is_listed_signed_in_followed_and_shared_with_the_own_devices(
     wait_for("a fetch on B", || s.hub_b.fetches() > fetches).await;
     s.alice.stop_sync().unwrap();
 
-    // The tablet learns B's URL through the self group but does not
-    // contact it (interim gate).
+    // The tablet learns B's URL through the self group, checks it with the
+    // hub proof and uses B: signed in there, with its KeyPackages.
     tablet.client.sync_once().await.unwrap();
     let hubs = tablet.client.hubs().await.unwrap();
     let on_tablet = s.status(&hubs, &s.fake_b);
     assert_eq!(on_tablet.hub.url.as_deref(), Some(HUB_B_URL));
     assert!(on_tablet.hub.url_shared);
-    assert_eq!(on_tablet.hub.state, gim_base::model::HubState::Unverified);
-    assert!(!on_tablet.signed_in);
+    assert_eq!(on_tablet.hub.state, gim_base::model::HubState::Verified);
+    assert!(on_tablet.signed_in);
     let tablet_device = tablet.client.session().unwrap().device;
-    assert_eq!(s.fake_b.service().key_package_count(&tablet_device), 0);
+    assert_eq!(s.fake_b.service().key_package_count(&tablet_device), batch);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hub_that_does_not_prove_the_entered_url_is_not_added() {
+    let s = Setup::build(Options {
+        unlisted_b: true,
+        ..Options::default()
+    })
+    .await;
+    let device = s.device();
+    // B proves another URL than the one entered: a relay or a wrong URL.
+    s.fake_b
+        .set_public_url(Some("https://elsewhere.example.eu"));
+    let result = s.alice.add_hub(HUB_B_URL).await;
+    assert!(
+        matches!(result, Err(ClientError::InvalidInput(_))),
+        "{result:?}"
+    );
+    assert_eq!(s.alice.hubs().await.unwrap().len(), 1);
+    assert_eq!(s.stored_record(&s.fake_a).1.len(), 1);
+    // Nothing but the proof reached B: no DeviceList, sign-in or uploads.
+    assert!(s.hub_b.uploads().is_empty());
+    assert_eq!(s.fake_b.service().key_package_count(&device), 0);
+    assert!(s.fake_b.service().device_list(&device.user_id).is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

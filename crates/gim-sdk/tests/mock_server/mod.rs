@@ -85,6 +85,19 @@ pub struct Controls {
     pub acked: Mutex<Vec<(DeviceRef, GroupId)>>,
     /// `GET /v2/events` answered 410.
     pub expired_served: AtomicUsize,
+    /// `GET /v2/hub` requests served.
+    pub hub_infos: AtomicUsize,
+    /// `GET /v2/hub?nonce=` answers with the proof for this nonce instead
+    /// of the request's (a replayed proof).
+    pub replay_nonce: Mutex<Option<[u8; 32]>>,
+    /// `GET /v2/hub?nonce=` answers with a corrupted proof.
+    pub corrupt_proof: AtomicBool,
+    /// Challenges are re-encoded as AuthChallenge v1 (no `audience_url`).
+    pub challenge_v1: AtomicBool,
+    /// Challenges are re-encoded as v2 for this `audience_url`.
+    pub challenge_url: Mutex<Option<String>>,
+    /// `POST /v2/auth/session` requests served.
+    pub sessions: AtomicUsize,
 }
 
 impl Controls {
@@ -132,20 +145,33 @@ impl MockServer {
         .await;
     }
 
+    /// Serves `transport`, whose public URL becomes this server's URL.
     pub async fn start(transport: FakeTransport) -> Self {
-        Self::serve(transport.clone(), transport, false).await
+        Self::serve(transport.clone(), transport, false, true).await
     }
 
-    /// A hub with its own identity and sessions (`transport`) serving the
-    /// events, groups, history and pending Welcomes of `owner`.
+    /// A hub with its own identity and sessions (`transport`, whose public
+    /// URL becomes this server's URL) serving the events, groups, history
+    /// and pending Welcomes of `owner`.
     pub async fn replica(transport: FakeTransport, owner: FakeTransport) -> Self {
-        Self::serve(transport, owner, true).await
+        Self::serve(transport, owner, true, true).await
     }
 
-    async fn serve(transport: FakeTransport, data: FakeTransport, replica: bool) -> Self {
+    /// A relay: forwards every request to the hub `transport`, which keeps
+    /// its own public URL (that of another server).
+    pub async fn relay(transport: FakeTransport) -> Self {
+        Self::serve(transport.clone(), transport, false, false).await
+    }
+
+    async fn serve(
+        transport: FakeTransport,
+        data: FakeTransport,
+        replica: bool,
+        public: bool,
+    ) -> Self {
         let controls = Arc::new(Controls::default());
         let state = AppState {
-            transport,
+            transport: transport.clone(),
             data,
             replica,
             controls: controls.clone(),
@@ -193,6 +219,9 @@ impl MockServer {
             .with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
+        if public {
+            transport.set_public_url(Some(&url));
+        }
         let task = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
@@ -452,12 +481,34 @@ fn event_dto(e: StreamEvent) -> v2::Event {
     }
 }
 
-async fn hub(State(state): State<AppState>) -> Response {
-    reply(state.transport.hub_info().await.map(|info| v2::HubInfo {
-        hub_id: info.hub_id,
-        hub_root_pubkey: info.hub_root_public_key,
-        version: info.version,
-    }))
+async fn hub(State(state): State<AppState>, Query(query): Query<v2::HubQuery>) -> Response {
+    let controls = &state.controls;
+    controls.hub_infos.fetch_add(1, Ordering::SeqCst);
+    let result = async {
+        let nonce = match query.nonce {
+            Some(nonce) => Some(<[u8; 32]>::try_from(nonce).map_err(|_| invalid("nonce"))?),
+            None => None,
+        };
+        let nonce = match *controls.replay_nonce.lock().unwrap() {
+            Some(old) if nonce.is_some() => Some(old),
+            _ => nonce,
+        };
+        let mut info = state.transport.hub_info(nonce.as_ref()).await?;
+        if controls.corrupt_proof.load(Ordering::SeqCst) {
+            if let Some(proof) = info.proof.as_mut() {
+                proof[0] ^= 1;
+            }
+        }
+        Ok(v2::HubInfo {
+            hub_id: info.hub_id,
+            hub_root_pubkey: info.hub_root_public_key,
+            version: info.version,
+            public_url: info.public_url,
+            proof: info.proof,
+        })
+    }
+    .await;
+    reply(result)
 }
 
 async fn auth_challenge(
@@ -467,7 +518,15 @@ async fn auth_challenge(
     state.controls.challenges.fetch_add(1, Ordering::SeqCst);
     let result = async {
         let device = DeviceRef::parse(&request.user_id, &request.device_id).map_err(invalid)?;
-        let challenge = state.transport.auth_challenge(&device).await?;
+        let mut challenge = state.transport.auth_challenge(&device).await?;
+        let controls = &state.controls;
+        let url = controls.challenge_url.lock().unwrap().clone();
+        if url.is_some() || controls.challenge_v1.load(Ordering::SeqCst) {
+            let mut decoded = gim_identity::AuthChallenge::from_bytes(&challenge.challenge)
+                .map_err(|e| TransportError::Server(e.to_string()))?;
+            decoded.audience_url = url;
+            challenge.challenge = decoded.to_bytes();
+        }
         Ok(v2::AuthChallenge {
             challenge: challenge.challenge,
             expires_at: 0,
@@ -482,6 +541,7 @@ async fn create_session(
     State(state): State<AppState>,
     Json(request): Json<v2::CreateSessionRequest>,
 ) -> Response {
+    state.controls.sessions.fetch_add(1, Ordering::SeqCst);
     if state.controls.reject.load(Ordering::SeqCst) {
         return error(StatusCode::UNAUTHORIZED, "device_not_active");
     }

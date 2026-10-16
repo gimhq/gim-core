@@ -1,0 +1,165 @@
+{
+  "description": "gim hub URL normalization test vectors, see docs/identity.md \"Hub URLs\": input is trimmed of surrounding whitespace; scheme http|https (lowercased); host = DNS name of [a-z0-9-] labels, IPv4, or bracketed IPv6, lowercased; port = decimal digits 1..65535, omitted when 80 (http) or 443 (https); empty path or a single '/' only; no userinfo, query, fragment, percent-encoding or non-ASCII; input at most 65535 bytes. A case has either `normalized` or `error` (a non-normative reason).",
+  "cases": [
+    {
+      "input": "https://hub.example.eu",
+      "normalized": "https://hub.example.eu"
+    },
+    {
+      "input": "https://hub.example.eu/",
+      "normalized": "https://hub.example.eu"
+    },
+    {
+      "input": "https://hub.example.eu:443",
+      "normalized": "https://hub.example.eu"
+    },
+    {
+      "input": "https://hub.example.eu:443/",
+      "normalized": "https://hub.example.eu"
+    },
+    {
+      "input": "http://hub-a:80/",
+      "normalized": "http://hub-a"
+    },
+    {
+      "input": "http://hub-a:8080",
+      "normalized": "http://hub-a:8080"
+    },
+    {
+      "input": "http://hub-a:8080/",
+      "normalized": "http://hub-a:8080"
+    },
+    {
+      "input": "https://hub.example.eu:80",
+      "normalized": "https://hub.example.eu:80"
+    },
+    {
+      "input": "http://hub.example.eu:443",
+      "normalized": "http://hub.example.eu:443"
+    },
+    {
+      "input": "HTTPS://Hub.Example.EU:8443/",
+      "normalized": "https://hub.example.eu:8443"
+    },
+    {
+      "input": "Http://HUB-A:8080",
+      "normalized": "http://hub-a:8080"
+    },
+    {
+      "input": "https://hub.example.eu:08443",
+      "normalized": "https://hub.example.eu:8443"
+    },
+    {
+      "input": "http://10.0.0.1:8080",
+      "normalized": "http://10.0.0.1:8080"
+    },
+    {
+      "input": "http://[::1]:8080/",
+      "normalized": "http://[::1]:8080"
+    },
+    {
+      "input": "https://[FE80::1]:443",
+      "normalized": "https://[fe80::1]"
+    },
+    {
+      "input": " https://hub.example.eu ",
+      "normalized": "https://hub.example.eu"
+    },
+    {
+      "input": "hub.example.eu",
+      "error": "no scheme"
+    },
+    {
+      "input": "ftp://hub.example.eu",
+      "error": "scheme not http or https"
+    },
+    {
+      "input": "https://",
+      "error": "empty host"
+    },
+    {
+      "input": "https:///",
+      "error": "empty host"
+    },
+    {
+      "input": "https://hub.example.eu/v2",
+      "error": "path"
+    },
+    {
+      "input": "https://hub.example.eu//",
+      "error": "path"
+    },
+    {
+      "input": "https://hub.example.eu?x=1",
+      "error": "query"
+    },
+    {
+      "input": "https://hub.example.eu/?x=1",
+      "error": "query"
+    },
+    {
+      "input": "https://hub.example.eu?",
+      "error": "query"
+    },
+    {
+      "input": "https://hub.example.eu#top",
+      "error": "fragment"
+    },
+    {
+      "input": "https://user@hub.example.eu",
+      "error": "userinfo"
+    },
+    {
+      "input": "https://user:pw@hub.example.eu",
+      "error": "userinfo"
+    },
+    {
+      "input": "https://hub.example.eu:",
+      "error": "empty port"
+    },
+    {
+      "input": "https://hub.example.eu:0",
+      "error": "port 0"
+    },
+    {
+      "input": "https://hub.example.eu:65536",
+      "error": "port out of range"
+    },
+    {
+      "input": "https://hub.example.eu:+80",
+      "error": "port not digits"
+    },
+    {
+      "input": "https://hub..eu",
+      "error": "empty DNS label"
+    },
+    {
+      "input": "https://hub.example.eu.",
+      "error": "trailing dot"
+    },
+    {
+      "input": "https://hub_a.eu",
+      "error": "invalid host character"
+    },
+    {
+      "input": "https://hüb.eu",
+      "error": "non-ASCII host"
+    },
+    {
+      "input": "https://hub%41.eu",
+      "error": "percent-encoded host"
+    },
+    {
+      "input": "https://[::1",
+      "error": "unterminated IPv6 literal"
+    },
+    {
+      "input": "https://[nope]",
+      "error": "invalid IPv6 literal"
+    },
+    {
+      "input": "https://[::1]x",
+      "error": "garbage after IPv6 literal"
+    }
+  ]
+}

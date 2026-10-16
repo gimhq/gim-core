@@ -5680,6 +5680,13 @@ enum GimError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
     case ChatNotActive(chatId: String, state: ChatState
     )
     /**
+     * The server at the configured URL did not prove that it is the
+     * expected hub at that URL (a wrong URL, or a relay in between); the
+     * device did not sign in there. Check the hub URL.
+     */
+    case HubNotVerified(reason: String
+    )
+    /**
      * `remove_hub` without `confirm_owned_groups`: the hub owns
      * `group_count` chats of this user. They are not moved; after the
      * removal they stay reachable through the other members' hubs. Ask
@@ -5767,17 +5774,20 @@ public struct FfiConverterTypeGimError: FfiConverterRustBuffer {
             chatId: try FfiConverterString.read(from: &buf), 
             state: try FfiConverterTypeChatState.read(from: &buf)
             )
-        case 13: return .HubOwnsGroups(
+        case 13: return .HubNotVerified(
+            reason: try FfiConverterString.read(from: &buf)
+            )
+        case 14: return .HubOwnsGroups(
             hubId: try FfiConverterString.read(from: &buf), 
             groupCount: try FfiConverterUInt32.read(from: &buf)
             )
-        case 14: return .LastHub(
+        case 15: return .LastHub(
             hubId: try FfiConverterString.read(from: &buf)
             )
-        case 15: return .HomeHub(
+        case 16: return .HomeHub(
             hubId: try FfiConverterString.read(from: &buf)
             )
-        case 16: return .HubNotDrained(
+        case 17: return .HubNotDrained(
             hubId: try FfiConverterString.read(from: &buf), 
             reason: try FfiConverterString.read(from: &buf)
             )
@@ -5854,24 +5864,29 @@ public struct FfiConverterTypeGimError: FfiConverterRustBuffer {
             FfiConverterTypeChatState.write(state, into: &buf)
             
         
-        case let .HubOwnsGroups(hubId,groupCount):
+        case let .HubNotVerified(reason):
             writeInt(&buf, Int32(13))
+            FfiConverterString.write(reason, into: &buf)
+            
+        
+        case let .HubOwnsGroups(hubId,groupCount):
+            writeInt(&buf, Int32(14))
             FfiConverterString.write(hubId, into: &buf)
             FfiConverterUInt32.write(groupCount, into: &buf)
             
         
         case let .LastHub(hubId):
-            writeInt(&buf, Int32(14))
-            FfiConverterString.write(hubId, into: &buf)
-            
-        
-        case let .HomeHub(hubId):
             writeInt(&buf, Int32(15))
             FfiConverterString.write(hubId, into: &buf)
             
         
-        case let .HubNotDrained(hubId,reason):
+        case let .HomeHub(hubId):
             writeInt(&buf, Int32(16))
+            FfiConverterString.write(hubId, into: &buf)
+            
+        
+        case let .HubNotDrained(hubId,reason):
+            writeInt(&buf, Int32(17))
             FfiConverterString.write(hubId, into: &buf)
             FfiConverterString.write(reason, into: &buf)
             

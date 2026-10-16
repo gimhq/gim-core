@@ -26,15 +26,17 @@ use gim_identity::HostingEntry;
 
 use crate::client::owner_hub;
 use crate::hosting::with_entry;
-use crate::hubs::{check_identity, sort, HubStatus, Listed};
+use crate::hubs::{prove_hub, sort, HubStatus, Listed, ProofFailure};
 use crate::routing::HubTarget;
 use crate::transport::Transport;
 use crate::{Client, ClientError, Result};
 
 impl<S: StateStore + 'static> Client<S> {
     /// Adds the hub at `url` to the user's hosting record (§4.1): checks
-    /// the URL with `GET /v2/hub`, uploads the own DeviceList there, signs
-    /// in, gets the hub's co-signed entry (least preferred, after the
+    /// the URL with the hub proof (`GET /v2/hub?nonce=`: the hub proves its
+    /// root key for exactly this URL; [`ClientError::InvalidInput`]
+    /// otherwise, with nothing else sent there), uploads the own DeviceList there, signs
+    /// in with a challenge bound to the URL, gets the hub's co-signed entry (least preferred, after the
     /// listed hubs), publishes the record with it, uploads this device's
     /// KeyPackages and the recovery backup there, starts following its
     /// events (with the sync loop) and sends the hub map to the own other
@@ -47,11 +49,17 @@ impl<S: StateStore + 'static> Client<S> {
         let session = self.require_session()?;
         let _admin = self.inner.hub_admin_lock.lock().await;
         let transport = (self.inner.hub_connector)(url)?;
-        let info = transport.hub_info().await?;
-        let root = check_identity(&info, None).map_err(|reason| {
-            ClientError::InvalidInput(format!("{url} is not a gim hub: {reason}"))
-        })?;
-        let hub_id = info.hub_id;
+        let proven = match prove_hub(&*transport, Some(url), None, false).await {
+            Ok(proven) => proven,
+            Err(ProofFailure::Transport(err)) => return Err(err.into()),
+            Err(ProofFailure::Rejected(reason)) => {
+                tracing::warn!(%url, %reason, "hub URL rejected");
+                return Err(ClientError::InvalidInput(format!(
+                    "{url} is not a verified gim hub: {reason}"
+                )));
+            }
+        };
+        let (hub_id, root) = (proven.hub_id, proven.root);
         let listed = self.listed_hubs().await?;
         if let Some(hub) = listed.iter().find(|h| h.hub_id == hub_id) {
             let home = self.home_hub().as_ref() == Some(&hub_id);

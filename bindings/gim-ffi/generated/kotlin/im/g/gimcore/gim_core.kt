@@ -8821,6 +8821,19 @@ sealed class GimException: kotlin.Exception() {
     }
     
     /**
+     * The server at the configured URL did not prove that it is the
+     * expected hub at that URL (a wrong URL, or a relay in between); the
+     * device did not sign in there. Check the hub URL.
+     */
+    class HubNotVerified(
+        
+        val `reason`: kotlin.String
+        ) : GimException() {
+        override val message
+            get() = "reason=${ `reason` }"
+    }
+    
+    /**
      * `remove_hub` without `confirm_owned_groups`: the hub owns
      * `group_count` chats of this user. They are not moved; after the
      * removal they stay reachable through the other members' hubs. Ask
@@ -8926,17 +8939,20 @@ public object FfiConverterTypeGimError : FfiConverterRustBuffer<GimException> {
                 FfiConverterString.read(buf),
                 FfiConverterTypeChatState.read(buf),
                 )
-            13 -> GimException.HubOwnsGroups(
+            13 -> GimException.HubNotVerified(
+                FfiConverterString.read(buf),
+                )
+            14 -> GimException.HubOwnsGroups(
                 FfiConverterString.read(buf),
                 FfiConverterUInt.read(buf),
                 )
-            14 -> GimException.LastHub(
+            15 -> GimException.LastHub(
                 FfiConverterString.read(buf),
                 )
-            15 -> GimException.HomeHub(
+            16 -> GimException.HomeHub(
                 FfiConverterString.read(buf),
                 )
-            16 -> GimException.HubNotDrained(
+            17 -> GimException.HubNotDrained(
                 FfiConverterString.read(buf),
                 FfiConverterString.read(buf),
                 )
@@ -9006,6 +9022,11 @@ public object FfiConverterTypeGimError : FfiConverterRustBuffer<GimException> {
                 4UL
                 + FfiConverterString.allocationSize(value.`chatId`)
                 + FfiConverterTypeChatState.allocationSize(value.`state`)
+            )
+            is GimException.HubNotVerified -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`reason`)
             )
             is GimException.HubOwnsGroups -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
@@ -9095,24 +9116,29 @@ public object FfiConverterTypeGimError : FfiConverterRustBuffer<GimException> {
                 FfiConverterTypeChatState.write(value.`state`, buf)
                 Unit
             }
-            is GimException.HubOwnsGroups -> {
+            is GimException.HubNotVerified -> {
                 buf.putInt(13)
+                FfiConverterString.write(value.`reason`, buf)
+                Unit
+            }
+            is GimException.HubOwnsGroups -> {
+                buf.putInt(14)
                 FfiConverterString.write(value.`hubId`, buf)
                 FfiConverterUInt.write(value.`groupCount`, buf)
                 Unit
             }
             is GimException.LastHub -> {
-                buf.putInt(14)
-                FfiConverterString.write(value.`hubId`, buf)
-                Unit
-            }
-            is GimException.HomeHub -> {
                 buf.putInt(15)
                 FfiConverterString.write(value.`hubId`, buf)
                 Unit
             }
-            is GimException.HubNotDrained -> {
+            is GimException.HomeHub -> {
                 buf.putInt(16)
+                FfiConverterString.write(value.`hubId`, buf)
+                Unit
+            }
+            is GimException.HubNotDrained -> {
+                buf.putInt(17)
                 FfiConverterString.write(value.`hubId`, buf)
                 FfiConverterString.write(value.`reason`, buf)
                 Unit

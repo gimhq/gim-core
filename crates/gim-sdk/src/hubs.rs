@@ -5,10 +5,14 @@
 //! bootstrapped with `GET /v2/hub` and serves every existing single-hub code
 //! path. Hosting records name hubs by `hub_id` only, so the URLs are learned
 //! from the bootstrap and from the own other devices through the self group
-//! (`self.hubs`). A URL is used only once `GET /v2/hub` there proved the
-//! listed `hub_id` (derived from the returned root key); then the device
-//! signs in there with that `hub_id` as the challenge audience. Removed hubs
-//! are only marked: draining them comes with hub removal.
+//! (`self.hubs`). A URL is used only once `GET /v2/hub?nonce=` there proved
+//! the listed `hub_id` (derived from the returned root key) at that URL: the
+//! root key signs the client's fresh nonce, the `hub_id` and the hub's
+//! public URL, which must be the contacted URL. Until then, the hub proof is
+//! the only request sent to a URL, also to one shared by another own device.
+//! Then the device signs in there with that `hub_id` and URL as the
+//! challenge audience (AuthChallenge v2). Removed hubs are only marked:
+//! draining them comes with hub removal.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -16,11 +20,11 @@ use std::sync::Arc;
 use gim_base::model::{HubRecord, HubState};
 use gim_base::{StateReader, StateStore, StoreTxn};
 use gim_common::now_ms;
-use gim_identity::{HubRootPublicKey, UserHostingRecord};
+use gim_identity::{normalize_hub_url, HubRootPublicKey, UserHostingRecord};
 use gim_proto::envelope::{Content, HubLocation};
 use serde::{Deserialize, Serialize};
 
-use crate::auth::device_key;
+use crate::auth::{device_key, Audience};
 use crate::client::{Session, SESSION_SECRET_KEY};
 use crate::transport::{AccessToken, HubIdentity, Transport, TransportError, TransportResult};
 use crate::{Client, ClientError, HttpTransport, Result};
@@ -81,6 +85,9 @@ pub(crate) struct HubHandle {
     /// The transport to the verified URL, once `GET /v2/hub` there proved
     /// the hub in this run; never used before.
     pub(crate) verified: Option<(String, Arc<dyn Transport>)>,
+    /// A URL whose proof failed in this run: not contacted again until a
+    /// URL is set on this device or the next run.
+    pub(crate) rejected: Option<String>,
     pub(crate) token: Option<HubToken>,
 }
 
@@ -112,12 +119,37 @@ pub(crate) enum Listed<'a> {
     Stored,
 }
 
-/// Checks a hub's answer to `GET /v2/hub`: `hub_id` derives from the root
-/// key and is `expected`, if given. Returns the root key.
-pub(crate) fn check_identity(
+/// What `GET /v2/hub?nonce=` at a URL proved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProvenHub {
+    pub(crate) hub_id: String,
+    /// The hub's 32-byte root public key.
+    pub(crate) root: Vec<u8>,
+    /// The normalized public URL the proof binds, which sign-in challenges
+    /// must name; `None` for a hub without one (single-hub development,
+    /// accepted for the home hub only).
+    pub(crate) url: Option<String>,
+}
+
+/// Why a hub URL was not verified.
+#[derive(Debug)]
+pub(crate) enum ProofFailure {
+    /// The hub could not be asked; the stored state is kept.
+    Transport(TransportError),
+    /// The answer does not prove the expected hub at the contacted URL.
+    Rejected(String),
+}
+
+/// Checks a hub's answer to `GET /v2/hub?nonce=` with `nonce` at
+/// `contacted`: `hub_id` derives from the root key and is `expected`, if
+/// given; with a public URL, that is `contacted` (normalized) and the proof
+/// verifies under the root key.
+fn check_identity(
     info: &HubIdentity,
+    nonce: &[u8; 32],
+    contacted: Option<&str>,
     expected: Option<&str>,
-) -> std::result::Result<Vec<u8>, String> {
+) -> std::result::Result<ProvenHub, String> {
     let key = <[u8; 32]>::try_from(info.hub_root_public_key.as_slice())
         .map_err(|_| "hub_root_pubkey is not 32 bytes".to_string())
         .and_then(|bytes| HubRootPublicKey::from_bytes(&bytes).map_err(|e| e.to_string()))?;
@@ -127,7 +159,75 @@ pub(crate) fn check_identity(
     if expected.is_some_and(|expected| expected != info.hub_id) {
         return Err(format!("the URL serves hub {}", info.hub_id));
     }
-    Ok(key.as_bytes().to_vec())
+    let url = match &info.public_url {
+        None => None,
+        Some(public_url) => {
+            let contacted = contacted.ok_or("the contacted URL is unknown")?;
+            let contacted = normalize_hub_url(contacted).map_err(|e| e.to_string())?;
+            if *public_url != contacted {
+                return Err(format!(
+                    "the hub's public URL is {public_url}, not {contacted}"
+                ));
+            }
+            let proof = info
+                .proof
+                .as_deref()
+                .and_then(|proof| <[u8; 64]>::try_from(proof).ok())
+                .ok_or("no proof of possession")?;
+            key.verify_hub_proof(nonce, &info.hub_id, public_url, &proof)
+                .map_err(|e| format!("proof of possession: {e}"))?;
+            Some(contacted)
+        }
+    };
+    Ok(ProvenHub {
+        hub_id: info.hub_id.clone(),
+        root: key.as_bytes().to_vec(),
+        url,
+    })
+}
+
+/// Asks the hub behind `transport`, contacted at `contacted`, to prove
+/// with a fresh nonce that it is the hub `expected` (if given) at that URL.
+/// A hub without a public URL cannot prove (it answers the nonce with 400);
+/// with `allow_unbound` (the home hub in single-hub development) it is then
+/// read without a nonce and accepted unbound, otherwise rejected.
+pub(crate) async fn prove_hub(
+    transport: &dyn Transport,
+    contacted: Option<&str>,
+    expected: Option<&str>,
+    allow_unbound: bool,
+) -> std::result::Result<ProvenHub, ProofFailure> {
+    let mut nonce = [0u8; 32];
+    getrandom::getrandom(&mut nonce)
+        .map_err(|e| ProofFailure::Rejected(format!("no random nonce: {e}")))?;
+    let info = match transport.hub_info(Some(&nonce)).await {
+        Err(TransportError::Rejected { status: 400, .. }) if allow_unbound => {
+            let info = transport
+                .hub_info(None)
+                .await
+                .map_err(ProofFailure::Transport)?;
+            if info.public_url.is_some() {
+                return Err(ProofFailure::Rejected(
+                    "the hub refused to prove its public URL".into(),
+                ));
+            }
+            info
+        }
+        Err(err @ TransportError::Rejected { status: 400, .. }) => {
+            return Err(ProofFailure::Rejected(format!(
+                "the hub cannot prove its URL: {err}"
+            )))
+        }
+        info => info.map_err(ProofFailure::Transport)?,
+    };
+    let proven =
+        check_identity(&info, &nonce, contacted, expected).map_err(ProofFailure::Rejected)?;
+    if proven.url.is_none() && !allow_unbound {
+        return Err(ProofFailure::Rejected(
+            "the hub has no public URL to prove".into(),
+        ));
+    }
+    Ok(proven)
 }
 
 /// Registry order: by priority, then hub id; the first listed one is the
@@ -189,21 +289,28 @@ impl<S: StateStore + 'static> Client<S> {
             )));
         };
         let transport = (self.inner.hub_connector)(url)?;
-        let info = transport.hub_info().await?;
-        let root = check_identity(&info, Some(hub_id)).map_err(|reason| {
-            tracing::warn!(%hub_id, %url, %reason, "hub URL rejected");
-            ClientError::InvalidInput(format!("{url} is not hub {hub_id}: {reason}"))
-        })?;
+        let proven = match prove_hub(&*transport, Some(url), Some(hub_id), false).await {
+            Ok(proven) => proven,
+            Err(ProofFailure::Transport(err)) => return Err(err.into()),
+            Err(ProofFailure::Rejected(reason)) => {
+                tracing::warn!(%hub_id, %url, %reason, "hub URL rejected");
+                return Err(ClientError::InvalidInput(format!(
+                    "{url} is not hub {hub_id}: {reason}"
+                )));
+            }
+        };
         hub.url = Some(url.to_string());
         hub.url_shared = false;
-        hub.verified_root_pubkey = Some(root);
+        hub.verified_root_pubkey = Some(proven.root);
         hub.last_seen_ms = Some(now_ms());
         hub.state = HubState::Verified;
         self.save_hub(hub).await?;
-        self.handles()
-            .entry(hub_id.to_string())
-            .or_default()
-            .verified = Some((url.to_string(), transport));
+        {
+            let mut handles = self.handles();
+            let handle = handles.entry(hub_id.to_string()).or_default();
+            handle.verified = Some((url.to_string(), transport));
+            handle.rejected = None;
+        }
         self.sign_in_hub(hub_id).await;
         // Sending may publish the hosting record, which refreshes the hubs.
         drop(guard);
@@ -248,19 +355,13 @@ impl<S: StateStore + 'static> Client<S> {
                 continue;
             };
             let hub_id = hub.hub_id.clone();
-            if hub.url_shared {
-                // Shared by another own device: not contacted until a URL
-                // is set on this device (no URL-bound hub proof yet).
-                if let Some(handle) = self.handles().get_mut(&hub_id) {
-                    handle.verified = None;
-                }
+            let (checked, rejected) = self.handles().get(&hub_id).map_or((false, false), |h| {
+                let checked = h.verified.as_ref().is_some_and(|(v, _)| *v == url);
+                (checked, h.rejected.as_ref() == Some(&url))
+            });
+            if rejected {
                 continue;
             }
-            let checked = self
-                .handles()
-                .get(&hub_id)
-                .and_then(|h| h.verified.as_ref())
-                .is_some_and(|(verified, _)| *verified == url);
             if checked || self.verify_hub(hub, &url).await? {
                 self.sign_in_hub(&hub_id).await;
             }
@@ -288,26 +389,28 @@ impl<S: StateStore + 'static> Client<S> {
     /// own URL. Returns whether that gave the hub its first URL, which is
     /// then shared. Transports without a hub identity skip this.
     async fn bootstrap_home_hub(&self, session: &Session) -> Result<bool> {
-        let info = match self.inner.transport.hub_info().await {
-            Err(TransportError::NotFound(reason)) => {
+        let pinned = Some(session.hub_id.as_str()).filter(|h| !h.is_empty());
+        let url = self.inner.transport.base_url();
+        let proven = match prove_hub(&*self.inner.transport, url.as_deref(), pinned, true).await {
+            Ok(proven) => proven,
+            Err(ProofFailure::Transport(TransportError::NotFound(reason))) => {
                 tracing::debug!(%reason, "no hub identity; single-hub mode");
                 return Ok(false);
             }
-            info => info?,
+            Err(ProofFailure::Transport(err)) => return Err(err.into()),
+            Err(ProofFailure::Rejected(reason)) => {
+                return Err(TransportError::HubNotVerified(format!(
+                    "the home hub identity does not verify: {reason}"
+                ))
+                .into())
+            }
         };
-        let pinned = Some(session.hub_id.as_str()).filter(|h| !h.is_empty());
-        let root = check_identity(&info, pinned).map_err(|reason| {
-            ClientError::Transport(TransportError::Server(format!(
-                "the home hub identity does not verify: {reason}"
-            )))
-        })?;
         *self
             .inner
             .home_hub
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(info.hub_id.clone());
-        let url = self.inner.transport.base_url();
-        let hub_id = info.hub_id;
+            .unwrap_or_else(|e| e.into_inner()) = Some(proven.hub_id.clone());
+        let (hub_id, root) = (proven.hub_id, proven.root);
         self.run(move |store, _| {
             store.transaction(|txn| {
                 let stored = txn.hubs()?.into_iter().find(|h| h.hub_id == hub_id);
@@ -393,24 +496,26 @@ impl<S: StateStore + 'static> Client<S> {
         for hub_id in removed {
             if let Some(handle) = handles.get_mut(&hub_id) {
                 handle.verified = None;
+                handle.rejected = None;
             }
         }
         Ok(())
     }
 
-    /// Checks `url` for the listed `hub` with `GET /v2/hub`. On success the
-    /// hub is verified and its transport kept; a URL serving another hub
-    /// leaves it unverified. Network failures keep the stored state. A URL
-    /// shared by another own device is never contacted.
+    /// Checks `url` for the listed `hub` with the hub proof (`GET
+    /// /v2/hub?nonce=`), the only request sent there before it passes. On
+    /// success the hub is verified and its transport kept; a URL that does
+    /// not prove the hub leaves it unverified and is not contacted again in
+    /// this run. Network failures keep the stored state.
     async fn verify_hub(&self, mut hub: HubRecord, url: &str) -> Result<bool> {
-        if hub.url_shared {
-            return Ok(false);
-        }
         let checked = match (self.inner.hub_connector)(url) {
-            Ok(transport) => match transport.hub_info().await {
-                Ok(info) => Ok((check_identity(&info, Some(&hub.hub_id)), transport)),
-                Err(err) => Err(err),
-            },
+            Ok(transport) => {
+                match prove_hub(&*transport, Some(url), Some(&hub.hub_id), false).await {
+                    Ok(proven) => Ok((Ok(proven), transport)),
+                    Err(ProofFailure::Rejected(reason)) => Ok((Err(reason), transport)),
+                    Err(ProofFailure::Transport(err)) => Err(err),
+                }
+            }
             Err(err) => Err(err),
         };
         let (identity, transport) = match checked {
@@ -422,22 +527,23 @@ impl<S: StateStore + 'static> Client<S> {
         };
         let verified = identity.is_ok();
         match identity {
-            Ok(root) => {
-                hub.verified_root_pubkey = Some(root);
+            Ok(proven) => {
+                hub.verified_root_pubkey = Some(proven.root);
                 hub.last_seen_ms = Some(now_ms());
                 hub.state = HubState::Verified;
-                self.handles()
-                    .entry(hub.hub_id.clone())
-                    .or_default()
-                    .verified = Some((url.to_string(), transport));
+                let mut handles = self.handles();
+                let handle = handles.entry(hub.hub_id.clone()).or_default();
+                handle.verified = Some((url.to_string(), transport));
+                handle.rejected = None;
             }
             Err(reason) => {
                 tracing::warn!(hub_id = %hub.hub_id, %url, %reason, "hub URL rejected");
                 hub.verified_root_pubkey = None;
                 hub.state = HubState::Unverified;
-                if let Some(handle) = self.handles().get_mut(&hub.hub_id) {
-                    handle.verified = None;
-                }
+                let mut handles = self.handles();
+                let handle = handles.entry(hub.hub_id.clone()).or_default();
+                handle.verified = None;
+                handle.rejected = Some(url.to_string());
             }
         }
         self.save_hub(hub).await?;
@@ -477,18 +583,24 @@ impl<S: StateStore + 'static> Client<S> {
     }
 
     /// Signs in on the verified hub `hub_id`; the challenge must name
-    /// `hub_id`. Keeps and persists the new token.
+    /// `hub_id` and its proven URL. Keeps and persists the new token.
     pub(crate) async fn renew_hub_token(&self, hub_id: &str) -> TransportResult<AccessToken> {
-        let transport = self
+        let (url, transport) = self
             .handles()
             .get(hub_id)
-            .and_then(|h| h.verified.as_ref())
-            .map(|(_, transport)| transport.clone())
+            .and_then(|h| h.verified.clone())
             .ok_or(TransportError::Unauthorized)?;
+        let audience = Audience {
+            hub_id: Some(hub_id.to_string()),
+            url: Some(
+                normalize_hub_url(&url)
+                    .map_err(|e| TransportError::HubNotVerified(e.to_string()))?,
+            ),
+        };
         let session = self.session().ok_or(TransportError::Unauthorized)?;
         let key = device_key(&*self.inner.secrets)?;
         let (token, _) = self
-            .sign_in_on(&*transport, &session.device, &key, Some(hub_id))
+            .sign_in_on(&*transport, &session.device, &key, &audience)
             .await?;
         tracing::info!(%hub_id, "signed in on a listed hub");
         if let Some(handle) = self.handles().get_mut(hub_id) {
@@ -606,6 +718,7 @@ impl<S: StateStore + 'static> Client<S> {
                 hub_id,
                 HubHandle {
                     verified: None,
+                    rejected: None,
                     token: Some(token),
                 },
             );
@@ -645,29 +758,67 @@ mod tests {
 
     use super::*;
 
-    fn identity(seed: u8, hub_id: Option<String>) -> HubIdentity {
-        let key = HubRootKey::from_seed(&[seed; 32]).public();
+    const URL: &str = "https://hub-a.example.eu";
+    const NONCE: [u8; 32] = [7; 32];
+
+    /// The answer of the hub `seed` claiming `hub_id`, with a proof for
+    /// `url` and `nonce` if it has a public URL.
+    fn identity(seed: u8, hub_id: Option<String>, url: Option<&str>) -> HubIdentity {
+        let root = HubRootKey::from_seed(&[seed; 32]);
+        let key = root.public();
         HubIdentity {
             hub_id: hub_id.unwrap_or_else(|| key.hub_id()),
             hub_root_public_key: key.as_bytes().to_vec(),
             version: "0.1.0".into(),
+            public_url: url.map(str::to_string),
+            proof: url.map(|url| root.sign_hub_proof(&NONCE, url).unwrap().to_vec()),
         }
     }
 
     #[test]
     fn hub_identity_must_derive_from_its_key_and_be_the_expected_hub() {
-        let a = identity(1, None);
-        assert_eq!(check_identity(&a, None), Ok(a.hub_root_public_key.clone()));
-        assert!(check_identity(&a, Some(&a.hub_id)).is_ok());
-        let b = identity(2, None);
-        assert!(check_identity(&a, Some(&b.hub_id)).is_err());
+        let a = identity(1, None, None);
+        let proven = check_identity(&a, &NONCE, None, None).unwrap();
+        assert_eq!(proven.root, a.hub_root_public_key);
+        assert_eq!(proven.url, None);
+        assert!(check_identity(&a, &NONCE, None, Some(&a.hub_id)).is_ok());
+        let b = identity(2, None, None);
+        assert!(check_identity(&a, &NONCE, None, Some(&b.hub_id)).is_err());
         // A hub naming another hub's id than its key derives.
-        assert!(check_identity(&identity(1, Some(b.hub_id.clone())), None).is_err());
+        let lying = identity(1, Some(b.hub_id.clone()), None);
+        assert!(check_identity(&lying, &NONCE, None, None).is_err());
         let short = HubIdentity {
             hub_root_public_key: vec![1; 31],
             ..a.clone()
         };
-        assert!(check_identity(&short, None).is_err());
+        assert!(check_identity(&short, &NONCE, None, None).is_err());
+    }
+
+    #[test]
+    fn a_public_url_must_be_the_contacted_one_and_proven() {
+        let a = identity(1, None, Some(URL));
+        let proven = check_identity(&a, &NONCE, Some("HTTPS://hub-a.example.eu:443/"), None);
+        assert_eq!(proven.unwrap().url.as_deref(), Some(URL));
+        // A relay or a wrong URL.
+        assert!(check_identity(&a, &NONCE, Some("https://relay.example.eu"), None).is_err());
+        assert!(check_identity(&a, &NONCE, Some("not a url"), None).is_err());
+        assert!(check_identity(&a, &NONCE, None, None).is_err());
+        // A proof for another nonce (a replay), a bad or a missing proof.
+        assert!(check_identity(&a, &[8; 32], Some(URL), None).is_err());
+        let mut tampered = a.clone();
+        tampered.proof.as_mut().unwrap()[0] ^= 1;
+        assert!(check_identity(&tampered, &NONCE, Some(URL), None).is_err());
+        let missing = HubIdentity {
+            proof: None,
+            ..a.clone()
+        };
+        assert!(check_identity(&missing, &NONCE, Some(URL), None).is_err());
+        // Signed by another hub's key.
+        let foreign = HubIdentity {
+            proof: identity(2, None, Some(URL)).proof,
+            ..a
+        };
+        assert!(check_identity(&foreign, &NONCE, Some(URL), None).is_err());
     }
 
     #[test]
