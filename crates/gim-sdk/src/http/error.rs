@@ -34,10 +34,12 @@ pub(super) fn from_status(
     retry_after: Option<u64>,
     body: &[u8],
 ) -> TransportError {
-    let message = message(status, body);
-    let code = serde_json::from_slice::<ErrorResponse>(body)
-        .map(|e| e.error.code)
+    let error = serde_json::from_slice::<ErrorResponse>(body).ok();
+    let code = error
+        .as_ref()
+        .map(|e| e.error.code.clone())
         .unwrap_or_default();
+    let message = message(status, body);
     match status {
         StatusCode::UNAUTHORIZED => TransportError::Unauthorized,
         StatusCode::NOT_FOUND => TransportError::NotFound(message),
@@ -60,6 +62,15 @@ pub(super) fn from_status(
             Err(_) => TransportError::Server(format!("410 without a head cursor: {message}")),
         },
         _ if status.is_server_error() => TransportError::Server(message),
+        // Throttled or timed out: the request may still be applied.
+        StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS => {
+            TransportError::Server(format!("{status}: {message}"))
+        }
+        _ if status.is_client_error() => TransportError::Rejected {
+            status: status.as_u16(),
+            code,
+            message: error.map_or_else(|| status.to_string(), |e| e.error.message),
+        },
         _ => TransportError::Server(format!("{status}: {message}")),
     }
 }

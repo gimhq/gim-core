@@ -95,7 +95,8 @@ pub struct Faults {
     /// Users whose hub is unreachable: claims list them as unavailable.
     pub unreachable: Mutex<BTreeSet<UserId>>,
     /// Errors returned by the next commit submissions or message posts
-    /// (by kind), without reaching the hub: peer hub failures.
+    /// (by kind), without reaching the hub: peer hub failures, 5xx or
+    /// definite rejections.
     pub peer_failures: Mutex<VecDeque<(MessageKind, TransportError)>>,
     /// `(client_id, mls_message)` of every commit submission that reached
     /// the transport.

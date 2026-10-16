@@ -178,7 +178,14 @@ fn transport_error(err: TransportError) -> Response {
         TransportError::HostingRecordRequired(_) => {
             error(StatusCode::FORBIDDEN, v2::HOSTING_RECORD_REQUIRED)
         }
-        _ => error(StatusCode::BAD_REQUEST, "validation_failed"),
+        TransportError::Rejected { status, code, .. } => {
+            error(StatusCode::from_u16(status).expect("a 4xx status"), &code)
+        }
+        TransportError::PeerRefused(_) => error(StatusCode::BAD_GATEWAY, v2::PEER_REFUSED),
+        TransportError::PeerUnavailable { .. } => {
+            error(StatusCode::SERVICE_UNAVAILABLE, v2::PEER_UNAVAILABLE)
+        }
+        _ => error(StatusCode::INTERNAL_SERVER_ERROR, "internal"),
     }
 }
 
@@ -212,12 +219,21 @@ fn no_content(result: Result<(), TransportError>) -> Response {
     }
 }
 
+/// A malformed request: 400 `validation_failed`, as on the hub.
+fn invalid(err: impl std::fmt::Display) -> TransportError {
+    TransportError::Rejected {
+        status: 400,
+        code: "validation_failed".into(),
+        message: err.to_string(),
+    }
+}
+
 fn user_id(text: &str) -> Result<UserId, TransportError> {
-    UserId::new(text).map_err(|e| TransportError::Server(e.to_string()))
+    UserId::new(text).map_err(invalid)
 }
 
 fn group_id(text: &str) -> Result<GroupId, TransportError> {
-    GroupId::new(text).map_err(|e| TransportError::Server(e.to_string()))
+    GroupId::new(text).map_err(invalid)
 }
 
 fn member(device: &DeviceRef) -> v2::GroupMember {
@@ -375,8 +391,7 @@ async fn auth_challenge(
     Json(request): Json<v2::AuthChallengeRequest>,
 ) -> Response {
     let result = async {
-        let device = DeviceRef::parse(&request.user_id, &request.device_id)
-            .map_err(|e| TransportError::Server(e.to_string()))?;
+        let device = DeviceRef::parse(&request.user_id, &request.device_id).map_err(invalid)?;
         let challenge = state.transport.auth_challenge(&device).await?;
         Ok(v2::AuthChallenge {
             challenge: challenge.challenge,
@@ -513,9 +528,6 @@ async fn put_hosting_record(
     .await;
     match result {
         Err(TransportError::Conflict(_)) => error(StatusCode::CONFLICT, v2::STALE_HOSTING_RECORD),
-        Err(TransportError::Server(_)) => {
-            error(StatusCode::BAD_REQUEST, v2::INVALID_HOSTING_RECORD)
-        }
         result => reply(result),
     }
 }
@@ -729,15 +741,14 @@ async fn submit_commit(
     let result = async {
         let token = state.token(&headers)?;
         let group_id = group_id(&gid)?;
-        let client_id =
-            ClientId::new(request.client_id).map_err(|e| TransportError::Server(e.to_string()))?;
+        let client_id = ClientId::new(request.client_id).map_err(invalid)?;
         let welcome_recipients = request
             .welcome_recipients
             .unwrap_or_default()
             .iter()
             .map(|m| DeviceRef::parse(&m.user_id, &m.device_id))
             .collect::<Result<_, _>>()
-            .map_err(|e| TransportError::Server(e.to_string()))?;
+            .map_err(invalid)?;
         let commit = OutgoingCommit {
             client_id,
             mls_message: request.mls_message,
@@ -771,8 +782,7 @@ async fn post_message(
         let device = state.authenticate(&headers)?;
         let token = state.token(&headers)?;
         let group_id = group_id(&gid)?;
-        let client_id =
-            ClientId::new(request.client_id).map_err(|e| TransportError::Server(e.to_string()))?;
+        let client_id = ClientId::new(request.client_id).map_err(invalid)?;
         let seq = state
             .transport
             .post_message(&token, &group_id, client_id.clone(), request.mls_message)

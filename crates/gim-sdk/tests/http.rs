@@ -187,7 +187,8 @@ async fn sign_in_requests() {
     );
     assert!(matches!(
         http.create_session(vec![4]).await,
-        Err(SessionError::Transport(TransportError::Server(m))) if m.contains("400")
+        Err(SessionError::Transport(TransportError::Rejected { status: 400, code, .. }))
+            if code == "validation_failed"
     ));
 }
 
@@ -557,7 +558,8 @@ async fn post_message_conflicts() {
     ));
     assert!(matches!(
         post("g_3").await,
-        Err(PostError::Transport(TransportError::Server(_)))
+        Err(PostError::Transport(TransportError::Rejected { status: 403, code, .. }))
+            if code == "forbidden"
     ));
     assert!(matches!(
         post("g_4").await,
@@ -1053,6 +1055,9 @@ async fn status_mapping() {
         (400, "bad_request"),
         (403, "hosting_record_required"),
         (402, "forbidden"),
+        (422, "unprocessable"),
+        (408, "timeout"),
+        (429, "rate_limited"),
     ];
     for (status, code) in cases {
         Mock::given(method("GET"))
@@ -1088,14 +1093,29 @@ async fn status_mapping() {
         info(503).await,
         Err(TransportError::Server("unavailable: nope".into()))
     );
-    assert!(matches!(info(400).await, Err(TransportError::Server(m)) if m.contains("400")));
+    let rejected = |status: u16, code: &str| TransportError::Rejected {
+        status,
+        code: code.into(),
+        message: "nope".into(),
+    };
+    assert_eq!(info(400).await, Err(rejected(400, "bad_request")));
     assert_eq!(
         info(403).await,
         Err(TransportError::HostingRecordRequired(
             "hosting_record_required: nope".into()
         ))
     );
-    assert!(matches!(info(402).await, Err(TransportError::Server(m)) if m.contains("402")));
+    assert_eq!(info(402).await, Err(rejected(402, "forbidden")));
+    assert_eq!(info(422).await, Err(rejected(422, "unprocessable")));
+    // The request may still be applied: unknown outcomes.
+    for status in [408, 429] {
+        let err = info(status).await.unwrap_err();
+        assert!(
+            matches!(&err, TransportError::Server(m) if m.contains(&status.to_string())),
+            "{err:?}"
+        );
+        assert!(err.outcome_unknown());
+    }
 }
 
 #[tokio::test]

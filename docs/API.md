@@ -281,11 +281,11 @@ The chat list is ordered most recently updated first; a timeline oldest first.
 |---|---|---|
 | `Network(reason)` | Server unreachable or connection lost. | Show offline state; retry later. |
 | `NotRegistered` | No session, signed out, or this device was revoked. | Go to onboarding. |
-| `InvalidInput(reason)` | Argument rejected locally, the call does not fit the state (e.g. `createIdentity` with a session), or the payload is too large for the hub. | Bug or validation message. |
+| `InvalidInput(reason)` | Argument rejected locally, the call does not fit the state (e.g. `createIdentity` with a session), the payload is too large for the hub, or the hub rejected the request as invalid (400 `validation_failed`, 422). gim-core does not resend a rejected request. | Bug or validation message. |
 | `NotFound(reason)` | Unknown chat, message, user or media. | Refresh the screen. |
 | `Crypto(reason)` | MLS or media decryption failure. | Report; show placeholder. |
 | `Storage(reason)` | Local database or file system failure. | Report; may need disk space. |
-| `Server(status, reason)` | Non-success HTTP status from the hub; 502 `peer_refused` or 503 `peer_unavailable` (no `Retry-After`) when a remote hub failed. | Show generic error; peer failures are retried by gim-core. |
+| `Server(status, reason)` | Non-success HTTP status from the hub; 502 `peer_refused` or 503 `peer_unavailable` (no `Retry-After`) when a remote hub failed. A 4xx (e.g. 403 `forbidden` / `not_member`) is a definite rejection that gim-core does not resend; a 5xx, 408 or 429 has an unknown outcome and gim-core resends the request unchanged. | Show generic error; peer failures are retried by gim-core. |
 | `RetryLater(status, retryAfterSecs, reason)` | The hub throttles a public read (429 `rate_limited`) or a remote hub is unavailable (503 `peer_unavailable`), and gim-core's bounded retries (2 retries, at most 60 s of waiting for reads; see *Federation* for sends and member changes) are used up. | Retry after `retryAfterSecs`. |
 | `Cancelled` | Cancelled by `stopSync`, `signOut` or `cancelSend`. | Ignore. |
 | `NotImplemented` | In the contract but not implemented in this build. | Development builds only. |
