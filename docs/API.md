@@ -114,10 +114,15 @@ user's signed DeviceList. Handles are optional directory entries pointing at a u
 - **Multiple hubs** (multi-homing, groundwork): gim-core keeps a registry of the hubs the hosting
   record lists, with each hub's URL and this device's session there; it is persisted and restored
   with the session. The hub the client was created with is checked with `GET /v2/hub` and
-  recorded. URLs of the other hubs come from the user's other devices (shared in the hidden self
-  group); a URL is used only after `GET /v2/hub` there proves the listed hub id, then the device
-  signs in there too. The registry follows the record on every publication and on the hub's
+  recorded. A URL set on this device for another listed hub is used only after `GET /v2/hub`
+  there proves the listed hub id, then the device signs in there too; URLs set on a device are
+  shared with the user's other devices through the hidden self group. The registry follows the record on every publication and on the hub's
   `hosting_record.updated` event. No API for the app yet.
+  - Hub URLs received from the user's other devices are recorded but not contacted: such a hub
+    stays unverified (no `GET /v2/hub`, no sign-in, no KeyPackages, no sending or receiving)
+    until URL-bound hub verification lands, because a relay at a wrong URL could pass the
+    current checks and obtain this device's session. Only a URL set on this device (and the URL
+    the client was created with) is used.
   - Receiving: while sync runs, the device follows every listed hub with a verified URL, each with
     its own event stream (long-poll fallback) and persisted cursor; hubs joining or leaving the
     registry are started or stopped. Every hub delivers the same messages; each is applied once

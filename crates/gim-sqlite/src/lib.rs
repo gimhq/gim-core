@@ -774,15 +774,16 @@ impl StoreTxn for SqliteTxn<'_> {
     fn upsert_hub(&mut self, hub: &HubRecord) -> StoreResult<()> {
         self.execute(
             "INSERT OR REPLACE INTO hubs \
-             (hub_id, url, priority, verified_root_pubkey, last_seen_ms, state) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (hub_id, url, priority, verified_root_pubkey, last_seen_ms, state, url_shared) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 hub.hub_id,
                 hub.url,
                 hub.priority,
                 hub.verified_root_pubkey,
                 hub.last_seen_ms,
-                hub_state_str(hub.state)
+                hub_state_str(hub.state),
+                hub.url_shared
             ],
         )
     }

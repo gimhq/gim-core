@@ -489,7 +489,7 @@ impl StateReader for Reader<'_> {
 
     fn hubs(&self) -> StoreResult<Vec<HubRecord>> {
         self.query(
-            "SELECT hub_id, url, priority, verified_root_pubkey, last_seen_ms, state \
+            "SELECT hub_id, url, priority, verified_root_pubkey, last_seen_ms, state, url_shared \
              FROM hubs ORDER BY hub_id",
             [],
             |row| {
@@ -500,6 +500,7 @@ impl StateReader for Reader<'_> {
                     verified_root_pubkey: get(row, 3)?,
                     last_seen_ms: get(row, 4)?,
                     state: hub_state(&get::<String>(row, 5)?)?,
+                    url_shared: get(row, 6)?,
                 })
             },
         )

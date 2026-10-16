@@ -455,6 +455,7 @@ fn write_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
     txn.upsert_hub(&HubRecord {
         hub_id: "hb".into(),
         url: None,
+        url_shared: false,
         priority: 1,
         verified_root_pubkey: None,
         last_seen_ms: None,
@@ -463,6 +464,7 @@ fn write_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
     txn.upsert_hub(&HubRecord {
         hub_id: "ha".into(),
         url: Some("https://a.example".into()),
+        url_shared: false,
         priority: 0,
         verified_root_pubkey: Some(vec![7; 32]),
         last_seen_ms: Some(NOW),
@@ -576,6 +578,7 @@ fn update_rows(txn: &mut impl StoreTxn) -> Result<(), StoreError> {
     txn.upsert_hub(&HubRecord {
         hub_id: "hc".into(),
         url: Some("https://c.example".into()),
+        url_shared: true,
         priority: 255,
         verified_root_pubkey: None,
         last_seen_ms: None,
