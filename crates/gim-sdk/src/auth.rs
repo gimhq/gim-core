@@ -202,6 +202,7 @@ impl<S: StateStore + 'static> Client<S> {
             // The token still works for this run.
             tracing::warn!(error = %err, "cannot persist the renewed session");
         }
+        self.push_hub_changed(None, true);
         Ok(token.token)
     }
 

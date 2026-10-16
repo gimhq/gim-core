@@ -618,6 +618,7 @@ impl<S: StateStore + 'static> Client<S> {
         if let Some(Err(err)) = persisted {
             tracing::warn!(error = %err, "cannot persist the hub session");
         }
+        self.push_hub_changed(Some(hub_id), true);
         Ok(token.token)
     }
 

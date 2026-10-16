@@ -24,6 +24,7 @@ mod invites;
 mod link;
 mod media;
 mod outbox;
+mod push;
 mod routing;
 mod secrets;
 mod self_group;
@@ -52,6 +53,10 @@ pub use invites::INVITE_RETRY_MAX;
 pub use link::{LinkResult, LinkSession, PendingApproval, Sas, LINK_BUNDLE_LIFETIME, LINK_TIMEOUT};
 pub use media::{DOWNLOAD_PIECE, OUTGOING_DIR};
 pub use outbox::OutboxSender;
+pub use push::{
+    NotificationContent, NotificationKind, PushRegistration, GENERIC_BODY,
+    PUSH_REGISTRATION_SECRET_KEY, PUSH_TIMEOUT,
+};
 pub use secrets::{SecretStorage, SecretStorageError};
 pub use self_group::DeviceInfo;
 pub use send::TYPING_INTERVAL;

@@ -920,7 +920,11 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_mark_read(
     ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_process_push(
+    ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_react(
+    ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_register_push(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_release_handle(
     ): Int
@@ -967,6 +971,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_gim_core_checksum_method_gimclient_typing(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_unreact(
+    ): Int
+    external fun uniffi_gim_core_checksum_method_gimclient_unregister_push(
     ): Int
     external fun uniffi_gim_core_checksum_method_gimclient_user_devices(
     ): Int
@@ -1107,7 +1113,11 @@ internal object UniffiLib {
     ): Byte
     external fun uniffi_gim_core_fn_method_gimclient_mark_read(`ptr`: Long,`chatId`: RustBuffer.ByValue,`upToMessageId`: RustBuffer.ByValue,
     ): Long
+    external fun uniffi_gim_core_fn_method_gimclient_process_push(`ptr`: Long,`payload`: RustBuffer.ByValue,
+    ): Long
     external fun uniffi_gim_core_fn_method_gimclient_react(`ptr`: Long,`chatId`: RustBuffer.ByValue,`messageId`: RustBuffer.ByValue,`emoji`: RustBuffer.ByValue,
+    ): Long
+    external fun uniffi_gim_core_fn_method_gimclient_register_push(`ptr`: Long,`registration`: RustBuffer.ByValue,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_release_handle(`ptr`: Long,
     ): Long
@@ -1154,6 +1164,8 @@ internal object UniffiLib {
     external fun uniffi_gim_core_fn_method_gimclient_typing(`ptr`: Long,`chatId`: RustBuffer.ByValue,`listener`: Long,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_unreact(`ptr`: Long,`chatId`: RustBuffer.ByValue,`messageId`: RustBuffer.ByValue,`emoji`: RustBuffer.ByValue,
+    ): Long
+    external fun uniffi_gim_core_fn_method_gimclient_unregister_push(`ptr`: Long,
     ): Long
     external fun uniffi_gim_core_fn_method_gimclient_user_devices(`ptr`: Long,`userId`: RustBuffer.ByValue,
     ): Long
@@ -1458,7 +1470,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_gim_core_checksum_method_gimclient_mark_read() and 0xFFFF) != 19929) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_process_push() and 0xFFFF) != 42819) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_react() and 0xFFFF) != 11948) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_register_push() and 0xFFFF) != 42844) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_release_handle() and 0xFFFF) != 61692) {
@@ -1528,6 +1546,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_unreact() and 0xFFFF) != 48531) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_gim_core_checksum_method_gimclient_unregister_push() and 0xFFFF) != 33447) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_gim_core_checksum_method_gimclient_user_devices() and 0xFFFF) != 3625) {
@@ -2953,7 +2974,32 @@ public interface GimClientInterface {
      */
     suspend fun `markRead`(`chatId`: kotlin.String, `upToMessageId`: kotlin.String)
     
+    /**
+     * Turns a received push into notification content; for a Notification
+     * Service Extension or a background push handler. `payload` is the
+     * push server's payload object as JSON (`push.md` §3). Does one
+     * bounded unit of work (at most 15 s): applies the pushed message
+     * like sync does (the stream does not apply it again), joins a pushed
+     * invite, or reads one page of events. `InvalidInput` only if
+     * `payload` is not a JSON object; when the content cannot be read
+     * (not decryptable, offline, out of time) it returns `Generic` content
+     * with the body "New message" and `should_display` set: show that,
+     * never drop the notification. Show nothing when `should_display` is
+     * false.
+     */
+    suspend fun `processPush`(`payload`: kotlin.String): NotificationContent
+    
     suspend fun `react`(`chatId`: kotlin.String, `messageId`: kotlin.String, `emoji`: kotlin.String)
+    
+    /**
+     * Registers this device for push on every hub of the user (`PUT
+     * /v2/push/registration`) and keeps the registration on this device:
+     * hubs that cannot be reached now, hubs added later and hubs this
+     * device signs in to again get it from the sync loop. Call it with
+     * every new platform token; before onboarding it is only stored.
+     * `InvalidInput` for a malformed registration (see `PushRegistration`).
+     */
+    suspend fun `registerPush`(`registration`: PushRegistration)
     
     /**
      * Releases the handle claimed with `claim_handle`; `InvalidInput` if
@@ -3100,6 +3146,13 @@ public interface GimClientInterface {
     suspend fun `typing`(`chatId`: kotlin.String, `listener`: TypingListener): TaskHandle
     
     suspend fun `unreact`(`chatId`: kotlin.String, `messageId`: kotlin.String, `emoji`: kotlin.String)
+    
+    /**
+     * Removes the push registration from every hub and from this device.
+     * The local copy is removed even if a hub could not be reached (then
+     * the error is returned). `sign_out` does this too.
+     */
+    suspend fun `unregisterPush`()
     
     /**
      * The devices of any user, from the user's current DeviceList; empty
@@ -3892,6 +3945,41 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
     }
 
     
+    /**
+     * Turns a received push into notification content; for a Notification
+     * Service Extension or a background push handler. `payload` is the
+     * push server's payload object as JSON (`push.md` §3). Does one
+     * bounded unit of work (at most 15 s): applies the pushed message
+     * like sync does (the stream does not apply it again), joins a pushed
+     * invite, or reads one page of events. `InvalidInput` only if
+     * `payload` is not a JSON object; when the content cannot be read
+     * (not decryptable, offline, out of time) it returns `Generic` content
+     * with the body "New message" and `should_display` set: show that,
+     * never drop the notification. Show nothing when `should_display` is
+     * false.
+     */
+    @Throws(GimException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `processPush`(`payload`: kotlin.String) : NotificationContent {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_gim_core_fn_method_gimclient_process_push(
+                uniffiHandle,
+                
+        FfiConverterString.lower(`payload`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_gim_core_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_gim_core_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeNotificationContent.lift(it) },
+        // Error FFI converter
+        GimException.ErrorHandler,
+    )
+    }
+
+    
     @Throws(GimException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
     override suspend fun `react`(`chatId`: kotlin.String, `messageId`: kotlin.String, `emoji`: kotlin.String) {
@@ -3903,6 +3991,37 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
         FfiConverterString.lower(`chatId`),
         FfiConverterString.lower(`messageId`),
         FfiConverterString.lower(`emoji`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_gim_core_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_gim_core_rust_future_free_void(future) },
+        // lift function
+        { },
+        
+        // Error FFI converter
+        GimException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Registers this device for push on every hub of the user (`PUT
+     * /v2/push/registration`) and keeps the registration on this device:
+     * hubs that cannot be reached now, hubs added later and hubs this
+     * device signs in to again get it from the sync loop. Call it with
+     * every new platform token; before onboarding it is only stored.
+     * `InvalidInput` for a malformed registration (see `PushRegistration`).
+     */
+    @Throws(GimException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `registerPush`(`registration`: PushRegistration) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_gim_core_fn_method_gimclient_register_push(
+                uniffiHandle,
+                
+        FfiConverterTypePushRegistration.lower(`registration`),
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_void(future, callback, continuation) },
@@ -4511,6 +4630,33 @@ open class GimClient: Disposable, AutoCloseable, GimClientInterface
         FfiConverterString.lower(`chatId`),
         FfiConverterString.lower(`messageId`),
         FfiConverterString.lower(`emoji`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_gim_core_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_gim_core_rust_future_free_void(future) },
+        // lift function
+        { },
+        
+        // Error FFI converter
+        GimException.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Removes the push registration from every hub and from this device.
+     * The local copy is removed even if a hub could not be reached (then
+     * the error is returned). `sign_out` does this too.
+     */
+    @Throws(GimException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `unregisterPush`() {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_gim_core_fn_method_gimclient_unregister_push(
+                uniffiHandle,
+                
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_gim_core_rust_future_poll_void(future, callback, continuation) },
@@ -8081,6 +8227,188 @@ public object FfiConverterTypeMessagePreview: FfiConverterRustBuffer<MessagePrev
 
 
 
+/**
+ * What to show for a push, from `GimClient::process_push`.
+ */
+data class NotificationContent (
+    var `chatId`: kotlin.String?
+    , 
+    /**
+     * Group name, or the other user's name for a direct chat.
+     */
+    var `chatTitle`: kotlin.String?
+    , 
+    var `senderUserId`: kotlin.String?
+    , 
+    var `senderDisplayName`: kotlin.String?
+    , 
+    /**
+     * Text preview: the text, the media caption, "Photo" or
+     * "File: <name>"; "reacted <emoji>" for a reaction; "New message" for
+     * generic content.
+     */
+    var `body`: kotlin.String
+    , 
+    var `messageId`: kotlin.String?
+    , 
+    /**
+     * The push's `collapse_id`: use it as the notification identifier, so
+     * the same message pushed by several hubs shows once.
+     */
+    var `collapseId`: kotlin.String?
+    , 
+    var `kind`: NotificationKind
+    , 
+    /**
+     * `false`: show nothing (own messages, edits, deletes, receipts,
+     * membership changes, already read).
+     */
+    var `shouldDisplay`: kotlin.Boolean
+    , 
+    /**
+     * Unix milliseconds: when the message was sent, or now.
+     */
+    var `timestamp`: kotlin.ULong
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNotificationContent: FfiConverterRustBuffer<NotificationContent> {
+    override fun read(buf: ByteBuffer): NotificationContent {
+        return NotificationContent(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterTypeNotificationKind.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NotificationContent) = (
+            FfiConverterOptionalString.allocationSize(value.`chatId`) +
+            FfiConverterOptionalString.allocationSize(value.`chatTitle`) +
+            FfiConverterOptionalString.allocationSize(value.`senderUserId`) +
+            FfiConverterOptionalString.allocationSize(value.`senderDisplayName`) +
+            FfiConverterString.allocationSize(value.`body`) +
+            FfiConverterOptionalString.allocationSize(value.`messageId`) +
+            FfiConverterOptionalString.allocationSize(value.`collapseId`) +
+            FfiConverterTypeNotificationKind.allocationSize(value.`kind`) +
+            FfiConverterBoolean.allocationSize(value.`shouldDisplay`) +
+            FfiConverterULong.allocationSize(value.`timestamp`)
+    )
+
+    override fun write(value: NotificationContent, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`chatId`, buf)
+            FfiConverterOptionalString.write(value.`chatTitle`, buf)
+            FfiConverterOptionalString.write(value.`senderUserId`, buf)
+            FfiConverterOptionalString.write(value.`senderDisplayName`, buf)
+            FfiConverterString.write(value.`body`, buf)
+            FfiConverterOptionalString.write(value.`messageId`, buf)
+            FfiConverterOptionalString.write(value.`collapseId`, buf)
+            FfiConverterTypeNotificationKind.write(value.`kind`, buf)
+            FfiConverterBoolean.write(value.`shouldDisplay`, buf)
+            FfiConverterULong.write(value.`timestamp`, buf)
+    }
+}
+
+
+
+/**
+ * The device's push registration on its hubs (contract `push.md` §1).
+ * Every field is opaque to the hub and passed to the push server.
+ */
+data class PushRegistration (
+    /**
+     * Push platform for the push server (`apns`, `fcm`, `unifiedpush`,
+     * ...): 1-64 characters of `a-z 0-9 . _ -`.
+     */
+    var `provider`: kotlin.String
+    , 
+    /**
+     * Platform token: 1-4096 bytes without control characters.
+     */
+    var `token`: kotlin.String
+    , 
+    /**
+     * App identifier (e.g. the bundle ID): 1-255 characters of
+     * `A-Z a-z 0-9 . - _ :`.
+     */
+    var `appId`: kotlin.String?
+    , 
+    /**
+     * Platform sandbox flag (e.g. the APNs development environment).
+     */
+    var `sandbox`: kotlin.Boolean?
+    , 
+    /**
+     * Web Push `p256dh` key: 1-256 characters of base64url.
+     */
+    var `p256dh`: kotlin.String?
+    , 
+    /**
+     * Web Push `auth` secret: 1-256 characters of base64url.
+     */
+    var `auth`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePushRegistration: FfiConverterRustBuffer<PushRegistration> {
+    override fun read(buf: ByteBuffer): PushRegistration {
+        return PushRegistration(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PushRegistration) = (
+            FfiConverterString.allocationSize(value.`provider`) +
+            FfiConverterString.allocationSize(value.`token`) +
+            FfiConverterOptionalString.allocationSize(value.`appId`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`sandbox`) +
+            FfiConverterOptionalString.allocationSize(value.`p256dh`) +
+            FfiConverterOptionalString.allocationSize(value.`auth`)
+    )
+
+    override fun write(value: PushRegistration, buf: ByteBuffer) {
+            FfiConverterString.write(value.`provider`, buf)
+            FfiConverterString.write(value.`token`, buf)
+            FfiConverterOptionalString.write(value.`appId`, buf)
+            FfiConverterOptionalBoolean.write(value.`sandbox`, buf)
+            FfiConverterOptionalString.write(value.`p256dh`, buf)
+            FfiConverterOptionalString.write(value.`auth`, buf)
+    }
+}
+
+
+
 data class ReactionGroup (
     var `emoji`: kotlin.String
     , 
@@ -9452,6 +9780,61 @@ public object FfiConverterTypeMessageContent : FfiConverterRustBuffer<MessageCon
 
 
 
+/**
+ * What a notification is about.
+ */
+
+enum class NotificationKind {
+    
+    /**
+     * A text or media message (also the silent edit or delete of one).
+     */
+    MESSAGE,
+    /**
+     * A reaction to a message.
+     */
+    REACTION,
+    /**
+     * The user was added to a chat.
+     */
+    INVITE,
+    /**
+     * A member was added to or removed from a chat.
+     */
+    MEMBERSHIP,
+    /**
+     * Content unknown: show `body` ("New message").
+     */
+    GENERIC;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNotificationKind: FfiConverterRustBuffer<NotificationKind> {
+    override fun read(buf: ByteBuffer) = try {
+        NotificationKind.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: NotificationKind) = 4UL
+
+    override fun write(value: NotificationKind, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
 sealed class SendState {
     
     /**
@@ -10026,6 +10409,38 @@ public object FfiConverterOptionalUInt: FfiConverterRustBuffer<kotlin.UInt?> {
         } else {
             buf.put(1)
             FfiConverterUInt.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalBoolean: FfiConverterRustBuffer<kotlin.Boolean?> {
+    override fun read(buf: ByteBuffer): kotlin.Boolean? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterBoolean.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.Boolean?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterBoolean.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.Boolean?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterBoolean.write(value, buf)
         }
     }
 }
