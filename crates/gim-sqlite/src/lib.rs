@@ -42,7 +42,15 @@ type StoreResult<T> = Result<T, StoreError>;
 /// File name of the database inside the data directory.
 pub const DATABASE_FILE_NAME: &str = "gim.sqlite3";
 
+/// How long a statement waits for another connection's write lock. The
+/// app and its extension (iOS NSE) share the file; their writes are
+/// serialized by the store lock above this crate (gim-sdk `StoreLock`), so
+/// SQLite only waits out the other process's WAL checkpoints and the rare
+/// write outside of it.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Page cache of a store opened by [`SqliteStore::open_for_extension`], in
+/// KiB (SQLite's default is about 2 MiB).
+const EXTENSION_CACHE_KIB: i64 = 512;
 
 /// serde codec of the OpenMLS storage provider values.
 #[derive(Debug, Default)]
@@ -166,6 +174,21 @@ impl SqliteStore {
     pub fn open(data_dir: impl AsRef<Path>, key: &DbKey) -> Result<Self, OpenError> {
         let path = create_data_dir(data_dir.as_ref())?;
         Self::open_file(&path, key)
+    }
+
+    /// Like [`Self::open`] for an app extension (the iOS Notification
+    /// Service Extension, limited to about 24 MB of memory) running next to
+    /// the app on the same file: a small page cache. Never resets: a
+    /// database it cannot open fails, and only the app may discard it.
+    /// Forward migrations run as in [`Self::open`]; the caller holds the
+    /// store lock while opening.
+    pub fn open_for_extension(data_dir: impl AsRef<Path>, key: &DbKey) -> Result<Self, OpenError> {
+        let store = Self::open(data_dir, key)?;
+        store
+            .conn()
+            .pragma_update(None, "cache_size", -EXTENSION_CACHE_KIB)
+            .map_err(sql_err)?;
+        Ok(store)
     }
 
     /// Like [`Self::open`], but replaces a database that fails with

@@ -346,7 +346,7 @@ impl<S: StateStore + 'static> Client<S> {
     ) -> Result<()> {
         let gid = group_id.clone();
         let seq = self
-            .run(move |store, _| Ok(store.group_cursor(&gid)?.contiguous_seq))
+            .read(move |store, _| Ok(store.group_cursor(&gid)?.contiguous_seq))
             .await?;
         let now = now_ms();
         let changes: Vec<StateChange> = users

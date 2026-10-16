@@ -213,6 +213,10 @@ impl MockServer {
             )
             .route(v2::paths::WELCOMES_PENDING, get(pending_welcomes))
             .route("/v2/welcomes/{gid}/ack", post(ack_welcome))
+            .route(
+                v2::paths::PUSH_REGISTRATION,
+                put(put_push_registration).delete(delete_push_registration),
+            )
             .route(v2::paths::EVENTS, get(events))
             .route(v2::paths::STREAM, get(stream))
             .layer(middleware::from_fn_with_state(controls.clone(), down))
@@ -1023,6 +1027,39 @@ async fn pending_welcomes(
     }
     .await;
     reply(result)
+}
+
+async fn put_push_registration(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<v2::PushRegistration>,
+) -> Response {
+    let result = async {
+        let token = state.token(&headers)?;
+        let registration = gim_sdk::PushRegistration {
+            provider: body.provider,
+            token: body.token,
+            app_id: body.app_id,
+            sandbox: body.sandbox,
+            p256dh: body.p256dh,
+            auth: body.auth,
+        };
+        state
+            .transport
+            .put_push_registration(&token, &registration)
+            .await
+    }
+    .await;
+    no_content(result)
+}
+
+async fn delete_push_registration(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let result = async {
+        let token = state.token(&headers)?;
+        state.transport.delete_push_registration(&token).await
+    }
+    .await;
+    no_content(result)
 }
 
 async fn ack_welcome(

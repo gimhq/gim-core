@@ -90,7 +90,7 @@ impl<S: StateStore + 'static> Client<S> {
         let session = self.require_session()?;
         let _flush = self.inner.flush_lock.lock().await;
         let force = self.inner.force_flush.swap(false, Ordering::SeqCst);
-        let entries = self.run(|store, _| Ok(store.outbox_entries()?)).await?;
+        let entries = self.read(|store, _| Ok(store.outbox_entries()?)).await?;
         let mut blocked = BTreeSet::new();
         for entry in entries {
             if entry.state != OutboxState::Pending || blocked.contains(&entry.group_id) {
@@ -105,7 +105,7 @@ impl<S: StateStore + 'static> Client<S> {
                 blocked.insert(group_id);
             }
         }
-        let entries = self.run(|store, _| Ok(store.outbox_entries()?)).await?;
+        let entries = self.read(|store, _| Ok(store.outbox_entries()?)).await?;
         Ok(next_due(&entries))
     }
 
@@ -202,7 +202,11 @@ impl<S: StateStore + 'static> Client<S> {
     ) -> Result<bool> {
         let retryable = match &err {
             ClientError::Transport(err) => outcome_unknown(err),
-            ClientError::Base(BaseError::Store(_)) | ClientError::Task(_) => return Err(err),
+            // Local failures, or another process holding the store: the
+            // entry stays as it is for the next pass.
+            ClientError::Base(BaseError::Store(_))
+            | ClientError::Task(_)
+            | ClientError::StoreBusy(_) => return Err(err),
             _ => false,
         };
         let retry_after = match &err {

@@ -97,9 +97,11 @@ impl From<gim_sdk::ClientError> for GimError {
             E::Media(_) | E::Identity(_) => Self::Crypto {
                 reason: err.to_string(),
             },
-            E::InvalidSession(_) | E::SecretStorage(_) | E::Io(_) => Self::Storage {
-                reason: err.to_string(),
-            },
+            E::InvalidSession(_) | E::SecretStorage(_) | E::Io(_) | E::StoreBusy(_) => {
+                Self::Storage {
+                    reason: err.to_string(),
+                }
+            }
             E::Task(_) => Self::Internal {
                 reason: err.to_string(),
             },

@@ -562,9 +562,19 @@ int8_t uniffi_gim_core_fn_method_gimclient_local_state_reset(uint64_t ptr, RustC
 uint64_t uniffi_gim_core_fn_method_gimclient_mark_read(uint64_t ptr, RustBuffer chat_id, RustBuffer up_to_message_id
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_PROCESS_PUSH
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_PROCESS_PUSH
+uint64_t uniffi_gim_core_fn_method_gimclient_process_push(uint64_t ptr, RustBuffer payload
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_REACT
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_REACT
 uint64_t uniffi_gim_core_fn_method_gimclient_react(uint64_t ptr, RustBuffer chat_id, RustBuffer message_id, RustBuffer emoji
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_REGISTER_PUSH
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_REGISTER_PUSH
+uint64_t uniffi_gim_core_fn_method_gimclient_register_push(uint64_t ptr, RustBuffer registration
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_RELEASE_HANDLE
@@ -680,6 +690,11 @@ uint64_t uniffi_gim_core_fn_method_gimclient_typing(uint64_t ptr, RustBuffer cha
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_UNREACT
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_UNREACT
 uint64_t uniffi_gim_core_fn_method_gimclient_unreact(uint64_t ptr, RustBuffer chat_id, RustBuffer message_id, RustBuffer emoji
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_UNREGISTER_PUSH
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_UNREGISTER_PUSH
+uint64_t uniffi_gim_core_fn_method_gimclient_unregister_push(uint64_t ptr
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_FN_METHOD_GIMCLIENT_USER_DEVICES
@@ -1359,9 +1374,21 @@ uint16_t uniffi_gim_core_checksum_method_gimclient_mark_read(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_PROCESS_PUSH
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_PROCESS_PUSH
+uint16_t uniffi_gim_core_checksum_method_gimclient_process_push(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_REACT
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_REACT
 uint16_t uniffi_gim_core_checksum_method_gimclient_react(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_REGISTER_PUSH
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_REGISTER_PUSH
+uint16_t uniffi_gim_core_checksum_method_gimclient_register_push(void
     
 );
 #endif
@@ -1500,6 +1527,12 @@ uint16_t uniffi_gim_core_checksum_method_gimclient_typing(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_UNREACT
 #define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_UNREACT
 uint16_t uniffi_gim_core_checksum_method_gimclient_unreact(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_UNREGISTER_PUSH
+#define UNIFFI_FFIDEF_UNIFFI_GIM_CORE_CHECKSUM_METHOD_GIMCLIENT_UNREGISTER_PUSH
+uint16_t uniffi_gim_core_checksum_method_gimclient_unregister_push(void
     
 );
 #endif

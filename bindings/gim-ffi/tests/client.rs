@@ -9,10 +9,10 @@ use std::time::Duration;
 
 use gim_core::{
     create_client_with_fake_transport, ChatKind, ChatListDiff, ChatListListener, ChatState,
-    ChatSummary, ClientConfig, ConnectionState, ConnectionStateListener, GimClient, GimError,
-    HubInfo, HubListListener, HubState, LocalTimeZone, MembershipChangeKind, MessageContent,
-    MessageItem, PlatformHooks, SendState, TaskHandle, TimelineDiff, TimelineItem,
-    TimelineListener, TypingListener,
+    ChatSummary, ClientConfig, ClientMode, ConnectionState, ConnectionStateListener, GimClient,
+    GimError, HubInfo, HubListListener, HubState, LocalTimeZone, MembershipChangeKind,
+    MessageContent, MessageItem, NotificationKind, PlatformHooks, PushRegistration, SendState,
+    TaskHandle, TimelineDiff, TimelineItem, TimelineListener, TypingListener,
 };
 use gim_sdk::testing::FakeTransport;
 use tempfile::TempDir;
@@ -168,6 +168,7 @@ impl HubListListener for Recorder<Vec<HubInfo>> {
 async fn open(transport: &FakeTransport, hooks: &Arc<MemoryHooks>) -> Arc<GimClient> {
     let config = ClientConfig {
         server_url: "https://gim.example.org".to_string(),
+        mode: None,
     };
     create_client_with_fake_transport(config, hooks.clone(), transport.clone())
         .await
@@ -890,6 +891,53 @@ async fn sign_out_deletes_local_state() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn push_registration_processing_and_sign_out() {
+    let transport = FakeTransport::new();
+    let alice = User::register(&transport, "alice", "Alice").await;
+    let registration = PushRegistration {
+        provider: "fcm".to_string(),
+        token: "fcm-token".to_string(),
+        app_id: Some("im.g.apps".to_string()),
+        sandbox: None,
+        p256dh: None,
+        auth: None,
+    };
+    let bad = PushRegistration {
+        provider: String::new(),
+        ..registration.clone()
+    };
+    assert!(matches!(
+        alice.client.register_push(bad).await,
+        Err(GimError::InvalidInput { .. })
+    ));
+    alice.client.register_push(registration).await.unwrap();
+    let requests = transport.push_requests();
+    assert!(
+        matches!(requests.as_slice(), [(_, Some(r))] if r.token == "fcm-token"),
+        "{requests:?}"
+    );
+
+    assert!(matches!(
+        alice.client.process_push("not json".to_string()).await,
+        Err(GimError::InvalidInput { .. })
+    ));
+    let content = alice
+        .client
+        .process_push(r#"{"v":1,"type":"wake","collapse_id":"c1"}"#.to_string())
+        .await
+        .unwrap();
+    assert_eq!(content.kind, NotificationKind::Generic);
+    assert!(!content.should_display);
+    assert_eq!(content.collapse_id.as_deref(), Some("c1"));
+
+    // Signing out removes the registration from the hub first.
+    alice.client.sign_out().await.unwrap();
+    let requests = transport.push_requests();
+    assert!(matches!(requests.last(), Some((_, None))), "{requests:?}");
+    assert!(alice.hooks.secrets.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn handles_and_display_name() {
     let transport = FakeTransport::new();
     let alice = User::register(&transport, "alice", "Alice").await;
@@ -1071,6 +1119,7 @@ async fn locked_keystore_fails_without_replacing_the_database_key() {
     hooks.locked.store(true, Ordering::SeqCst);
     let config = ClientConfig {
         server_url: "https://gim.example.org".to_string(),
+        mode: None,
     };
     let result = create_client_with_fake_transport(config, hooks.clone(), transport.clone()).await;
     assert!(matches!(result, Err(GimError::Storage { .. })));
@@ -1155,4 +1204,56 @@ async fn single_hub_management() {
         Err(GimError::Network { .. })
     ));
     assert_eq!(alice.client.hubs().await.unwrap(), hubs);
+}
+
+#[tokio::test]
+async fn extension_mode_opens_the_app_state_and_never_resets_it() {
+    let transport = FakeTransport::new();
+    let hooks = MemoryHooks::new();
+    let extension = |hooks: &Arc<MemoryHooks>| {
+        let config = ClientConfig {
+            server_url: "https://gim.example.org".to_string(),
+            mode: Some(ClientMode::Extension),
+        };
+        create_client_with_fake_transport(config, hooks.clone(), transport.clone())
+    };
+    // Before the app created local state: no database key, none created.
+    assert!(matches!(
+        extension(&hooks).await,
+        Err(GimError::InvalidInput { .. })
+    ));
+    assert!(hooks.secrets.lock().unwrap().is_empty());
+
+    let app = open(&transport, &hooks).await;
+    app.create_identity("Alice".to_string()).await.unwrap();
+    let session = app.session().await.unwrap();
+    assert!(session.is_some());
+
+    let nse = extension(&hooks).await.unwrap();
+    assert!(!nse.local_state_reset());
+    assert_eq!(nse.session().await.unwrap(), session);
+    assert!(matches!(
+        nse.start_sync().await,
+        Err(GimError::InvalidInput { .. })
+    ));
+    drop(nse);
+
+    // A key that cannot decrypt the database fails; nothing is discarded.
+    let key = hooks.secrets.lock().unwrap()["gim.db_key.v1"].clone();
+    hooks
+        .secrets
+        .lock()
+        .unwrap()
+        .insert("gim.db_key.v1".to_string(), vec![9; 32]);
+    assert!(matches!(
+        extension(&hooks).await,
+        Err(GimError::Storage { .. })
+    ));
+    hooks
+        .secrets
+        .lock()
+        .unwrap()
+        .insert("gim.db_key.v1".to_string(), key);
+    assert_eq!(app.session().await.unwrap(), session);
+    app.start_sync().await.unwrap();
 }

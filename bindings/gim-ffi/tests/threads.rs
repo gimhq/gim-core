@@ -41,6 +41,7 @@ fn thread_count() -> usize {
 async fn cycle(transport: &FakeTransport) {
     let config = ClientConfig {
         server_url: "https://gim.example.org".to_string(),
+        mode: None,
     };
     let hooks = Arc::new(Hooks(tempfile::tempdir().unwrap()));
     let client = create_client_with_fake_transport(config, hooks, transport.clone())

@@ -27,7 +27,7 @@ use crate::transport::{
     SessionError, SessionToken, StoredHostingRecord, Transport, TransportError, TransportResult,
     UserRecord,
 };
-use crate::{SecretStorage, SecretStorageError};
+use crate::{PushRegistration, SecretStorage, SecretStorageError};
 
 /// Events returned per [`Transport::fetch_events`] call.
 const EVENTS_PER_FETCH: usize = 100;
@@ -58,6 +58,15 @@ pub struct FakeTransport {
     /// The hub's normalized public URL (`GIM_HUB_PUBLIC_URL`): it proves
     /// it and issues AuthChallenge v2 for it; without one, v1.
     public_url: Arc<Mutex<Option<String>>>,
+    push: Arc<FakePush>,
+}
+
+/// Push registrations of the fake hub.
+#[derive(Debug, Default)]
+struct FakePush {
+    registrations: Mutex<HashMap<DeviceRef, PushRegistration>>,
+    /// Every `PUT` (`Some`) and `DELETE` (`None`), in order.
+    requests: Mutex<Vec<(DeviceRef, Option<PushRegistration>)>>,
 }
 
 /// Hosting records of the fake hub.
@@ -120,6 +129,7 @@ impl FakeTransport {
                 required: AtomicBool::new(false),
             }),
             public_url: Arc::default(),
+            push: Arc::default(),
         }
     }
 
@@ -224,6 +234,27 @@ impl FakeTransport {
                 .iter()
                 .any(|e| *e.hub_root_public_key() == hub),
         }
+    }
+
+    /// The device's stored push registration, as `PUT
+    /// /v2/push/registration` left it.
+    pub fn push_registration(&self, device: &DeviceRef) -> Option<PushRegistration> {
+        self.push
+            .registrations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(device)
+            .cloned()
+    }
+
+    /// Every push registration request so far, in order: `Some` for a
+    /// `PUT`, `None` for a `DELETE`.
+    pub fn push_requests(&self) -> Vec<(DeviceRef, Option<PushRegistration>)> {
+        self.push
+            .requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// The fake hub, for assertions and hub-side actions in tests.
@@ -853,6 +884,43 @@ impl Transport for FakeTransport {
             .into_iter()
             .map(to_message)
             .collect())
+    }
+
+    /// Checks the registration's shape like the hub (400
+    /// `validation_failed`).
+    async fn put_push_registration(
+        &self,
+        token: &AccessToken,
+        registration: &PushRegistration,
+    ) -> TransportResult<()> {
+        let device = self.device(token)?;
+        registration.validate().map_err(invalid)?;
+        self.push
+            .requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((device.clone(), Some(registration.clone())));
+        self.push
+            .registrations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(device, registration.clone());
+        Ok(())
+    }
+
+    async fn delete_push_registration(&self, token: &AccessToken) -> TransportResult<()> {
+        let device = self.device(token)?;
+        self.push
+            .requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((device.clone(), None));
+        self.push
+            .registrations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&device);
+        Ok(())
     }
 
     async fn upload_blob(&self, token: &AccessToken, file: &Path) -> TransportResult<String> {
