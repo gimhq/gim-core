@@ -9,10 +9,10 @@ use gim_common::{now_ms, DeviceRef};
 use gim_identity::{AuthChallenge, AuthResponse, DeviceSigningKey, AUTH_CHALLENGE_MAX_LIFETIME_MS};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::client::{Session, DEVICE_KEY_SECRET_KEY, SESSION_SECRET_KEY};
+use crate::client::{Session, DEVICE_KEY_SECRET_KEY};
 use crate::hosting::Publish;
 use crate::transport::{
-    AccessToken, Challenge, PostError, SessionError, SessionToken, TransportError,
+    AccessToken, Challenge, PostError, SessionError, SessionToken, Transport, TransportError,
 };
 use crate::{Client, SecretStorage};
 
@@ -171,27 +171,41 @@ impl<S: StateStore + 'static> Client<S> {
             expires_at_ms: token.expires_at_ms,
             hub_id,
         };
+        self.set_session(renewed.clone());
         if let Err(err) = self.persist_session(&renewed) {
             // The token still works for this run.
             tracing::warn!(error = %err, "cannot persist the renewed session");
         }
-        self.set_session(renewed);
         Ok(token.token)
     }
 
-    /// Answers a hub challenge as `device`; returns the session token and
-    /// the hub id. A rejected challenge (`invalid_challenge`) is retried
-    /// once with a new one; [`TransportError::DeviceNotActive`] if the hub
-    /// refuses the device.
+    /// Answers a challenge of the home hub as `device`; see
+    /// [`Client::sign_in_on`].
     pub(crate) async fn sign_in(
         &self,
         device: &DeviceRef,
         key: &DeviceSigningKey,
         pinned_hub: Option<&str>,
     ) -> Result<(SessionToken, String), TransportError> {
+        self.sign_in_on(&*self.inner.transport, device, key, pinned_hub)
+            .await
+    }
+
+    /// Answers a challenge of the hub behind `transport` as `device`;
+    /// returns the session token and the hub id. The challenge must name
+    /// `pinned_hub`, if given. A rejected challenge (`invalid_challenge`)
+    /// is retried once with a new one; [`TransportError::DeviceNotActive`]
+    /// if the hub refuses the device.
+    pub(crate) async fn sign_in_on(
+        &self,
+        transport: &dyn Transport,
+        device: &DeviceRef,
+        key: &DeviceSigningKey,
+        pinned_hub: Option<&str>,
+    ) -> Result<(SessionToken, String), TransportError> {
         let mut retried = false;
         loop {
-            let challenge = match self.inner.transport.auth_challenge(device).await {
+            let challenge = match transport.auth_challenge(device).await {
                 // The hub does not list the device as active.
                 Err(TransportError::NotFound(reason)) => {
                     return Err(TransportError::DeviceNotActive(reason))
@@ -200,12 +214,7 @@ impl<S: StateStore + 'static> Client<S> {
             };
             check_challenge(&challenge, pinned_hub)?;
             let response = AuthResponse::sign(&challenge.challenge, key, &device.user_id);
-            match self
-                .inner
-                .transport
-                .create_session(response.to_bytes())
-                .await
-            {
+            match transport.create_session(response.to_bytes()).await {
                 Ok(token) => return Ok((token, challenge.hub_id)),
                 Err(SessionError::InvalidChallenge) if !retried => retried = true,
                 Err(SessionError::InvalidChallenge) => {
@@ -221,9 +230,9 @@ impl<S: StateStore + 'static> Client<S> {
         }
     }
 
+    /// Persists `session` with the sessions on the other hubs.
     pub(crate) fn persist_session(&self, session: &Session) -> crate::Result<()> {
-        let encoded = serde_json::to_vec(session).expect("session serializes");
-        Ok(self.inner.secrets.set(SESSION_SECRET_KEY, &encoded)?)
+        self.write_session_secret(session)
     }
 }
 

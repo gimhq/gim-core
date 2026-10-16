@@ -13,6 +13,7 @@ use gim_base::StateStore;
 use gim_common::{now_ms, UserId};
 use gim_identity::{HostingEntry, RootKey, SignedHostingRecord, UserHostingRecord};
 
+use crate::hubs::Listed;
 use crate::stream::Backoff;
 use crate::transport::{HostingEntryGrant, TransportError};
 use crate::{Client, ClientError, Result};
@@ -103,12 +104,24 @@ impl<S: StateStore + 'static> Client<S> {
     /// and uploads it. If a newer record lands concurrently (409), it is
     /// read and the record rebuilt once; with [`Publish::IfDue`], a newer
     /// record that needs no renewal (another device renewed it) is kept.
+    /// Then the hub registry follows the record now current.
     pub(crate) async fn publish_hosting_record(&self, mode: Publish) -> Result<()> {
+        let current = self.publish_hosting_record_locked(mode).await?;
+        // Boxed: refreshing may share the hub URLs, and sending may publish.
+        Box::pin(self.refresh_hubs_logged(Listed::Known(&current))).await;
+        Ok(())
+    }
+
+    /// [`Client::publish_hosting_record`] under the hosting lock; returns
+    /// the record now current.
+    async fn publish_hosting_record_locked(&self, mode: Publish) -> Result<UserHostingRecord> {
         let user_id = self.require_session()?.device.user_id;
         let _guard = self.inner.hosting_lock.lock().await;
         let mut current = self.hub_hosting_record(&user_id).await?;
-        if mode == Publish::IfDue && current.as_ref().is_some_and(|r| fresh(r, now_ms())) {
-            return Ok(());
+        if mode == Publish::IfDue {
+            if let Some(current) = current.as_ref().filter(|r| fresh(r, now_ms())) {
+                return Ok(current.clone());
+            }
         }
         let root = self.root_key()?;
         let own = match (mode, &current) {
@@ -127,7 +140,7 @@ impl<S: StateStore + 'static> Client<S> {
             {
                 Ok(_) => {
                     tracing::info!(seq, "published the hosting record");
-                    return Ok(());
+                    return record.verify(now_ms()).map_err(ClientError::identity);
                 }
                 Err(TransportError::Conflict(reason)) if !rebuilt => {
                     tracing::info!(%reason, "a newer hosting record landed; rebuilding");
@@ -135,7 +148,7 @@ impl<S: StateStore + 'static> Client<S> {
                     let newer = self.hub_hosting_record(&user_id).await?;
                     match newer {
                         Some(newer) if mode == Publish::IfDue && fresh(&newer, now_ms()) => {
-                            return Ok(())
+                            return Ok(newer)
                         }
                         Some(newer) => {
                             seq = next_seq(&newer)?;
@@ -154,7 +167,10 @@ impl<S: StateStore + 'static> Client<S> {
 
     /// The user's hosting record on the hub, verified; `None` if there is
     /// none, it expired, or it does not verify (logged).
-    async fn hub_hosting_record(&self, user_id: &UserId) -> Result<Option<UserHostingRecord>> {
+    pub(crate) async fn hub_hosting_record(
+        &self,
+        user_id: &UserId,
+    ) -> Result<Option<UserHostingRecord>> {
         let Some(stored) = self.inner.transport.hosting_record(user_id).await? else {
             return Ok(None);
         };

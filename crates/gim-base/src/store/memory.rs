@@ -16,8 +16,8 @@ use openmls_memory_storage::MemoryStorage;
 
 use super::{StateReader, StateStore, StoreResult, StoreTxn};
 use crate::model::{
-    Chat, DepartedMember, GroupCursor, GroupMessage, MediaCacheEntry, MembershipEvent, Message,
-    OutboxEntry, OutboxState, PendingCommit, PendingInvite, PendingLeave, UserInfo,
+    Chat, DepartedMember, GroupCursor, GroupMessage, HubRecord, MediaCacheEntry, MembershipEvent,
+    Message, OutboxEntry, OutboxState, PendingCommit, PendingInvite, PendingLeave, UserInfo,
 };
 use crate::{BaseError, StoreError};
 
@@ -47,6 +47,7 @@ struct Rows {
     membership: BTreeMap<(GroupId, u64, UserId), MembershipEvent>,
     device_lists: BTreeMap<UserId, Vec<u8>>,
     self_groups: Vec<GroupId>,
+    hubs: BTreeMap<String, HubRecord>,
 }
 
 #[derive(Debug, Default)]
@@ -262,6 +263,10 @@ impl StateReader for MemoryStore {
     fn self_groups(&self) -> StoreResult<Vec<GroupId>> {
         Ok(read(&self.rows)?.self_groups.clone())
     }
+
+    fn hubs(&self) -> StoreResult<Vec<HubRecord>> {
+        Ok(read(&self.rows)?.hubs.values().cloned().collect())
+    }
 }
 
 impl StateReader for MemoryTxn {
@@ -360,6 +365,10 @@ impl StateReader for MemoryTxn {
 
     fn self_groups(&self) -> StoreResult<Vec<GroupId>> {
         Ok(self.rows.self_groups.clone())
+    }
+
+    fn hubs(&self) -> StoreResult<Vec<HubRecord>> {
+        Ok(self.rows.hubs.values().cloned().collect())
     }
 }
 
@@ -522,6 +531,16 @@ impl StoreTxn for MemoryTxn {
         if !self.rows.self_groups.contains(group_id) {
             self.rows.self_groups.push(group_id.clone());
         }
+        Ok(())
+    }
+
+    fn upsert_hub(&mut self, hub: &HubRecord) -> StoreResult<()> {
+        self.rows.hubs.insert(hub.hub_id.clone(), hub.clone());
+        Ok(())
+    }
+
+    fn remove_hub(&mut self, hub_id: &str) -> StoreResult<()> {
+        self.rows.hubs.remove(hub_id);
         Ok(())
     }
 

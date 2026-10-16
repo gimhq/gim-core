@@ -1,7 +1,8 @@
 use ciborium::Value;
 use gim_common::{GroupId, MessageId, UserId};
 use gim_proto::envelope::{
-    decode, encode, Contact, Content, Envelope, MediaInfo, ReceiptKind, ENVELOPE_VERSION,
+    decode, encode, Contact, Content, Envelope, HubLocation, MediaInfo, ReceiptKind,
+    ENVELOPE_VERSION,
 };
 use gim_proto::ProtoError;
 
@@ -100,6 +101,21 @@ fn all_contents() -> Vec<Content> {
             group_id: GroupId::new("hub/abc").unwrap(),
             seq: 42,
         },
+        Content::SelfHubs {
+            hubs: vec![
+                HubLocation {
+                    hub_id: "hpiraeus".into(),
+                    url: "https://hub.piraeus.example".into(),
+                    priority: 0,
+                },
+                HubLocation {
+                    hub_id: "hsplit".into(),
+                    url: "https://hub.split.example:8443/gim".into(),
+                    priority: 255,
+                },
+            ],
+        },
+        Content::SelfHubs { hubs: vec![] },
     ]
 }
 
@@ -334,6 +350,28 @@ fn profile_and_self_group_tags() {
             seq: 1
         }),
         "self.read_marker"
+    );
+    assert_eq!(tag(Content::SelfHubs { hubs: vec![] }), "self.hubs");
+    let hubs = content_map(&envelope(Content::SelfHubs {
+        hubs: vec![HubLocation {
+            hub_id: "hpiraeus".into(),
+            url: "https://hub.piraeus.example".into(),
+            priority: 1,
+        }],
+    }));
+    assert_eq!(
+        hubs[1],
+        (
+            "h".to_owned(),
+            Value::Array(vec![Value::Map(vec![
+                (Value::Text("id".into()), Value::Text("hpiraeus".into())),
+                (
+                    Value::Text("u".into()),
+                    Value::Text("https://hub.piraeus.example".into())
+                ),
+                (Value::Text("p".into()), Value::Integer(1.into())),
+            ])])
+        )
     );
 
     let marker = content_map(&envelope(Content::SelfReadMarker {
