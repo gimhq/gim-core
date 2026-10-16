@@ -101,11 +101,9 @@ impl From<gim_sdk::ClientError> for GimError {
             | E::SecretStorage(_)
             | E::Io(_)
             | E::StoreBusy(_)
-            | E::StoreWiped => {
-                Self::Storage {
-                    reason: err.to_string(),
-                }
-            }
+            | E::StoreWiped => Self::Storage {
+                reason: err.to_string(),
+            },
             E::Task(_) => Self::Internal {
                 reason: err.to_string(),
             },
