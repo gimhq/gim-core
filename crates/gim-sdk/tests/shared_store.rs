@@ -471,3 +471,51 @@ async fn extension_processes_pushes_beside_the_app() {
         &BTreeSet::from(["hello".to_string(), "second".to_string()]),
     );
 }
+
+/// A Welcome push processed by the extension: it joins the group beside the
+/// app and shows the invite with the group's name and the inviter.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn extension_shows_the_invite_of_a_welcome_push() {
+    let transport = FlakyTransport::new();
+    let (alice, app) = SharedDevice::register(&transport, "alice").await;
+    let bob = Device::register(&transport, "bob").await;
+    let g = bob
+        .client
+        .create_group_chat(
+            Some("Regatta".into()),
+            &[app.session().unwrap().device.user_id],
+        )
+        .await
+        .unwrap();
+    let device = app.session().unwrap().device;
+    let welcome = transport
+        .inner
+        .service()
+        .pending_welcomes(&device, 10)
+        .pop()
+        .unwrap();
+    let message_id = format!("{:032x}", welcome.seq);
+    let payload = serde_json::json!({
+        "v": 1,
+        "type": "welcome",
+        "gid": g.as_str(),
+        "seq": welcome.seq,
+        "message_id": message_id,
+        "collapse_id": message_id,
+    })
+    .to_string();
+
+    let extension = alice.extension().await;
+    let content = extension.process_push(&payload).await.unwrap();
+    assert_eq!(content.kind, NotificationKind::Invite, "{content:?}");
+    assert!(content.should_display);
+    assert_eq!(content.chat_id.as_ref(), Some(&g));
+    assert_eq!(content.chat_title.as_deref(), Some("Regatta"));
+    assert_eq!(content.sender_user_id, Some(bob.user_id()));
+    assert_eq!(content.sender_display_name.as_deref(), Some("bob"));
+
+    // The app lists the group once.
+    app.sync_once().await.unwrap();
+    let chat = app.store().chat(&g).unwrap().unwrap();
+    assert_eq!(chat.membership, Membership::Joined);
+}

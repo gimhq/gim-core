@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -316,6 +316,7 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
                 auth_lock: Mutex::new(()),
                 changes: broadcast::channel(CHANGES_CAPACITY).0,
                 group_lock: Mutex::new(()),
+                rejected_messages: AtomicU64::new(0),
                 data_dir,
                 flush_lock: Mutex::new(()),
                 outbox_wake: Notify::new(),
@@ -430,6 +431,9 @@ pub(crate) struct Inner<S> {
     /// sends): a pending commit must not meet an incoming commit or an
     /// outgoing application message.
     pub(crate) group_lock: Mutex<()>,
+    /// Messages skipped as undecryptable or malformed by the event apply
+    /// path ([`gim_base::BaseClient::rejected`]).
+    pub(crate) rejected_messages: AtomicU64,
     pub(crate) data_dir: PathBuf,
     /// Serializes outbox passes, so a media upload is never done twice.
     pub(crate) flush_lock: Mutex<()>,

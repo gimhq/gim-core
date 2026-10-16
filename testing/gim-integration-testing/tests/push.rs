@@ -131,7 +131,8 @@ async fn pushed_message_is_shown_by_the_extension_and_applied_once() {
 }
 
 /// Bob adds alice to a group: the Welcome is pushed (or a push replacing
-/// it), the extension joins the group and shows the invite once, and the
+/// it), the extension (`ClientMode::Extension`) joins the group and shows
+/// the invite once, with the group's name and Bob as the inviter, and the
 /// app lists the group once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs a gim-hub: scripts/integration-test.sh"]
@@ -160,9 +161,22 @@ async fn pushed_invite_joins_the_group_once() {
     assert_eq!(shown.len(), 1, "{shown:?}");
     let shown = shown[0];
     assert_eq!(shown.kind, NotificationKind::Invite, "{shown:?}");
+    assert!(shown.should_display, "{shown:?}");
     assert_eq!(shown.chat_id.as_deref(), Some(group.as_str()));
-    assert!(shown.chat_title.is_some(), "{shown:?}");
+    assert_eq!(
+        shown.chat_title.as_deref(),
+        Some("Crew Kornati"),
+        "{shown:?}"
+    );
     assert_eq!(shown.sender_user_id.as_deref(), Some(bob.user_id.as_str()));
+    // The hub keeps no display names: "Bob" comes from his profile
+    // announcement, sent through his outbox after the Commit; until it is on
+    // the hub the directory handle is the best name known.
+    let inviter = shown.sender_display_name.as_deref();
+    assert!(
+        inviter == Some("Bob") || inviter == Some(bob.handle.as_str()),
+        "{shown:?}"
+    );
 
     alice.client.start_sync().await.unwrap();
     bob.client
@@ -374,6 +388,8 @@ async fn registration_lifecycle_controls_pushes() {
 /// With priority-aware coalescing (hub H8, `push.md` §4) a text and the
 /// read receipt right after it reach alice as one alert push carrying the
 /// receipt's payload: the extension catches the chat up and shows the text.
+/// They are two writes, so a hub that reads them apart sends two pushes:
+/// then the text's shows it and the receipt's is silent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs a gim-hub: scripts/integration-test.sh"]
 async fn coalesced_receipt_push_shows_the_text_before_it() {
@@ -406,11 +422,12 @@ async fn coalesced_receipt_push_shows_the_text_before_it() {
         .unwrap();
     bob.client.mark_read(chat.clone(), text).await.unwrap();
     let pushed = new_pushes(&url, &alice.device_id, before, PUSH_WAIT, for_chat(&chat)).await;
-    assert_eq!(pushed.len(), 1, "one coalesced push: {pushed:?}");
+    assert!((1..=2).contains(&pushed.len()), "{pushed:?}");
 
     let shown = process_all(&url, &alice.hooks, &pushed).await;
+    let shown = displayed(&shown);
+    assert_eq!(shown.len(), 1, "{shown:?}");
     assert_eq!(shown[0].kind, NotificationKind::Message, "{shown:?}");
-    assert!(shown[0].should_display, "{shown:?}");
     assert_eq!(shown[0].body, "Anchored off Hvar");
     assert_eq!(shown[0].sender_display_name.as_deref(), Some("Bob"));
 

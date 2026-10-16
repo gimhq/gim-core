@@ -450,10 +450,18 @@ KeyPackages or download media. What it does depends on the payload type:
   device, so the invitation's push may have been replaced by a later message's) it joins through
   the pending invitations first and shows the invitation unless the message itself is shown.
 - a chat invitation: joins the chat through the pending invitations, as sync does.
-- a member change: catches the chat up; if the change added this device (its invitation's push
-  was replaced by this one), it joins through the pending invitations first.
+- a member change: catches the chat up. If the change added this device (its invitation's push
+  was replaced by this one), it joins through the pending invitations and shows the invitation
+  instead.
 - a wake-up (minimal mode) or an unknown type: joins pending invitations and reads the pending
   events once, without moving the sync position (the app's stream reads them again).
+
+When an invitation or member change push joins a chat, it also applies the messages the hub
+already has after the join (as sync does), so the invitation names the group and the inviter.
+The hub keeps no display names: the inviter's name comes from their profile announcement in the
+chat, which their device sends right after the invitation. If it is not on the hub yet,
+`senderDisplayName` is the inviter's handle (or user id) until the profile is known;
+`senderUserId` is always set.
 
 The hub keeps one pending push per device: a later push replaces an earlier one, keeps the
 higher priority and carries the newest payload, so an alert may arrive for a read receipt, a
@@ -482,8 +490,8 @@ direct chat), `senderUserId?`, `senderDisplayName?`, `body` (text, caption, `Pho
 Show the notification only if `shouldDisplay`. It is `false` for own messages, edits, deletes,
 receipts, member changes and messages already read. If the push cannot be decrypted or processed
 in time (also when the other process holds the store lock too long), the call still succeeds with
-`Generic` content: body `New message`, `shouldDisplay = true`, and `chatId` / `chatTitle` when the
-chat is known locally. An iOS Notification Service Extension can therefore always display the
+`Generic` content: body `New message`, `shouldDisplay = true` (`false` only for a member change
+that did not add this device), and `chatId` / `chatTitle` when the chat is known locally. An iOS Notification Service Extension can therefore always display the
 result. Use `collapseId` as the platform collapse key
 (`apns-collapse-id`, FCM `tag`): every hub of the user may push the same message.
 
