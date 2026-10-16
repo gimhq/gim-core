@@ -35,11 +35,12 @@ use tokio::time::Instant;
 
 use crate::client::Session;
 use crate::hubs::{hub_urls_changed, Listed};
+use crate::routing::HubTarget;
 use crate::stream::{Backoff, ConnectionState};
 use crate::transport::{
     AccessToken, EventBatch, GroupInfo, HubEvent, Transport, TransportError, TransportResult,
 };
-use crate::{Client, ClientError, Result, KEY_PACKAGE_BATCH};
+use crate::{Client, ClientError, Result};
 
 /// Shortest interval between two long-polls that returned no events.
 const MIN_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -696,7 +697,7 @@ impl<S: StateStore + 'static> Client<S> {
     /// hub: joins the groups of the pending Welcomes (and acknowledges
     /// them), backfills every joined chat by seq from its last contiguous
     /// seq, refreshes the known DeviceLists, surfaces the hub's groups that
-    /// cannot be joined, tops up the home hub's KeyPackages (a
+    /// cannot be joined, tops up that hub's KeyPackages (a
     /// `KeyPackagesLow` may have been pruned), then continues from the head
     /// cursor. The other hubs' cursors are not touched.
     async fn recover_expired_locked(
@@ -742,8 +743,15 @@ impl<S: StateStore + 'static> Client<S> {
             }
         }
         let unjoined = self.unjoined_hub_groups(link, &joined).await?;
-        if link.is_home() {
-            self.top_up_key_packages(session).await?;
+        match &link.hub_id {
+            None => self.top_up_key_packages(session).await?,
+            Some(hub_id) => {
+                let hub = HubTarget {
+                    hub_id: hub_id.clone(),
+                    home: false,
+                };
+                self.top_up_hub(&hub).await?;
+            }
         }
         changes.extend(self.apply_group_events(session, link, events).await?);
         self.set_cursor(link, head, true).await?;
@@ -865,62 +873,10 @@ impl<S: StateStore + 'static> Client<S> {
         Ok(changes)
     }
 
-    /// Tops the hub's one-time KeyPackages up to [`KEY_PACKAGE_BATCH`], plus
-    /// a last-resort one if it has none. Uploads a batch if the hub cannot
-    /// count them.
-    async fn top_up_key_packages(&self, session: &Session) -> Result<()> {
-        let counted = self
-            .authed(|t| async move { self.inner.transport.key_package_count(&t).await })
-            .await;
-        let count = match counted {
-            Ok(count) => count,
-            Err(err @ (TransportError::Network(_) | TransportError::Unauthorized)) => {
-                return Err(err.into())
-            }
-            Err(err) => {
-                tracing::debug!(error = %err, "cannot count KeyPackages; uploading a batch");
-                return self.upload_key_packages(session).await;
-            }
-        };
-        let missing = u64::from(KEY_PACKAGE_BATCH).saturating_sub(count.available);
-        let missing = u32::try_from(missing).unwrap_or(KEY_PACKAGE_BATCH);
-        let last_resort = !count.has_last_resort;
-        if missing == 0 && !last_resort {
-            return Ok(());
-        }
-        tracing::info!(missing, last_resort, "topping up KeyPackages");
-        let (key_packages, last_resort) = self
-            .run(move |store, engine| {
-                store.transaction(|txn| {
-                    let last_resort = if last_resort {
-                        Some(engine.generate_last_resort_key_package(&*txn)?)
-                    } else {
-                        None
-                    };
-                    Ok((engine.generate_key_packages(&*txn, missing)?, last_resort))
-                })
-            })
-            .await?;
-        let uploads = [
-            (key_packages, false),
-            (last_resort.into_iter().collect(), true),
-        ];
-        for (key_packages, last_resort) in uploads {
-            if key_packages.is_empty() {
-                continue;
-            }
-            self.authed(|t| {
-                let key_packages = key_packages.clone();
-                async move {
-                    self.inner
-                        .transport
-                        .upload_key_packages(&t, key_packages, last_resort)
-                        .await
-                }
-            })
-            .await?;
-        }
-        Ok(())
+    /// Tops the home hub's one-time KeyPackages up to
+    /// [`crate::KEY_PACKAGE_BATCH`], plus a last-resort one if it has none.
+    async fn top_up_key_packages(&self, _session: &Session) -> Result<()> {
+        self.top_up_hub(&self.home_target()).await
     }
 
     /// Applies a batch of events of the hub of `link`: DeviceList updates
@@ -1000,8 +956,8 @@ impl<S: StateStore + 'static> Client<S> {
     /// they refer to that are not known yet. Messages already applied from
     /// another hub change nothing (gim-base skips a `(gid, seq)` applied
     /// before). Broadcasts the changes, acknowledges the Welcomes on that
-    /// hub (also those joined from another hub) and replenishes the home
-    /// hub's KeyPackages if it asked to.
+    /// hub (also those joined from another hub) and replenishes that hub's
+    /// KeyPackages if it asked to.
     pub(crate) async fn apply_group_events(
         &self,
         session: &Session,
@@ -1040,10 +996,10 @@ impl<S: StateStore + 'static> Client<S> {
             .await?;
         }
         if changes.contains(&StateChange::KeyPackagesLow) {
-            if link.is_home() {
-                self.upload_key_packages(session).await?;
-            } else {
-                tracing::debug!(hub_id = link.name(), "KeyPackages low on a listed hub");
+            match &link.hub_id {
+                None => self.upload_key_packages(session).await?,
+                // That hub only: each hub has its own KeyPackages.
+                Some(hub_id) => self.replenish_hub_key_packages(hub_id).await?,
             }
         }
         Ok(changes)

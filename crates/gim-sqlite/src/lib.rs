@@ -19,8 +19,8 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use gim_base::model::{
-    Chat, DepartedMember, GroupCursor, GroupMessage, HubRecord, MediaCacheEntry, MembershipEvent,
-    Message, OutboxEntry, PendingCommit, PendingInvite, PendingLeave, UserInfo,
+    Chat, DepartedMember, GroupCursor, GroupMessage, HubRecord, KeyPackageRecord, MediaCacheEntry,
+    MembershipEvent, Message, OutboxEntry, PendingCommit, PendingInvite, PendingLeave, UserInfo,
 };
 use gim_base::{BaseError, StateReader, StateStore, StoreError, StoreTxn, WriteTarget};
 use gim_common::{DeviceRef, GroupId, MessageId, UserId};
@@ -466,6 +466,11 @@ macro_rules! delegate_reader {
                 let $this = self;
                 Reader($conn).hubs()
             }
+
+            fn key_package_records(&self) -> StoreResult<Vec<KeyPackageRecord>> {
+                let $this = self;
+                Reader($conn).key_package_records()
+            }
         }
     };
 }
@@ -769,21 +774,35 @@ impl StoreTxn for SqliteTxn<'_> {
     fn upsert_hub(&mut self, hub: &HubRecord) -> StoreResult<()> {
         self.execute(
             "INSERT OR REPLACE INTO hubs \
-             (hub_id, url, priority, verified_root_pubkey, last_seen_ms, state) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (hub_id, url, priority, verified_root_pubkey, last_seen_ms, state, url_shared) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 hub.hub_id,
                 hub.url,
                 hub.priority,
                 hub.verified_root_pubkey,
                 hub.last_seen_ms,
-                hub_state_str(hub.state)
+                hub_state_str(hub.state),
+                hub.url_shared
             ],
         )
     }
 
     fn remove_hub(&mut self, hub_id: &str) -> StoreResult<()> {
         self.execute("DELETE FROM hubs WHERE hub_id = ?1", [hub_id])
+    }
+
+    fn add_key_package_record(&mut self, record: &KeyPackageRecord) -> StoreResult<()> {
+        self.execute(
+            "INSERT INTO key_package_ledger (kp_ref, hub_id, last_resort, created_at_ms) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                record.kp_ref,
+                record.hub_id,
+                record.last_resort,
+                record.created_at_ms
+            ],
+        )
     }
 
     fn clear(&mut self) -> StoreResult<()> {

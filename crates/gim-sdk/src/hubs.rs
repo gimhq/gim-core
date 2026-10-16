@@ -84,6 +84,13 @@ pub(crate) struct HubHandle {
     token: Option<HubToken>,
 }
 
+impl HubHandle {
+    /// The hub's URL proved its identity in this run.
+    pub(crate) fn is_verified(&self) -> bool {
+        self.verified.is_some()
+    }
+}
+
 /// The persisted session secret: the home hub session and, next to it, the
 /// sessions on the other hubs, so every sign-out and enrollment discard
 /// drops them together.
@@ -125,7 +132,7 @@ fn check_identity(
 
 /// Registry order: by priority, then hub id; the first listed one is the
 /// primary hub.
-fn sort(hubs: &mut [HubRecord]) {
+pub(crate) fn sort(hubs: &mut [HubRecord]) {
     hubs.sort_by(|a, b| (a.priority, &a.hub_id).cmp(&(b.priority, &b.hub_id)));
 }
 
@@ -176,6 +183,7 @@ impl<S: StateStore + 'static> Client<S> {
             ClientError::InvalidInput(format!("{url} is not hub {hub_id}: {reason}"))
         })?;
         hub.url = Some(url.to_string());
+        hub.url_shared = false;
         hub.verified_root_pubkey = Some(root);
         hub.last_seen_ms = Some(now_ms());
         hub.state = HubState::Verified;
@@ -187,6 +195,7 @@ impl<S: StateStore + 'static> Client<S> {
         self.sign_in_hub(hub_id).await;
         // Sending may publish the hosting record, which refreshes the hubs.
         drop(guard);
+        self.top_up_listed_hubs().await;
         self.inner.hubs_changed.notify_one();
         self.share_hub_locations().await;
         Ok(())
@@ -226,6 +235,14 @@ impl<S: StateStore + 'static> Client<S> {
                 continue;
             };
             let hub_id = hub.hub_id.clone();
+            if hub.url_shared {
+                // Shared by another own device: not contacted until a URL
+                // is set on this device (no URL-bound hub proof yet).
+                if let Some(handle) = self.handles().get_mut(&hub_id) {
+                    handle.verified = None;
+                }
+                continue;
+            }
             let checked = self
                 .handles()
                 .get(&hub_id)
@@ -237,6 +254,7 @@ impl<S: StateStore + 'static> Client<S> {
         }
         // Sending may publish the hosting record, which refreshes the hubs.
         drop(guard);
+        self.top_up_listed_hubs().await;
         self.inner.hubs_changed.notify_one();
         if shared {
             self.share_hub_locations().await;
@@ -280,8 +298,11 @@ impl<S: StateStore + 'static> Client<S> {
             store.transaction(|txn| {
                 let stored = txn.hubs()?.into_iter().find(|h| h.hub_id == hub_id);
                 let shared = url.is_some() && stored.as_ref().is_none_or(|h| h.url.is_none());
+                // The client's own URL is set on this device.
+                let url_shared = url.is_none() && stored.as_ref().is_some_and(|h| h.url_shared);
                 let hub = HubRecord {
                     url: url.or_else(|| stored.as_ref().and_then(|h| h.url.clone())),
+                    url_shared,
                     priority: stored.as_ref().map_or(HOME_HUB_PRIORITY, |h| h.priority),
                     verified_root_pubkey: Some(root),
                     last_seen_ms: Some(now_ms()),
@@ -337,6 +358,7 @@ impl<S: StateStore + 'static> Client<S> {
                             None => HubRecord {
                                 hub_id,
                                 url: None,
+                                url_shared: false,
                                 priority,
                                 verified_root_pubkey: None,
                                 last_seen_ms: None,
@@ -364,8 +386,12 @@ impl<S: StateStore + 'static> Client<S> {
 
     /// Checks `url` for the listed `hub` with `GET /v2/hub`. On success the
     /// hub is verified and its transport kept; a URL serving another hub
-    /// leaves it unverified. Network failures keep the stored state.
+    /// leaves it unverified. Network failures keep the stored state. A URL
+    /// shared by another own device is never contacted.
     async fn verify_hub(&self, mut hub: HubRecord, url: &str) -> Result<bool> {
+        if hub.url_shared {
+            return Ok(false);
+        }
         let checked = match (self.inner.hub_connector)(url) {
             Ok(transport) => match transport.hub_info().await {
                 Ok(info) => Ok((check_identity(&info, Some(&hub.hub_id)), transport)),
