@@ -32,11 +32,13 @@
 //! | `"self.profile"` | `n` display name of the own user |
 //! | `"self.contacts"` | `u` array of contact maps |
 //! | `"self.read_marker"` | `g` group id, `s` seq of the last read message |
+//! | `"self.hubs"` | `h` array of hub maps |
 //!
 //! The `self.*` contents travel only in the self group, the MLS group of
 //! one user's own devices, and are ignored from any other user. A contact
 //! map has `id` user id (text) and optional `h` handle and `n` display name
-//! (text).
+//! (text). A hub map has `id` hub id (text), `u` client API base URL
+//! (text) and `p` priority in the hosting record (uint, 0-255).
 //!
 //! A media map has `id` blob id (text), `k` AES-256 key (32-byte bstr),
 //! `d` SHA-256 of the encrypted blob (32-byte bstr), `mt` MIME type (text),
@@ -136,6 +138,23 @@ pub enum Content {
         group_id: GroupId,
         seq: u64,
     },
+    /// Self group: where the hubs of the own hosting record are reached,
+    /// which the signed record does not say. Broadcast when it changes.
+    SelfHubs {
+        hubs: Vec<HubLocation>,
+    },
+}
+
+/// The client API base URL of a hub, shared through the self group.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HubLocation {
+    #[serde(rename = "id")]
+    pub hub_id: String,
+    #[serde(rename = "u")]
+    pub url: String,
+    /// Priority of the hub in the hosting record; lower is preferred.
+    #[serde(rename = "p")]
+    pub priority: u8,
 }
 
 /// A contact shared through the self group.
@@ -311,6 +330,10 @@ enum WireContent {
         g: GroupId,
         s: u64,
     },
+    #[serde(rename = "self.hubs")]
+    SelfHubs {
+        h: Vec<HubLocation>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -371,6 +394,7 @@ impl From<&Content> for WireContent {
                 g: group_id,
                 s: seq,
             },
+            Content::SelfHubs { hubs } => Self::SelfHubs { h: hubs },
         }
     }
 }
@@ -414,6 +438,7 @@ impl TryFrom<WireContent> for Content {
                 group_id: g,
                 seq: s,
             },
+            WireContent::SelfHubs { h } => Self::SelfHubs { hubs: h },
         })
     }
 }

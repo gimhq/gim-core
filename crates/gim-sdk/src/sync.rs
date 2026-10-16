@@ -5,6 +5,7 @@
 //! with a long-poll fallback, reconnect with backoff).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use futures_util::FutureExt;
@@ -19,6 +20,7 @@ use tokio::sync::broadcast;
 use tokio::time::Instant;
 
 use crate::client::Session;
+use crate::hubs::{hub_urls_changed, Listed};
 use crate::stream::{Backoff, ConnectionState};
 use crate::transport::{EventBatch, GroupInfo, HubEvent, TransportError};
 use crate::{Client, ClientError, Result, KEY_PACKAGE_BATCH};
@@ -352,11 +354,17 @@ impl<S: StateStore + 'static> Client<S> {
         fetched: Fetched,
     ) -> Result<Vec<StateChange>> {
         let guard = self.inner.group_lock.lock().await;
+        let urls = self.hub_urls().await?;
         let changes = self.apply_fetched_locked(session, fetched).await?;
         self.remove_departed(session).await?;
         self.commit_pending_proposals(session).await?;
         self.resume_leaves(session).await;
         drop(guard);
+        if self.inner.hosting_updated.swap(false, Ordering::SeqCst) {
+            self.refresh_hubs_logged(Listed::Fetch).await;
+        } else if hub_urls_changed(&urls, &self.hub_urls().await?) {
+            self.refresh_hubs_logged(Listed::Stored).await;
+        }
         self.wake_outbox();
         let own = &session.device.user_id;
         let joined: BTreeSet<GroupId> = self
@@ -714,6 +722,12 @@ impl<S: StateStore + 'static> Client<S> {
                     if user_id == session.device.user_id {
                         tracing::info!(seq, expires_at_ms, "hosting record expiring; renewing");
                         self.inner.hosting_wake.notify_one();
+                    }
+                }
+                HubEvent::HostingRecordUpdated { user_id, seq } => {
+                    if user_id == session.device.user_id {
+                        tracing::info!(seq, "hosting record updated; refreshing the hubs");
+                        self.inner.hosting_updated.store(true, Ordering::SeqCst);
                     }
                 }
             }

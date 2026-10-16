@@ -1,3 +1,5 @@
+use crate::ChatState;
+
 /// Error returned by every fallible gim-core call.
 ///
 /// Kotlin: `GimException.<Variant>`; Swift: `GimError.<Variant>`.
@@ -44,6 +46,10 @@ pub enum GimError {
     /// A bug or an unexpected failure inside gim-core or a platform callback.
     #[error("internal error: {reason}")]
     Internal { reason: String },
+    /// The call sends to (or changes) a chat this device is leaving or has
+    /// left. `state` is `Leaving` or `Left`; see `ChatState`.
+    #[error("chat {chat_id} is not active: {state:?}")]
+    ChatNotActive { chat_id: String, state: ChatState },
 }
 
 impl From<uniffi::UnexpectedUniFFICallbackError> for GimError {
@@ -102,6 +108,10 @@ impl From<gim_sdk::TransportError> for GimError {
                 status: 500,
                 reason,
             },
+            E::Rejected {
+                status: 400 | 422, ..
+            } => Self::InvalidInput { reason },
+            E::Rejected { status, .. } => Self::Server { status, reason },
             E::TooLarge(_) => Self::InvalidInput { reason },
             E::DeviceNotActive(_) => Self::NotRegistered,
             E::HostingRecordRequired(_) => Self::Server {
@@ -236,6 +246,23 @@ mod tests {
         assert!(matches!(
             GimError::from(ClientError::Transport(refused)),
             GimError::Server { status: 502, .. }
+        ));
+    }
+
+    #[test]
+    fn rejections() {
+        let rejected = |status: u16| {
+            GimError::from(ClientError::Transport(TransportError::Rejected {
+                status,
+                code: "validation_failed".into(),
+                message: "bad".into(),
+            }))
+        };
+        assert!(matches!(rejected(400), GimError::InvalidInput { .. }));
+        assert!(matches!(rejected(422), GimError::InvalidInput { .. }));
+        assert!(matches!(
+            rejected(403),
+            GimError::Server { status: 403, .. }
         ));
     }
 }

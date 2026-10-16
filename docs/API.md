@@ -46,9 +46,9 @@ milliseconds (`u64`). Counts and indices are `u32`.
    and retries pending sends; `false` neither pauses sync nor forces `Offline`.
 4. **Listeners**: subscribe with `chatList(listener)`, `timeline(chatId).addListener(listener)`,
    `connectionState(listener)` and `typing(chatId, listener)`. Each returns a `TaskHandle`.
-5. **Sign out**: `signOut()` stops sync and deletes the session, the local database and the
-   keystore secrets (session, root key, device key, database key). Create a new client
-   afterwards.
+5. **Sign out**: `signOut()` stops sync and the listeners and deletes the session, the local
+   database and the keystore secrets (session, root key, device key, database key). Create a new
+   client afterwards. See *Teardown* for the callback guarantees.
 
 ## Identity and devices
 
@@ -111,6 +111,14 @@ user's signed DeviceList. Handles are optional directory entries pointing at a u
   Publication failures never fail these calls and are retried by sync. A federated request the
   hub rejects with 403 `hosting_record_required` publishes the record and is retried once; only if
   that fails does the call fail with `Server(403, …)`.
+- **Multiple hubs** (multi-homing, groundwork): gim-core keeps a registry of the hubs the hosting
+  record lists, with each hub's URL and this device's session there; it is persisted and restored
+  with the session. The hub the client was created with is checked with `GET /v2/hub` and
+  recorded. URLs of the other hubs come from the user's other devices (shared in the hidden self
+  group); a URL is used only after `GET /v2/hub` there proves the listed hub id, then the device
+  signs in there too. The registry follows the record on every publication and on the hub's
+  `hosting_record.updated` event. All traffic still goes through the hub the client was created
+  with; no API for the app yet.
 - **Federation**: users are addressed by user id everywhere; a remote user may have no handle and is
   shown by display name, else a short user id. A chat is created on the own hub, which owns it (the
   `<hub_id>/` prefix of its id); in chats owned by another hub, messages and member changes of
@@ -136,8 +144,8 @@ user's signed DeviceList. Handles are optional directory entries pointing at a u
 
 ## Platform hooks
 
-`PlatformHooks` is implemented by the app and may be called from any Rust thread; keep the
-implementations fast and thread-safe.
+`PlatformHooks` is implemented by the app and called on gim-core's callback thread (see
+*Threading of platform callbacks*); keep the implementations fast and thread-safe.
 
 | Method | Contract |
 |---|---|
@@ -175,7 +183,8 @@ implementations fast and thread-safe.
 | `createGroupChat(name, memberUserIds)` | chat id | The name is shared with the members (and with members added later) in an encrypted group info message. Invitees that do not exist or have no device are skipped, each reported as a `MembershipChanged(Removed)` change for that user (not stored); `NotFound` (and no chat is created) if that is every invitee. |
 | `chatMembers(chatId)` | `[UserProfile]` | Current members, one entry per user (not per device), including the signed-in user. Names come from the local user directory, filled by `findUser`, registration, and directory lookups the client makes for members of created or joined chats, added members and unknown senders; until a lookup succeeds a user shows as its user id. Resolved names arrive as `ChatListDiff`s and timeline `Set`s. No members listener in M1: re-query when a `ChatListDiff` touches that chat or a `TimelineItem.MembershipChange` arrives. |
 | `addMembers(chatId, userIds)`, `removeMember(chatId, userId)` | | `addMembers` skips users that do not exist or have no device like `createGroupChat`, and fails with `NotFound` (nothing committed) if that is every user. |
-| `leaveChat(chatId)` | | Submits a leave Proposal and returns once the hub accepted it; another member commits it, then the chat shows the own `Left` change. Until then (also across restarts) sends to the chat fail with `InvalidInput`. |
+| `leaveChat(chatId)` | | Submits a leave Proposal and returns once the hub accepted it, with the chat `ChatState.Leaving`; another member commits it, then the chat is `Left` and shows the own `Left` change. gim-core keeps and re-sends the leave across restarts (native code does not persist it); calling `leaveChat` again while leaving re-sends it. A leave the hub refuses for good (4xx) returns the chat to `Active` and throws the rejection. `ChatNotActive(Left)` once left. See *Chat state*. |
+| `chatState(chatId)` | `ChatState` | From local state, no network call: correct right after a restart, before any other call. `NotFound` for an unknown chat. |
 | `setGroupInfo(chatId, name?, avatarFilePath?)` | | `null`/`nil` leaves a field unchanged; at least one must be set. The avatar is encrypted and uploaded before the call returns (MIME type from the file extension), then the change is applied locally and sent to the members. `InvalidInput` for direct chats. |
 | `sendText(chatId, body, replyTo?)` | message id | The message appears in the timeline immediately with `SendState.Pending`. |
 | `sendMedia(chatId, filePath, mime, caption?, replyTo?)` | message id | The file is copied before the call returns. |
@@ -187,7 +196,7 @@ implementations fast and thread-safe.
 | `stopTyping(chatId)` | | Same as `setTyping(chatId, false)`: call when the input is cleared, the message sent or the chat is left. Does nothing unless typing was reported. |
 | `fetchMedia(chatId, messageId, destPath)` | file path | Downloads and decrypts the attachment. A blob uploaded on another hub is fetched by the own hub from that hub on first access. `NotFound` if the blob is unknown (or federation is disabled on the own hub); `RetryLater(503, …)` while the uploader's hub stays unreachable and `Server(502, …)` while it keeps refusing, after up to 3 attempts within the call. |
 | `fetchThumbnail(chatId, messageId, destPath)` | file path? | `null`/`nil` if the media has no thumbnail. |
-| `chatList(listener)` | `TaskHandle` | |
+| `chatList(listener)` | `TaskHandle` | Rows are `ChatSummary` (`chatId`, `kind`, `name`, `avatar?`, `lastMessage?`, `unreadCount`, `updatedAtMs`, `memberCount`, `state`). |
 | `timeline(chatId)` | `Timeline` | |
 | `setLocalTimeZone(zone?)` | | Synchronous, never throws. Date separators follow `zone`; `null`/`nil` is UTC (the default). See *Local time zone*. |
 | `connectionState(listener)` | `TaskHandle` | `Offline` until `startSync` and after a failure while waiting to retry; `Connecting` → `Syncing` (catching up) → `Connected`. |
@@ -198,6 +207,26 @@ to delivery, so native code can key views by it.
 
 `DeviceInfo` is `deviceId`, `createdAtMs` (when the device was certified; 0 for revoked devices),
 `isCurrent` (this client's device) and `revoked`.
+
+### Chat state
+
+`ChatSummary.state`, `chatState(chatId)` and `Timeline.chatState()` give where this device stands
+in a chat, read from local state (so they are right from the first callback after a restart):
+
+| `ChatState` | Meaning |
+|---|---|
+| `Active` | A member; messages can be sent. |
+| `Leaving` | `leaveChat` was accepted by the hub; still an MLS member until another member commits the removal, but nothing can be sent. |
+| `Left` | Removed: after leaving, by another member, or hub-side. History is kept; nothing can be sent. |
+
+Transitions reach the chat list as a `Set` of the row: `Active → Leaving` (`leaveChat`),
+`Leaving → Left` (removal applied), `Leaving → Active` (the hub refused the leave for good),
+`Active → Left` (removed by another member).
+
+Calls that send to or change a `Leaving` or `Left` chat (`sendText`, `sendMedia`, `editMessage`,
+`deleteMessage`, `react`, `unreact`, `retrySend`, `setGroupInfo`, `addMembers`, `removeMember`;
+`leaveChat` once `Left`) throw `ChatNotActive(chatId, state)` instead of `InvalidInput`. Do not
+parse `InvalidInput` reasons to detect leaving.
 
 `MediaRef` identifies an attachment (`chatId`, `messageId`, `mime`, `size`, `hasThumbnail`).
 Encryption keys and blob ids never leave Rust; pass the ids to `fetchMedia` / `fetchThumbnail`.
@@ -211,10 +240,17 @@ Encryption keys and blob ids never leave Rust; pass the ids to `fetchMedia` / `f
 - `paginateBackwards(count)` loads up to `count` older items (they arrive through the listener as
   diffs) and returns whether more history exists.
 - `chatId()`.
+- `chatState()` → `ChatState?`: the chat's current state (see *Chat state*); `null`/`nil` while the
+  chat is not known locally.
 
 `TimelineItem` is a `Message` (`MessageItem`), a `DateSeparator` (`dayStartMs`: start of a local
 calendar day, see *Local time zone*) or a `MembershipChange` (`Added`, `Removed`, `Left`; group chats
 only, in seq order among the messages, at the time the change was applied on this device).
+A `MembershipChange` carries `userName`, `change`, `atMs`, `userId` (the user who joined or left)
+and `actorUserId?` (who caused it: the adder or remover; the user themselves for `Left`, whoever
+committed the removal; `null`/`nil` if unknown). An invitee that could not be added (unknown user,
+or a pending invite that expired) shows as `Removed` with the inviter as actor. The signed-in
+user's own `Left` has `userId` equal to the own user id.
 `paginateBackwards` pages through locally stored history first, then through the server history:
 messages this device cannot decrypt (sent before it joined, or already read once and removed
 locally) are skipped, and it returns `false` once nothing older is readable. `MessageItem.sendState` is set only for own
@@ -237,7 +273,7 @@ zone changes (Android `ACTION_TIMEZONE_CHANGED`, iOS `NSSystemTimeZoneDidChange`
 timeline moves its date separators to the new days through its listener, as ordinary diffs
 (separators removed and inserted; message items stay). Offsets are asked once per UTC hour of the
 item timestamps (at the start of that hour) and cached until the zone is replaced, so it is
-called from a Rust background thread and must not call back into `GimClient`. The chat list does
+called on gim-core's callback thread and must not call back into `GimClient`. The chat list does
 not bucket by day; format its timestamps natively.
 
 ## Listeners and threading
@@ -245,7 +281,7 @@ not bucket by day; format its timestamps natively.
 `ChatListListener`, `TimelineListener`, `ConnectionStateListener` and `TypingListener` are
 implemented by the app.
 
-- **Callbacks arrive on a Rust background thread.** Hop to the main thread (Kotlin:
+- **Callbacks arrive on gim-core's callback thread** (see *Threading of platform callbacks*). Hop to the main thread (Kotlin:
   `withContext(Dispatchers.Main)` / `Handler(Looper.getMainLooper())`; Swift:
   `Task { @MainActor in ... }` / `DispatchQueue.main.async`) before touching UI state, and keep
   the order of callbacks.
@@ -254,6 +290,49 @@ implemented by the app.
   the last reference) or calling `cancel()` ends the subscription. `isFinished()` reports whether it
   has ended.
 - `ConnectionStateListener.onChange` and `TypingListener.onUpdate` first deliver the current value.
+
+### Threading of platform callbacks
+
+Applies to every interface the app implements: `PlatformHooks`, `LocalTimeZone`,
+`ChatListListener`, `TimelineListener`, `ConnectionStateListener` and `TypingListener`.
+
+- **One thread.** gim-core calls all of them, for every client, on a single long-lived native
+  thread named `gim-callbacks`, one call at a time, in order. The Rust code that needs the
+  result waits for it. A callback is therefore never called on a tokio worker or blocking
+  thread, never inside a UniFFI future poll or continuation, and never on a thread that is about
+  to exit. Releasing the objects passed in (UniFFI's `free` when gim-core drops its last
+  reference) also happens on that thread.
+- **Keep callbacks short and non-blocking.** All callbacks share the thread: a slow keystore read
+  delays listener updates, and the Rust side waiting for the result (possibly a sync call such as
+  `setLocalTimeZone`) waits too. Copy the data and return; hop to the main thread or your own
+  executor for anything else.
+- **Never call into gim-core from inside a callback.** That means no `GimClient` call, no
+  `close()` / `destroy()` of a gim-core object, no `runBlocking` / semaphore around a suspend
+  call, and no waiting on a thread that is itself waiting for gim-core. Such a call runs nested on
+  the callback thread. A nested callback deadlocks or, on Android, makes JNA detach the thread
+  while the outer callback is still running (ART aborts with `attempting to detach while still
+  running code`). Post the work to another thread instead.
+- **Call suspend functions from a real dispatcher (Android).** UniFFI resumes a suspended call
+  from a continuation callback on the Rust thread that completed the work. With a
+  `CoroutineDispatcher` (`Dispatchers.Main`, `Dispatchers.IO`, `Dispatchers.Default`,
+  `viewModelScope`) the coroutine continues on that dispatcher. A context without one resumes
+  inline on the Rust thread: `Dispatchers.Unconfined`, `UnconfinedTestDispatcher`, and Compose
+  test frame-clock interceptors (`ApplyingContinuationInterceptor`, e.g. a `LaunchedEffect`
+  under `createComposeRule`). UniFFI then reports completion with a callback nested in that
+  frame, with the same ART abort. Wrap such call sites in `withContext(Dispatchers.IO)` (or
+  `Default`). iOS has no JVM attach step; Swift `async` calls are unaffected.
+
+### Teardown
+
+- **`signOut()` returns only after every callback in flight returned** (listeners,
+  `LocalTimeZone`, and `PlatformHooks` calls made by background work), waiting at most 5 s for a
+  callback that does not return. Once it returned, no listener, `LocalTimeZone` or
+  `PlatformHooks` method is called for that client any more, and its `TaskHandle`s are finished.
+- **Releasing the client** (Kotlin: `close()` / garbage collection; Swift: releasing the last
+  reference) does the same without deleting anything. Released on a gim-core thread (a runtime
+  thread or the callback thread) it does not wait, so it cannot deadlock on a callback.
+- The objects passed in (listeners, hooks, time zone) may still be released later, on the
+  callback thread; that only drops gim-core's reference.
 
 ### Diff semantics
 
@@ -281,17 +360,19 @@ The chat list is ordered most recently updated first; a timeline oldest first.
 |---|---|---|
 | `Network(reason)` | Server unreachable or connection lost. | Show offline state; retry later. |
 | `NotRegistered` | No session, signed out, or this device was revoked. | Go to onboarding. |
-| `InvalidInput(reason)` | Argument rejected locally, the call does not fit the state (e.g. `createIdentity` with a session), or the payload is too large for the hub. | Bug or validation message. |
+| `InvalidInput(reason)` | Argument rejected locally, the call does not fit the state (e.g. `createIdentity` with a session), the payload is too large for the hub, or the hub rejected the request as invalid (400 `validation_failed`, 422). gim-core does not resend a rejected request. | Bug or validation message. |
 | `NotFound(reason)` | Unknown chat, message, user or media. | Refresh the screen. |
 | `Crypto(reason)` | MLS or media decryption failure. | Report; show placeholder. |
 | `Storage(reason)` | Local database or file system failure. | Report; may need disk space. |
-| `Server(status, reason)` | Non-success HTTP status from the hub; 502 `peer_refused` or 503 `peer_unavailable` (no `Retry-After`) when a remote hub failed. | Show generic error; peer failures are retried by gim-core. |
+| `Server(status, reason)` | Non-success HTTP status from the hub; 502 `peer_refused` or 503 `peer_unavailable` (no `Retry-After`) when a remote hub failed. A 4xx (e.g. 403 `forbidden` / `not_member`) is a definite rejection that gim-core does not resend; a 5xx, 408 or 429 has an unknown outcome and gim-core resends the request unchanged. | Show generic error; peer failures are retried by gim-core. |
 | `RetryLater(status, retryAfterSecs, reason)` | The hub throttles a public read (429 `rate_limited`) or a remote hub is unavailable (503 `peer_unavailable`), and gim-core's bounded retries (2 retries, at most 60 s of waiting for reads; see *Federation* for sends and member changes) are used up. | Retry after `retryAfterSecs`. |
 | `Cancelled` | Cancelled by `stopSync`, `signOut` or `cancelSend`. | Ignore. |
 | `NotImplemented` | In the contract but not implemented in this build. | Development builds only. |
 | `Internal(reason)` | Bug, or an unexpected exception thrown by a platform hook. | Report. |
+| `ChatNotActive(chatId, state)` | The call sends to or changes a chat this device is leaving (`state = Leaving`) or has left (`Left`); see *Chat state*. | Show the chat read-only. |
 
-Kotlin throws `GimException.<Variant>`; Swift throws `GimError.<Variant>`.
+Kotlin throws `GimException.<Variant>`; Swift throws `GimError.<Variant>`. `ChatNotActive` was added
+after M2b: an exhaustive Swift `switch` / Kotlin `when` over the error needs a new case.
 
 ## Other functions
 

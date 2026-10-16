@@ -5,6 +5,8 @@ use std::future::Future;
 
 use tokio::task::JoinHandle;
 
+use crate::callbacks::Callbacks;
+
 /// Keeps a listener subscription alive. Dropping or cancelling the handle
 /// stops the subscription; native code must hold on to it.
 #[derive(uniffi::Object)]
@@ -13,11 +15,15 @@ pub struct TaskHandle {
 }
 
 impl TaskHandle {
-    /// Spawns `future` on the current tokio runtime.
-    pub(crate) fn spawn(future: impl Future<Output = ()> + Send + 'static) -> Self {
-        Self {
-            handle: tokio::spawn(future),
-        }
+    /// Spawns `future` on the current tokio runtime; closing `callbacks`
+    /// aborts it.
+    pub(crate) fn spawn(
+        callbacks: &Callbacks,
+        future: impl Future<Output = ()> + Send + 'static,
+    ) -> Self {
+        let handle = tokio::spawn(future);
+        callbacks.track(handle.abort_handle());
+        Self { handle }
     }
 }
 

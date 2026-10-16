@@ -2,6 +2,7 @@
 //! callbacks, as a thin mapping over gim-ui / gim-sdk. Built as
 //! `libgim_core.{so,a,dylib}`. The contract is documented in `docs/API.md`.
 
+mod callbacks;
 mod chat_list;
 mod client;
 mod convert;
@@ -22,7 +23,7 @@ pub use link::{LinkSession, PendingApproval};
 pub use task_handle::TaskHandle;
 pub use timeline::{LocalTimeZone, Timeline, TimelineDiff, TimelineListener};
 pub use types::{
-    ChatKind, ChatSummary, ConnectionState, DeviceInfo, MediaRef, MembershipChangeKind,
+    ChatKind, ChatState, ChatSummary, ConnectionState, DeviceInfo, MediaRef, MembershipChangeKind,
     MessageContent, MessageItem, MessagePreview, ReactionGroup, ReplyPreview, SendState, Session,
     TimelineItem, UserProfile,
 };

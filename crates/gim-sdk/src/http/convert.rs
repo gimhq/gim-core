@@ -146,6 +146,12 @@ pub(super) fn event(event: v2::Event) -> Vec<HubEvent> {
                 }]
             })
         }
+        v2::EventData::HostingRecordUpdated(updated) => user_id(&updated.user_id).map(|user_id| {
+            vec![HubEvent::HostingRecordUpdated {
+                user_id,
+                seq: updated.seq,
+            }]
+        }),
         v2::EventData::Unknown { event_type, .. } => {
             tracing::debug!(%event_type, cursor, "skipping unknown event");
             Ok(vec![])

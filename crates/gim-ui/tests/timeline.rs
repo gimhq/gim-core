@@ -223,17 +223,28 @@ async fn own_pending_failed_and_reply_preview() {
     })
     .await;
 
-    // Removed from the server group: the post fails with a retryable
-    // error and the message stays pending.
+    // Removed from the server group: the hub rejects the post for good
+    // (403 `not_member`), so the message fails with the rejection.
     transport
         .service()
         .remove_member(&g, &bob.device())
         .unwrap();
     bob.send_text(&g, "hello?").await;
-    wait_until(&mut stream, &mut items, |items| items.len() == 5).await;
+    wait_until(&mut stream, &mut items, |items| {
+        items.len() == 5
+            && matches!(
+                items[4].as_message().unwrap().send_state,
+                Some(SendState::Failed { .. })
+            )
+    })
+    .await;
     let last = items[4].as_message().unwrap();
     assert_eq!(body(&items[4]), "hello?");
-    assert_eq!(last.send_state, Some(SendState::Pending));
+    assert!(
+        matches!(&last.send_state, Some(SendState::Failed { reason }) if reason.contains("403 not_member")),
+        "{:?}",
+        last.send_state
+    );
 }
 
 #[tokio::test]
