@@ -6157,6 +6157,15 @@ enum GimError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
      */
     case HubNotDrained(hubId: String, reason: String
     )
+    /**
+     * An admin of the hub `hub_id` suspended this user: the hub refuses
+     * to sign this device in. The session is kept. Show "account
+     * suspended" and do not retry: gim-core does not sign in there again
+     * for 10 minutes and keeps using the user's other hubs meanwhile.
+     * `hub_id` is empty if the home hub has no hub identity.
+     */
+    case UserSuspended(hubId: String
+    )
 
     
 
@@ -6236,6 +6245,9 @@ public struct FfiConverterTypeGimError: FfiConverterRustBuffer {
         case 17: return .HubNotDrained(
             hubId: try FfiConverterString.read(from: &buf), 
             reason: try FfiConverterString.read(from: &buf)
+            )
+        case 18: return .UserSuspended(
+            hubId: try FfiConverterString.read(from: &buf)
             )
 
          default: throw UniffiInternalError.unexpectedEnumCase
@@ -6335,6 +6347,11 @@ public struct FfiConverterTypeGimError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(17))
             FfiConverterString.write(hubId, into: &buf)
             FfiConverterString.write(reason, into: &buf)
+            
+        
+        case let .UserSuspended(hubId):
+            writeInt(&buf, Int32(18))
+            FfiConverterString.write(hubId, into: &buf)
             
         }
     }
