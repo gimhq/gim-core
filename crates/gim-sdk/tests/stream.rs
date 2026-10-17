@@ -1,6 +1,6 @@
 //! The sync loop over the `/v2/stream` WebSocket and the long-poll
 //! fallback, against an in-process mock hub: reconnects, connection
-//! states, token rejection and reachability.
+//! states, token rejection, suspended users and reachability.
 
 mod mock_server;
 
@@ -188,6 +188,70 @@ async fn connection_states_and_token_rejection() {
     ));
     assert_eq!(bob.client.connection_state(), Offline);
     assert_eq!(bob.client.session(), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn suspended_user_gets_user_suspended_after_one_sign_in() {
+    let Setup {
+        transport,
+        server,
+        bob,
+        ..
+    } = setup(fast_settings()).await;
+    bob.client.sync_once().await.unwrap();
+    let hub_id = transport.service().hub_id().to_string();
+    let challenges = || server.controls.challenges.load(Ordering::SeqCst);
+    let before = challenges();
+
+    // The suspension deletes the session: the call gets 401, the sign-in
+    // 403 `user_suspended`, which the caller gets.
+    server.controls.suspended.store(true, Ordering::SeqCst);
+    let result = bob.client.sync_once().await;
+    assert!(
+        matches!(&result, Err(ClientError::UserSuspended { hub_id: h }) if *h == hub_id),
+        "{result:?}"
+    );
+    assert_eq!(challenges(), before + 1);
+    // The session is kept, and the next calls do not sign in again.
+    assert!(bob.client.session().is_some());
+    let requests = server.controls.requests.load(Ordering::SeqCst);
+    for _ in 0..3 {
+        let result = bob.client.sync_once().await;
+        assert!(
+            matches!(result, Err(ClientError::UserSuspended { .. })),
+            "{result:?}"
+        );
+    }
+    assert_eq!(challenges(), before + 1);
+    assert_eq!(server.controls.requests.load(Ordering::SeqCst), requests);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sync_loop_of_a_suspended_user_settles_without_reconnecting() {
+    let Setup { server, bob, .. } = setup(fast_settings()).await;
+    let mut states = bob.client.subscribe_connection_state();
+    bob.client.start_sync().unwrap();
+    reach_state(&mut states, Connected).await;
+    server.streams_served(1).await;
+    let before = server.controls.challenges.load(Ordering::SeqCst);
+
+    // Close 4401, then the sign-in answers `user_suspended`: the loop goes
+    // offline and stays there, without signing in again.
+    server.controls.suspended.store(true, Ordering::SeqCst);
+    reach_state(&mut states, Offline).await;
+    let requests = server.controls.requests.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        server.controls.challenges.load(Ordering::SeqCst),
+        before + 1
+    );
+    let during = server.controls.requests.load(Ordering::SeqCst) - requests;
+    assert!(during <= 2, "{during} requests while suspended");
+    assert_eq!(bob.client.connection_state(), Offline);
+    // Not stopped: it tries again after the suspension wait.
+    assert!(bob.client.is_sync_running());
+    assert!(bob.client.session().is_some());
+    bob.client.stop_sync().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

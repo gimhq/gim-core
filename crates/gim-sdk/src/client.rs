@@ -314,6 +314,7 @@ impl<S: StateStore + 'static> ClientBuilder<S> {
                 device_lists,
                 session: RwLock::new(None),
                 auth_lock: Mutex::new(()),
+                suspended: std::sync::Mutex::default(),
                 changes: broadcast::channel(CHANGES_CAPACITY).0,
                 group_lock: Mutex::new(()),
                 rejected_messages: AtomicU64::new(0),
@@ -426,6 +427,8 @@ pub(crate) struct Inner<S> {
     session: RwLock<Option<Session>>,
     /// Serializes sign-ins.
     pub(crate) auth_lock: Mutex<()>,
+    /// Hubs that suspended the user: no sign-in there for a while.
+    pub(crate) suspended: std::sync::Mutex<crate::auth::Suspensions>,
     changes: broadcast::Sender<StateChange>,
     /// Serializes everything that touches MLS group state (sync, commits,
     /// sends): a pending commit must not meet an incoming commit or an

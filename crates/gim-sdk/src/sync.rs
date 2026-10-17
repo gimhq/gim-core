@@ -33,6 +33,7 @@ use tokio::sync::broadcast;
 use tokio::task::{AbortHandle, JoinSet};
 use tokio::time::Instant;
 
+use crate::auth::SUSPENDED_RETRY;
 use crate::client::Session;
 use crate::hubs::{hub_urls_changed, Listed};
 use crate::routing::{hub_unreachable, HubTarget};
@@ -174,7 +175,9 @@ impl<S: StateStore + 'static> Client<S> {
     /// [`SyncSettings`]); [`Client::network_reachable`] retries at once.
     /// Expired tokens are renewed by signing in again; the loop stops by
     /// itself only when the hub rejects the device's sign-in; see
-    /// [`Client::stop_sync`]. Alongside, the user's hosting record is
+    /// [`Client::stop_sync`]. A hub that suspended the user
+    /// ([`ClientError::UserSuspended`]) is not contacted again for 10
+    /// minutes; its loop waits offline meanwhile. Alongside, the user's hosting record is
     /// renewed when due: at start, daily and on `hosting_record.expiring`,
     /// and pending invites are retried (see [`Client::pending_invites`]).
     ///
@@ -441,7 +444,11 @@ impl<S: StateStore + 'static> Client<S> {
             };
             stream_retry_at = None;
             self.report(&link, ConnectionState::Offline);
-            let delay = backoff.next_delay();
+            let delay = match err {
+                // No sign-in there for a while: the hub is unusable.
+                ClientError::UserSuspended { .. } => SUSPENDED_RETRY,
+                _ => backoff.next_delay(),
+            };
             tracing::debug!(hub_id = link.name(), error = %err, ?delay, "hub sync failed; reconnecting");
             tokio::time::sleep(delay).await;
         }
@@ -468,6 +475,14 @@ impl<S: StateStore + 'static> Client<S> {
             if matches!(err, ClientError::Transport(TransportError::Unauthorized)) {
                 tracing::warn!("sign-in rejected; sync stopped");
                 return Err(ClientError::NotRegistered);
+            }
+            if let ClientError::UserSuspended { .. } = err {
+                // Offline until the next sign-in attempt; the other hubs'
+                // loops keep running. A wake-up does not cut this short.
+                tracing::warn!(error = %err, retry = ?SUSPENDED_RETRY, "sync of the home hub paused");
+                stream_retry_at = None;
+                tokio::time::sleep(SUSPENDED_RETRY).await;
+                continue;
             }
             // The failure may have been the network rather than a missing
             // stream: try the stream again on reconnect.
@@ -554,9 +569,9 @@ impl<S: StateStore + 'static> Client<S> {
                     *stream_retry_at = None;
                     stream = Some(opened);
                 }
-                Err(TransportError::Unauthorized) => {
-                    return Err(TransportError::Unauthorized.into())
-                }
+                Err(
+                    err @ (TransportError::Unauthorized | TransportError::UserSuspended { .. }),
+                ) => return Err(err.into()),
                 Ok(None) | Err(_) => {
                     tracing::debug!(
                         hub_id = link.name(),
@@ -926,9 +941,11 @@ impl<S: StateStore + 'static> Client<S> {
                 .into_iter()
                 .filter(|g| !joined.contains(&g.group_id))
                 .collect()),
-            Err(err @ (TransportError::Network(_) | TransportError::Unauthorized)) => {
-                Err(err.into())
-            }
+            Err(
+                err @ (TransportError::Network(_)
+                | TransportError::Unauthorized
+                | TransportError::UserSuspended { .. }),
+            ) => Err(err.into()),
             Err(err) => {
                 tracing::warn!(error = %err, "cannot list groups");
                 Ok(vec![])
@@ -1218,9 +1235,11 @@ impl<S: StateStore + 'static> Client<S> {
                 .await;
             match info {
                 Ok(info) => devices.extend(info.members),
-                Err(err @ (TransportError::Network(_) | TransportError::Unauthorized)) => {
-                    return Err(err.into())
-                }
+                Err(
+                    err @ (TransportError::Network(_)
+                    | TransportError::Unauthorized
+                    | TransportError::UserSuspended { .. }),
+                ) => return Err(err.into()),
                 // The join fails on the unknown members instead.
                 Err(err) => tracing::debug!(%group_id, error = %err, "no roster of a joined group"),
             }
@@ -1394,9 +1413,11 @@ impl<S: StateStore + 'static> Client<S> {
                 .await;
             let page = match fetched {
                 Ok(page) => page,
-                Err(err @ (TransportError::Network(_) | TransportError::Unauthorized)) => {
-                    return Err(err.into())
-                }
+                Err(
+                    err @ (TransportError::Network(_)
+                    | TransportError::Unauthorized
+                    | TransportError::UserSuspended { .. }),
+                ) => return Err(err.into()),
                 Err(err) => {
                     tracing::debug!(%group_id, error = %err, "cannot read group history");
                     return Ok(None);

@@ -20,6 +20,9 @@ pub const PEER_UNAVAILABLE: &str = "peer_unavailable";
 /// Error code of a 409 on `POST /v2/keypackages`: the upload contains a
 /// KeyPackage this hub already claimed from another hub.
 pub const DUPLICATE_KEY_PACKAGE: &str = "duplicate_key_package";
+/// Error code of a 403 on `POST /v2/auth/challenge` and
+/// `POST /v2/auth/session` (and nowhere else): an admin suspended the user.
+pub const USER_SUSPENDED: &str = "user_suspended";
 /// Marker in the message of a 400 `validation_failed` on
 /// `POST /v2/groups/{gid}/commits`: an Add's KeyPackage was not claimed
 /// through this hub.

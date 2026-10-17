@@ -16,6 +16,12 @@ pub enum ClientError {
     /// session was cleared; the device needs a new identity or a new link.
     #[error("device not active on the hub: {0}")]
     DeviceNotActive(String),
+    /// A sign-in on `hub_id` answered 403 `user_suspended`: an admin of
+    /// that hub suspended the user. The session is kept; gim-core does not
+    /// sign in there again for 10 minutes. Show "account suspended" and do
+    /// not retry. `hub_id` is empty if the home hub has no hub identity.
+    #[error("user suspended on hub {hub_id}")]
+    UserSuspended { hub_id: String },
     #[error("already logged in")]
     AlreadyLoggedIn,
     #[error("invalid stored session: {0}")]
@@ -88,6 +94,7 @@ impl From<TransportError> for ClientError {
     fn from(err: TransportError) -> Self {
         match err {
             TransportError::DeviceNotActive(reason) => Self::DeviceNotActive(reason),
+            TransportError::UserSuspended { hub_id } => Self::UserSuspended { hub_id },
             err => Self::Transport(err),
         }
     }

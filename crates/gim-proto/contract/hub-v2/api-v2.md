@@ -35,7 +35,8 @@ DeviceCert in the user's stored DeviceList. There is no handle-only registration
    sharing at least one group with them, so peers re-verify the user's MLS credentials against
    the new list.
 2. `POST /v2/auth/challenge {user_id, device_id}` returns `{challenge, expires_at, hub_id}`
-   (404 `not_found` unless the device is active in the stored DeviceList). `challenge` is a
+   (404 `not_found` unless the device is active in the stored DeviceList; 403 `user_suspended`
+   while an admin has suspended the user, see *Suspended users* below). `challenge` is a
    gim-core AuthChallenge (CBOR, base64) with `audience` = this hub's `hub_id`, a 32-byte random
    nonce and a 5-minute lifetime. A hub with `GIM_HUB_PUBLIC_URL` issues version 2, which also
    binds the URL the device talked to:
@@ -61,7 +62,8 @@ DeviceCert in the user's stored DeviceList. There is no handle-only registration
    default 30 days). Errors: 400 `validation_failed` (malformed body or AuthResponse); 401
    `invalid_challenge` (unknown, used, expired or foreign challenge, another `audience_url`, or
    the wrong challenge version for this hub), `invalid_signature`, or
-   `device_not_active` (device revoked or not in the DeviceList).
+   `device_not_active` (device revoked or not in the DeviceList); 403 `user_suspended` (an admin
+   suspended the user, see *Suspended users* below).
 4. Use `Authorization: Bearer <token>` (or `?token=` on `GET /v2/stream`). Sign in again after
    `expires_at` or on 401.
 
@@ -71,6 +73,24 @@ least every 30 seconds; once the session is deleted, expires or its device is re
 DeviceList update, the hub sends no further events and closes the connection with code 4401 (a
 revoking upload wakes the revoked devices, so their streams close promptly). `GET /v2/events?wait=`
 checks it again when the wait ends and then answers 401 `unauthorized` instead of returning events.
+
+### Suspended users
+
+An operator can suspend a user through the admin API ([`admin.md`](admin.md)). The suspension
+deletes every session of the user's devices at once and refuses new sign-ins until it is lifted;
+then the devices sign in again as above.
+
+| Endpoint | While the user is suspended | Status | Body |
+| --- | --- | --- | --- |
+| `POST /v2/auth/challenge` | refused | 403 | `{"error":{"code":"user_suspended","message":"user is suspended"}}` |
+| `POST /v2/auth/session` | refused | 403 | `{"error":{"code":"user_suspended","message":"user is suspended"}}` |
+| Every endpoint authenticated with a token issued before the suspension | the session was deleted | 401 | `{"error":{"code":"unauthorized","message":"missing or invalid bearer token"}}` |
+| `GET /v2/stream` with such a token | the session was deleted | | WebSocket close code 4401, as for any deleted session |
+
+`user_suspended` is returned only by the two sign-in endpoints, always with status 403. No other
+endpoint returns it: a suspended user has no session, so authenticated endpoints answer 401
+`unauthorized` (a client then tries to sign in again and receives 403 `user_suspended`).
+Unauthenticated endpoints are not affected.
 
 Linking a new device: the new device shows a QR code with a `link_id`; the old device (signed in)
 posts `POST /v2/link-bundles {link_id, sealed_bundle, expires_in}` and uploads the DeviceList that
@@ -341,12 +361,12 @@ without padding. A nonce that is not base64url without padding or does not decod
 GET /v2/hub
 {"hub_id":"hciqgrcknldyy6lbu2splf5frcdqeftipgfikjxbzeq6x6y55lggapay",
  "hub_root_pubkey":"F0VTtFbd38aQjsqxwQH+arIeK6oGF3lbfUOmNIKZP9U=",
- "version":"0.1.0","public_url":"https://hub-a.example.eu"}
+ "version":"0.3.0","public_url":"https://hub-a.example.eu"}
 
 GET /v2/hub?nonce=oKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr8
 {"hub_id":"hciqgrcknldyy6lbu2splf5frcdqeftipgfikjxbzeq6x6y55lggapay",
  "hub_root_pubkey":"F0VTtFbd38aQjsqxwQH+arIeK6oGF3lbfUOmNIKZP9U=",
- "version":"0.1.0","public_url":"https://hub-a.example.eu",
+ "version":"0.3.0","public_url":"https://hub-a.example.eu",
  "proof":"xDC4XeBqNVag459Oc3cA_DcSOAoJcOCtoe6CXOiFVP-ShX1tVjImuvh1fp6lEcVMbWSdfAVypyQsRolceTlIBQ"}
 ```
 

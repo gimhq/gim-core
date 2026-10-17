@@ -617,10 +617,39 @@ The chat list is ordered most recently updated first; a timeline oldest first.
 | `LastHub(hubId)` | `removeHub` of the only listed hub. | Explain; add another hub first. |
 | `HomeHub(hubId)` | `removeHub` of the hub the client was created for. | Explain; offer `setPrimaryHub` for another hub. |
 | `HubNotDrained(hubId, reason)` | `removeHub` while messages or member changes are not settled yet. | Retry later. |
+| `UserSuspended(hubId)` | An admin of the hub `hubId` suspended this user: the hub refused the sign-in with 403 `user_suspended`. The session and local data are kept. `hubId` is empty for a home hub without a hub identity. See *Suspended users*. | Show "account suspended" (naming the hub if the user has several). Do not retry and do not sign out. |
 
 Kotlin throws `GimException.<Variant>`; Swift throws `GimError.<Variant>`. `ChatNotActive` was added
-after M2b, and `HubOwnsGroups`, `LastHub`, `HomeHub` and `HubNotDrained` in M2c: an exhaustive
-Swift `switch` / Kotlin `when` over the error needs the new cases.
+after M2b, `HubOwnsGroups`, `LastHub`, `HomeHub` and `HubNotDrained` in M2c, and `UserSuspended`
+with hub H10: an exhaustive Swift `switch` / Kotlin `when` over the error needs the new cases.
+
+### Suspended users
+
+A hub admin can suspend a user (hub `api-v2.md` *Suspended users*). The hub then deletes the user's
+sessions, so authenticated calls answer 401 and the event stream closes with 4401, and it refuses
+new sign-ins (`POST /v2/auth/challenge`, `POST /v2/auth/session`) with 403 `user_suspended`. No
+other endpoint returns that code. gim-core signs in again after any 401, as for an expired token;
+when that sign-in answers `user_suspended`:
+
+- The call that needed the session fails with `UserSuspended(hubId)`. Every call that may sign in
+  can return it: sends, chat and member changes, reads, hub management.
+- gim-core signs in at most once per call and never retries in a loop. For 10 minutes after the
+  refusal it does not sign in on that hub at all: calls that need a session there fail with
+  `UserSuspended` at once, without a request. After the 10 minutes the next call or the sync loop
+  tries one sign-in again, so a lifted suspension is noticed within about 10 minutes.
+- Home hub: its sync loop reports `Offline` for that hub and waits the 10 minutes before it
+  reconnects; `setNetworkReachable(true)` does not cut that wait short. The loop is not stopped and
+  the session is not cleared: the device is not revoked, only refused for now.
+- Another listed hub: it is treated like an unreachable hub. Sends and member changes go to the
+  next listed hub, reads come from the other hubs, and its sync loop waits the 10 minutes before it
+  reconnects. Messaging continues through the other hubs.
+- `ConnectionState` has no extra value: with several hubs it stays `Connected` while another hub is
+  reachable. The app learns about the suspension from `UserSuspended`; there is no callback.
+- Client creation (session restore) does not fail on a suspension, as for an offline start; the
+  next call that needs the hub returns `UserSuspended`.
+
+Client guidance: when a call returns `UserSuspended`, show "account suspended", keep the local chats
+readable, and do not offer a retry or sign the user out; the user has to contact the hub operator.
 
 ## Other functions
 

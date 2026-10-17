@@ -9279,6 +9279,21 @@ sealed class GimException: kotlin.Exception() {
             get() = "hubId=${ `hubId` }, reason=${ `reason` }"
     }
     
+    /**
+     * An admin of the hub `hub_id` suspended this user: the hub refuses
+     * to sign this device in. The session is kept. Show "account
+     * suspended" and do not retry: gim-core does not sign in there again
+     * for 10 minutes and keeps using the user's other hubs meanwhile.
+     * `hub_id` is empty if the home hub has no hub identity.
+     */
+    class UserSuspended(
+        
+        val `hubId`: kotlin.String
+        ) : GimException() {
+        override val message
+            get() = "hubId=${ `hubId` }"
+    }
+    
 
     
 
@@ -9347,6 +9362,9 @@ public object FfiConverterTypeGimError : FfiConverterRustBuffer<GimException> {
                 )
             17 -> GimException.HubNotDrained(
                 FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                )
+            18 -> GimException.UserSuspended(
                 FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
@@ -9443,6 +9461,11 @@ public object FfiConverterTypeGimError : FfiConverterRustBuffer<GimException> {
                 + FfiConverterString.allocationSize(value.`hubId`)
                 + FfiConverterString.allocationSize(value.`reason`)
             )
+            is GimException.UserSuspended -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`hubId`)
+            )
         }
     }
 
@@ -9534,6 +9557,11 @@ public object FfiConverterTypeGimError : FfiConverterRustBuffer<GimException> {
                 buf.putInt(17)
                 FfiConverterString.write(value.`hubId`, buf)
                 FfiConverterString.write(value.`reason`, buf)
+                Unit
+            }
+            is GimException.UserSuspended -> {
+                buf.putInt(18)
+                FfiConverterString.write(value.`hubId`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }

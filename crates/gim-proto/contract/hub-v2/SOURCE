@@ -1,12 +1,17 @@
 gim-hub API v2 contract, vendored verbatim (byte-identical copies).
 
 Repository: gimhq/gim-hub (local checkout: /srv/gimhq/im-client/hub)
-Commit:     bd8c9ca29f4dc8804eac2f22a9f771319c00070c (hub main at vendoring time, H8)
-Vendored:   2026-10-16
+Commit:     5b518200ecf9477d4848645d8586b77f53eae145 (hub main at vendoring time, H10, release 0.3.0)
+Vendored:   2026-10-17
 
-Only docs/push.md changed between 50b3401 (H7) and bd8c9ca (H8)
-(`git diff --stat 50b3401 bd8c9ca` over the files below); the other files
-are unchanged since 50b3401.
+Changed between bd8c9ca (H8) and 5b518200 (H10), per
+`git diff --stat bd8c9ca 5b518200` over the files below:
+  openapi.json        (403 user_suspended on the sign-in endpoints, version example)
+  docs/api-v2.md      ("Suspended users")
+  docs/federation.md  (§3.8 dead connections, reconnect and retry, H11)
+  docs/s2s.md         (transport retry once after timeout / lost connection)
+The other files are unchanged since bd8c9ca. docs/admin.md and
+docs/operations.md are deliberately not vendored (core does not use them).
 
 Files (hub path -> this directory):
   openapi.json        -> openapi.json

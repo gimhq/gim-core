@@ -72,6 +72,13 @@ pub enum GimError {
     /// yet, so it cannot be removed now; try again later.
     #[error("hub {hub_id} is not drained: {reason}")]
     HubNotDrained { hub_id: String, reason: String },
+    /// An admin of the hub `hub_id` suspended this user: the hub refuses
+    /// to sign this device in. The session is kept. Show "account
+    /// suspended" and do not retry: gim-core does not sign in there again
+    /// for 10 minutes and keeps using the user's other hubs meanwhile.
+    /// `hub_id` is empty if the home hub has no hub identity.
+    #[error("user suspended on hub {hub_id}")]
+    UserSuspended { hub_id: String },
 }
 
 impl From<uniffi::UnexpectedUniFFICallbackError> for GimError {
@@ -117,6 +124,7 @@ impl From<gim_sdk::ClientError> for GimError {
             E::LastHub(hub_id) => Self::LastHub { hub_id },
             E::HomeHub(hub_id) => Self::HomeHub { hub_id },
             E::HubNotDrained { hub_id, reason } => Self::HubNotDrained { hub_id, reason },
+            E::UserSuspended { hub_id } => Self::UserSuspended { hub_id },
         }
     }
 }
@@ -150,6 +158,7 @@ impl From<gim_sdk::TransportError> for GimError {
             E::Rejected { status, .. } => Self::Server { status, reason },
             E::TooLarge(_) => Self::InvalidInput { reason },
             E::DeviceNotActive(_) => Self::NotRegistered,
+            E::UserSuspended { hub_id } => Self::UserSuspended { hub_id },
             E::HubNotVerified(_) => Self::HubNotVerified { reason },
             E::HostingRecordRequired(_) => Self::Server {
                 status: 403,
@@ -340,6 +349,35 @@ mod tests {
         assert!(matches!(
             GimError::from(ClientError::Transport(relay)),
             GimError::HubNotVerified { .. }
+        ));
+    }
+
+    #[test]
+    fn suspended_users() {
+        let suspended = GimError::UserSuspended {
+            hub_id: "hb".into(),
+        };
+        let from_client = ClientError::UserSuspended {
+            hub_id: "hb".into(),
+        };
+        assert_eq!(GimError::from(from_client), suspended);
+        let from_transport = TransportError::UserSuspended {
+            hub_id: "hb".into(),
+        };
+        assert_eq!(
+            GimError::from(ClientError::Transport(from_transport.clone())),
+            suspended
+        );
+        assert_eq!(GimError::from(from_transport), suspended);
+        // Another 403 stays a server error.
+        let forbidden = TransportError::Rejected {
+            status: 403,
+            code: "user_suspended".into(),
+            message: "user is suspended".into(),
+        };
+        assert!(matches!(
+            GimError::from(ClientError::Transport(forbidden)),
+            GimError::Server { status: 403, .. }
         ));
     }
 }
