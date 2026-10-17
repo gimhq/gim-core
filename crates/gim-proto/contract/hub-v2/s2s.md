@@ -96,6 +96,11 @@ certificate in order, and the first failure refuses the peer:
   hub; new connections from a bound PeerID reuse it, and a later `Hello` replaces it.
 - Every other operation from an unbound PeerID fails with `HELLO_REQUIRED`; the caller sends
   `Hello` and retries once. An inbound connection without `Hello` within 5 seconds is closed.
+- A request that times out or loses its connection closes the connections to the peer that were
+  open when it was sent, and is retried once, after a redial, unless it is `ClaimKeyPackage`; the
+  redial and retry get one more request timeout, so a request to a hub that is down fails after
+  at most twice the timeout. A ping unanswered within the timeout closes its connection
+  (federation.md §3.8).
 
 ## Operations
 
@@ -205,7 +210,8 @@ Notes:
 ## Idempotency
 
 All operations may be retried (the outbound queue is at-least-once), including through a different
-hub of a multi-homed user.
+hub of a multi-homed user. The transport itself retries every operation but `ClaimKeyPackage` once
+after a timeout or a lost connection (Peer binding).
 
 - `SubmitCommit`: the owning hub dedups by Commit hash. Resubmitting the same Commit returns the
   originally assigned `seq` / `epoch` with `duplicate = true`. A *different* Commit for an epoch

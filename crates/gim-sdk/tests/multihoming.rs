@@ -21,7 +21,7 @@ mod common;
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::ops::Range;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -90,6 +90,10 @@ struct HubState {
     /// Adds need their devices' KeyPackages claimed through this hub.
     enforce_claims: AtomicBool,
     claimed: Mutex<HashSet<DeviceRef>>,
+    /// Sign-ins answer 403 `user_suspended`.
+    suspended: AtomicBool,
+    /// Sign-in challenges requested.
+    challenges: AtomicUsize,
     faults: Mutex<VecDeque<(Op, Fault)>>,
     calls: Mutex<Vec<Call>>,
 }
@@ -257,6 +261,12 @@ impl Transport for Hub {
 
     async fn auth_challenge(&self, d: &DeviceRef) -> TransportResult<Challenge> {
         self.up()?;
+        self.state.challenges.fetch_add(1, Ordering::SeqCst);
+        if self.state.suspended.load(Ordering::SeqCst) {
+            return Err(TransportError::UserSuspended {
+                hub_id: String::new(),
+            });
+        }
         self.own.auth_challenge(d).await
     }
 
@@ -1387,6 +1397,45 @@ async fn new_primary_hub_gets_the_submissions_first() {
         matches!(unknown, Err(ClientError::InvalidInput(_))),
         "{unknown:?}"
     );
+}
+
+#[tokio::test]
+async fn a_hub_that_suspended_the_user_is_skipped_like_an_unreachable_one() {
+    let s = Setup::new().await;
+    let b = Setup::hub_id(&s.fake_b);
+    let g = s.direct_chat().await;
+    s.alice.set_primary_hub(&b).await.unwrap();
+
+    // B suspends alice: her session there is gone and B refuses sign-ins.
+    s.hub_b.state.suspended.store(true, Ordering::SeqCst);
+    s.fake_b.service().expire_sessions(&s.device());
+    let challenges = || s.hub_b.state.challenges.load(Ordering::SeqCst);
+    let before = challenges();
+    let posts_a = s.hub_a.posts().len();
+    let id = s.alice.send_text(&g, "via A", None).await.unwrap();
+    assert_eq!(
+        s.store.message(&id).unwrap().unwrap().send_state,
+        Some(SendState::Sent)
+    );
+    let on_a = &s.hub_a.posts()[posts_a..];
+    assert_eq!(on_a.len(), 1);
+    assert_eq!(on_a[0].0.as_str(), id.as_str());
+    assert_eq!(challenges(), before + 1);
+
+    // B is not asked again: the next message goes to A directly.
+    let posts_b = s.hub_b.posts().len();
+    let id = s.alice.send_text(&g, "via A again", None).await.unwrap();
+    assert_eq!(
+        s.store.message(&id).unwrap().unwrap().send_state,
+        Some(SendState::Sent)
+    );
+    assert_eq!(s.hub_a.posts().len(), posts_a + 2);
+    assert_eq!(s.hub_b.posts().len(), posts_b);
+    assert_eq!(challenges(), before + 1);
+    // Reads of B fail with the typed error, without a sign-in.
+    let synced = s.alice.sync_once().await;
+    assert!(synced.is_ok(), "{synced:?}");
+    assert_eq!(challenges(), before + 1);
 }
 
 #[tokio::test]

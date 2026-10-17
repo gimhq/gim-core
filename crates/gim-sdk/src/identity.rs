@@ -472,9 +472,11 @@ impl<S: StateStore + 'static> Client<S> {
         let bytes = match fetched {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return Ok(vec![]),
-            Err(err @ (TransportError::Network(_) | TransportError::Unauthorized)) => {
-                return Err(err.into())
-            }
+            Err(
+                err @ (TransportError::Network(_)
+                | TransportError::Unauthorized
+                | TransportError::UserSuspended { .. }),
+            ) => return Err(err.into()),
             Err(err) if strict && err.outcome_unknown() => return Err(err.into()),
             Err(err) => {
                 tracing::debug!(%user_id, error = %err, "cannot fetch a device list");

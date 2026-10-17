@@ -235,6 +235,13 @@ pub enum TransportError {
     /// or its keys are broken.
     #[error("device not active: {0}")]
     DeviceNotActive(String),
+    /// 403 `user_suspended` from a sign-in (`POST /v2/auth/challenge` or
+    /// `POST /v2/auth/session`): an admin of `hub_id` suspended the user.
+    /// The hub deleted the user's sessions there and refuses sign-ins
+    /// until the suspension is lifted. `hub_id` is empty when the
+    /// transport does not know it (a raw transport answer).
+    #[error("user suspended on hub {hub_id}")]
+    UserSuspended { hub_id: String },
     /// The hub at the contacted URL did not prove that it is the expected
     /// hub at that URL (`GET /v2/hub` proof of possession, or the URL of
     /// its sign-in challenge): a wrong URL or a relay. Nothing that needs a

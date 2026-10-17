@@ -628,9 +628,11 @@ impl<S: StateStore + 'static> Client<S> {
             .await;
         let count = match counted {
             Ok(count) => count,
-            Err(err @ (TransportError::Network(_) | TransportError::Unauthorized)) => {
-                return Err(err.into())
-            }
+            Err(
+                err @ (TransportError::Network(_)
+                | TransportError::Unauthorized
+                | TransportError::UserSuspended { .. }),
+            ) => return Err(err.into()),
             Err(err) => {
                 tracing::debug!(hub_id = %hub.hub_id, error = %err, "cannot count KeyPackages; uploading a batch");
                 return self.replenish_hub(hub).await;

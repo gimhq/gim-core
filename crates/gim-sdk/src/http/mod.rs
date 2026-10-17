@@ -333,7 +333,8 @@ impl Transport for HttpTransport {
             self.api(Method::POST, paths::AUTH_CHALLENGE, None)
                 .json(&request),
         )
-        .await?;
+        .await
+        .map_err(error::sign_in)?;
         Ok(Challenge {
             challenge: challenge.challenge,
             hub_id: challenge.hub_id,
@@ -359,7 +360,7 @@ impl Transport for HttpTransport {
             });
         }
         if !response.status().is_success() {
-            return Err(Self::status_error(response).await.into());
+            return Err(error::sign_in(Self::status_error(response).await).into());
         }
         let session: v2::Session = response.json().await.map_err(error::from_reqwest)?;
         Ok(SessionToken {

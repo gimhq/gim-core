@@ -193,6 +193,69 @@ async fn sign_in_requests() {
 }
 
 #[tokio::test]
+async fn user_suspended_maps_on_the_sign_in_endpoints_only() {
+    let server = MockServer::start().await;
+    let suspended = ResponseTemplate::new(403).set_body_json(error_body("user_suspended"));
+    let forbidden = ResponseTemplate::new(403).set_body_json(error_body("forbidden"));
+    Mock::given(method("POST"))
+        .and(path("/v2/auth/challenge"))
+        .and(body_json(json!({ "user_id": uid(1), "device_id": did(1) })))
+        .respond_with(suspended.clone())
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v2/auth/challenge"))
+        .and(body_json(json!({ "user_id": uid(2), "device_id": did(2) })))
+        .respond_with(forbidden.clone())
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v2/auth/session"))
+        .and(body_json(json!({ "response": "AQ==" })))
+        .respond_with(suspended.clone())
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v2/auth/session"))
+        .and(body_json(json!({ "response": "Ag==" })))
+        .respond_with(forbidden)
+        .mount(&server)
+        .await;
+    mount(&server, "GET", "/v2/groups/g_403", suspended).await;
+    let http = transport(&server);
+    let user_suspended = TransportError::UserSuspended {
+        hub_id: String::new(),
+    };
+    assert_eq!(
+        http.auth_challenge(&device(1)).await,
+        Err(user_suspended.clone())
+    );
+    assert_eq!(
+        http.create_session(vec![1]).await,
+        Err(SessionError::Transport(user_suspended))
+    );
+    let rejected = |code: &str| TransportError::Rejected {
+        status: 403,
+        code: code.into(),
+        message: "nope".into(),
+    };
+    // Another 403 code is unchanged.
+    assert_eq!(
+        http.auth_challenge(&device(2)).await,
+        Err(rejected("forbidden"))
+    );
+    assert_eq!(
+        http.create_session(vec![2]).await,
+        Err(SessionError::Transport(rejected("forbidden")))
+    );
+    // Only the sign-in endpoints return `user_suspended`.
+    assert_eq!(
+        http.group_info(&token(), &gid("g_403")).await,
+        Err(rejected("user_suspended"))
+    );
+}
+
+#[tokio::test]
 async fn users_and_handles() {
     let server = MockServer::start().await;
     mount(

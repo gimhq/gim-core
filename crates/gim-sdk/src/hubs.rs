@@ -579,6 +579,8 @@ impl<S: StateStore + 'static> Client<S> {
         hub_id: &str,
         rejected: Option<&AccessToken>,
     ) -> TransportResult<AccessToken> {
+        // The suspension deleted the session on the hub.
+        self.check_suspended(Some(hub_id))?;
         let held = self.handles().get(hub_id).and_then(|h| h.token.clone());
         match held {
             Some(held) if held.fresh() && Some(&held.token) != rejected => Ok(held.token),
@@ -588,7 +590,10 @@ impl<S: StateStore + 'static> Client<S> {
 
     /// Signs in on the verified hub `hub_id`; the challenge must name
     /// `hub_id` and its proven URL. Keeps and persists the new token.
+    /// [`TransportError::UserSuspended`] without a request while the hub
+    /// suspended the user less than [`crate::auth::SUSPENDED_RETRY`] ago.
     pub(crate) async fn renew_hub_token(&self, hub_id: &str) -> TransportResult<AccessToken> {
+        self.check_suspended(Some(hub_id))?;
         let (url, transport) = self
             .handles()
             .get(hub_id)
@@ -605,7 +610,9 @@ impl<S: StateStore + 'static> Client<S> {
         let key = device_key(&*self.inner.secrets)?;
         let (token, _) = self
             .sign_in_on(&*transport, &session.device, &key, &audience)
-            .await?;
+            .await
+            .inspect_err(|err| self.mark_suspended(Some(hub_id), err))?;
+        self.clear_suspended(Some(hub_id));
         tracing::info!(%hub_id, "signed in on a listed hub");
         if let Some(handle) = self.handles().get_mut(hub_id) {
             handle.token = Some(HubToken {

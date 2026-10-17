@@ -275,6 +275,45 @@ rejecting, so a freshly published record is not refused.
 not host: outbound requests with an acting user are only sent for hosted users, otherwise the
 client call fails with 403 `hosting_record_required` (§9.3).
 
+### 3.8 Dead connections, reconnect and retry (H11)
+
+A hub that dies (crash, `docker stop`, host loss) does not close its connections: it exits
+without sending a QUIC `CONNECTION_CLOSE`. Its peers keep the dead connection open until something
+detects it, and the libp2p request-response behaviour spreads requests round-robin over all open
+connections to a PeerId. When the hub comes back on the same runtime key and address, its peers
+hold the dead connection next to the new one the restarted hub dials, and every other request
+lands on the dead one. A restarted QUIC endpoint does not reset the old connection either: quinn
+signs its connection ids with a key that is random per process, so the new endpoint drops the
+peer's packets for old connection ids as invalid instead of answering with a stateless reset.
+The dead connection therefore lives until the QUIC idle timeout (10 s); a dead TCP connection
+whose host vanished without a FIN lives until the swarm's 300 s idle timeout.
+
+Rules:
+
+1. An outbound request that times out (`GIM_HUB_S2S_TIMEOUT_SECONDS`) or loses its connection
+   (closed, reset, or an I/O error on the stream; not a malformed frame) closes every connection
+   to the peer that was open when the request was sent; connections opened since are kept.
+2. Idempotent ops are then retried once: the hub is resolved again (§3.5), which redials it, and
+   the request is sent on the new connection. Every op is retried except `ClaimKeyPackage`, which
+   consumes one-time KeyPackages and is not idempotent (s2s.md "Idempotency"); `Hello` has its
+   own retry (§3.2). A claim that failed this way moves on to the user's next hub as before.
+3. The redial and the retry together get one more S2S timeout. A request to a hub that is down
+   therefore fails after at most one more timeout than before: with a dead connection open, 503
+   `peer_unavailable` (with `Retry-After`) comes after at most 2 × `GIM_HUB_S2S_TIMEOUT_SECONDS`
+   (plus the time `HELLO_REQUIRED` handling takes, unchanged). A hub that just restarted answers
+   the first request after at most one timeout plus a redial.
+4. A retried `SubmitCommit` or `SubmitMessage` the owning hub had already sequenced returns its
+   original `seq` with `duplicate = true`, so the client may see 200 instead of 201; receivers
+   dedup retried `Deliver`s by `message_id` and `(gid, seq)`.
+5. libp2p ping runs on every connection (multihoming.md §8); a ping unanswered within the S2S
+   timeout closes its connection, which bounds the life of a dead connection without traffic to
+   about one ping interval plus one timeout.
+
+The fed suite exercises this after every `docker compose stop|start` of a hub; the in-process
+test `transport::tests::first_requests_after_a_peer_restart_succeed` reproduces it
+deterministically (the peer is killed behind a cut UDP relay, then restarted on the same key and
+address).
+
 ## 4. Hosting records
 
 ### 4.1 Lifecycle

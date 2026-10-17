@@ -76,7 +76,7 @@ pub use service::{
     BlobCreated, CursorExpiredError, ErrorBody, ErrorResponse, Health, HealthStatus, HubInfo,
     HubQuery, PushRegistration, StaleEpochError, CURSOR_EXPIRED, DUPLICATE_KEY_PACKAGE,
     HOSTING_RECORD_REQUIRED, INVALID_HOSTING_RECORD, KP_NOT_CLAIMED, PEER_REFUSED,
-    PEER_UNAVAILABLE, STALE_EPOCH, STALE_HOSTING_RECORD,
+    PEER_UNAVAILABLE, STALE_EPOCH, STALE_HOSTING_RECORD, USER_SUSPENDED,
 };
 pub use users::{
     CreateLinkBundleRequest, DeviceList, Handle, LinkBundle, LinkBundleCreated, LinkBundleQuery,
