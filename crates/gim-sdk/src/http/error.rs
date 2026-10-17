@@ -75,6 +75,21 @@ pub(super) fn from_status(
     }
 }
 
+/// Maps the error of a sign-in request (`POST /v2/auth/challenge`,
+/// `POST /v2/auth/session`): 403 `user_suspended` becomes
+/// [`TransportError::UserSuspended`]. Only these two endpoints return that
+/// code; elsewhere it stays a generic [`TransportError::Rejected`].
+pub(super) fn sign_in(err: TransportError) -> TransportError {
+    match err {
+        TransportError::Rejected {
+            status: 403, code, ..
+        } if code == v2::USER_SUSPENDED => TransportError::UserSuspended {
+            hub_id: String::new(),
+        },
+        err => err,
+    }
+}
+
 /// Maps a failed send or body read. Undecodable bodies are the server's
 /// fault; everything else (connect, TLS, timeout, reset) is a retryable
 /// [`TransportError::Network`]. The URL in the message loses its query.

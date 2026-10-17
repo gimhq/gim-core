@@ -3,6 +3,7 @@
 //! expired token.
 
 use std::future::Future;
+use std::time::{Duration, Instant};
 
 use gim_base::StateStore;
 use gim_common::{now_ms, DeviceRef};
@@ -21,6 +22,12 @@ use crate::{Client, SecretStorage};
 
 /// A token is renewed this long before it expires.
 const TOKEN_RENEW_MARGIN_MS: u64 = 30_000;
+
+/// After a hub answered a sign-in with 403 `user_suspended`, no sign-in is
+/// attempted there for this long: calls that need a session on that hub
+/// fail with [`TransportError::UserSuspended`] at once, and the sync loop
+/// of that hub waits this long before it reconnects.
+pub(crate) const SUSPENDED_RETRY: Duration = Duration::from_secs(10 * 60);
 
 /// Errors that may mean the session token was rejected, or that the hub
 /// needs the user's hosting record first.
@@ -156,6 +163,8 @@ impl<S: StateStore + 'static> Client<S> {
     /// The current token, renewed first if it expired.
     pub(crate) async fn valid_token(&self) -> Result<AccessToken, TransportError> {
         let session = self.session().ok_or(TransportError::Unauthorized)?;
+        // The suspension deleted the session on the hub.
+        self.check_suspended(None)?;
         if expired(&session) {
             return self.renew_token(None).await;
         }
@@ -165,13 +174,17 @@ impl<S: StateStore + 'static> Client<S> {
     /// Signs in again, unless another task already replaced `rejected`
     /// (or, without one, the expired token). If the hub refuses this device
     /// for good ([`TransportError::DeviceNotActive`]), the session is
-    /// cleared: the client is signed out.
+    /// cleared: the client is signed out. If it suspended the user
+    /// ([`TransportError::UserSuspended`]), the session is kept and no
+    /// sign-in is attempted for [`SUSPENDED_RETRY`].
     pub(crate) async fn renew_token(
         &self,
         rejected: Option<&AccessToken>,
     ) -> Result<AccessToken, TransportError> {
         let _guard = self.inner.auth_lock.lock().await;
         let session = self.session().ok_or(TransportError::Unauthorized)?;
+        // Also for the tasks that waited for a sign-in that was suspended.
+        self.check_suspended(None)?;
         let current = match rejected {
             Some(rejected) => &session.token != rejected,
             None => true,
@@ -189,8 +202,13 @@ impl<S: StateStore + 'static> Client<S> {
                 }
                 return Err(TransportError::DeviceNotActive(reason));
             }
+            Err(err @ TransportError::UserSuspended { .. }) => {
+                self.mark_suspended(None, &err);
+                return Err(err);
+            }
             signed_in => signed_in?,
         };
+        self.clear_suspended(None);
         let renewed = Session {
             device: session.device,
             token: token.token.clone(),
@@ -255,7 +273,8 @@ impl<S: StateStore + 'static> Client<S> {
     /// `audience` ([`TransportError::HubNotVerified`] for another URL or
     /// challenge version). A rejected challenge (`invalid_challenge`) is
     /// retried once with a new one; [`TransportError::DeviceNotActive`] if
-    /// the hub refuses the device.
+    /// the hub refuses the device, [`TransportError::UserSuspended`] (with
+    /// the hub id, as far as known) if it suspended the user.
     pub(crate) async fn sign_in_on(
         &self,
         transport: &dyn Transport,
@@ -263,6 +282,14 @@ impl<S: StateStore + 'static> Client<S> {
         key: &DeviceSigningKey,
         audience: &Audience,
     ) -> Result<(SessionToken, String), TransportError> {
+        let suspended = |hub_id: Option<&str>| TransportError::UserSuspended {
+            hub_id: audience
+                .hub_id
+                .as_deref()
+                .or(hub_id)
+                .unwrap_or_default()
+                .to_string(),
+        };
         let mut retried = false;
         loop {
             let challenge = match transport.auth_challenge(device).await {
@@ -270,6 +297,7 @@ impl<S: StateStore + 'static> Client<S> {
                 Err(TransportError::NotFound(reason)) => {
                     return Err(TransportError::DeviceNotActive(reason))
                 }
+                Err(TransportError::UserSuspended { .. }) => return Err(suspended(None)),
                 challenge => challenge?,
             };
             check_challenge(&challenge, audience)?;
@@ -285,6 +313,9 @@ impl<S: StateStore + 'static> Client<S> {
                 Err(SessionError::Rejected(reason)) => {
                     return Err(TransportError::DeviceNotActive(reason))
                 }
+                Err(SessionError::Transport(TransportError::UserSuspended { .. })) => {
+                    return Err(suspended(Some(&challenge.hub_id)))
+                }
                 Err(SessionError::Transport(err)) => return Err(err),
             }
         }
@@ -294,7 +325,50 @@ impl<S: StateStore + 'static> Client<S> {
     pub(crate) fn persist_session(&self, session: &Session) -> crate::Result<()> {
         self.write_session_secret(session)
     }
+
+    /// [`TransportError::UserSuspended`] while a sign-in on `hub` (the home
+    /// hub: `None`) answered `user_suspended` less than
+    /// [`SUSPENDED_RETRY`] ago.
+    pub(crate) fn check_suspended(&self, hub: Option<&str>) -> Result<(), TransportError> {
+        let suspended = self.suspended();
+        match suspended.get(&hub.map(str::to_string)) {
+            Some((hub_id, until)) if Instant::now() < *until => {
+                Err(TransportError::UserSuspended {
+                    hub_id: hub_id.clone(),
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Records that a sign-in on `hub` (the home hub: `None`) answered
+    /// `err`, a [`TransportError::UserSuspended`].
+    pub(crate) fn mark_suspended(&self, hub: Option<&str>, err: &TransportError) {
+        let TransportError::UserSuspended { hub_id } = err else {
+            return;
+        };
+        tracing::warn!(%hub_id, retry = ?SUSPENDED_RETRY, "the user is suspended on a hub");
+        let until = Instant::now() + SUSPENDED_RETRY;
+        self.suspended()
+            .insert(hub.map(str::to_string), (hub_id.clone(), until));
+    }
+
+    /// A sign-in on `hub` (the home hub: `None`) succeeded.
+    pub(crate) fn clear_suspended(&self, hub: Option<&str>) {
+        self.suspended().remove(&hub.map(str::to_string));
+    }
+
+    fn suspended(&self) -> std::sync::MutexGuard<'_, Suspensions> {
+        self.inner
+            .suspended
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
 }
+
+/// The hubs that answered a sign-in with `user_suspended` (the home hub:
+/// `None`): the hub id for the error and the end of the wait.
+pub(crate) type Suspensions = std::collections::HashMap<Option<String>, (String, Instant)>;
 
 #[cfg(test)]
 mod tests {

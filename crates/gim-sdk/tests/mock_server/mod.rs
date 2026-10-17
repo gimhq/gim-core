@@ -98,6 +98,11 @@ pub struct Controls {
     pub challenge_url: Mutex<Option<String>>,
     /// `POST /v2/auth/session` requests served.
     pub sessions: AtomicUsize,
+    /// The user is suspended: tokens are rejected (401, or close 4401 on
+    /// streams), and sign-ins fail with 403 `user_suspended`.
+    pub suspended: AtomicBool,
+    /// Every request served.
+    pub requests: AtomicUsize,
 }
 
 impl Controls {
@@ -238,6 +243,7 @@ impl MockServer {
 }
 
 async fn down(State(controls): State<Arc<Controls>>, request: Request, next: Next) -> Response {
+    controls.requests.fetch_add(1, Ordering::SeqCst);
     if controls.down.load(Ordering::SeqCst) {
         return error(StatusCode::SERVICE_UNAVAILABLE, "unavailable");
     }
@@ -331,7 +337,9 @@ fn member(device: &DeviceRef) -> v2::GroupMember {
 impl AppState {
     #[allow(clippy::result_large_err)]
     fn token(&self, headers: &HeaderMap) -> Result<AccessToken, TransportError> {
-        if self.controls.reject.load(Ordering::SeqCst) {
+        if self.controls.reject.load(Ordering::SeqCst)
+            || self.controls.suspended.load(Ordering::SeqCst)
+        {
             return Err(TransportError::Unauthorized);
         }
         headers
@@ -520,6 +528,9 @@ async fn auth_challenge(
     Json(request): Json<v2::AuthChallengeRequest>,
 ) -> Response {
     state.controls.challenges.fetch_add(1, Ordering::SeqCst);
+    if state.controls.suspended.load(Ordering::SeqCst) {
+        return error(StatusCode::FORBIDDEN, v2::USER_SUSPENDED);
+    }
     let result = async {
         let device = DeviceRef::parse(&request.user_id, &request.device_id).map_err(invalid)?;
         let mut challenge = state.transport.auth_challenge(&device).await?;
@@ -548,6 +559,9 @@ async fn create_session(
     state.controls.sessions.fetch_add(1, Ordering::SeqCst);
     if state.controls.reject.load(Ordering::SeqCst) {
         return error(StatusCode::UNAUTHORIZED, "device_not_active");
+    }
+    if state.controls.suspended.load(Ordering::SeqCst) {
+        return error(StatusCode::FORBIDDEN, v2::USER_SUSPENDED);
     }
     match state.transport.create_session(request.response).await {
         Ok(session) => Json(v2::Session {
@@ -1198,7 +1212,10 @@ async fn serve_stream(
     let mut sent = 0;
     loop {
         // The session is re-validated with every batch, like the hub.
-        if controls.reject.load(Ordering::SeqCst) || service.authenticate(&token).is_err() {
+        if controls.reject.load(Ordering::SeqCst)
+            || controls.suspended.load(Ordering::SeqCst)
+            || service.authenticate(&token).is_err()
+        {
             return close(&mut socket, v2::STREAM_CLOSE_UNAUTHORIZED).await;
         }
         if controls.kick.swap(false, Ordering::SeqCst) || controls.down.load(Ordering::SeqCst) {

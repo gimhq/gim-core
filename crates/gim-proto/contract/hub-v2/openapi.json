@@ -70,6 +70,16 @@
               }
             }
           },
+          "403": {
+            "description": "An admin suspended the user: `{\"error\":{\"code\":\"user_suspended\",\"message\":\"user is suspended\"}}`. Only the two sign-in endpoints return `user_suspended`; the suspension deleted the user's sessions, so endpoints called with an earlier token answer 401 `unauthorized`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "404": {
             "description": "No DeviceList stored for the user, or the device is not active in it (`not_found`)",
             "content": {
@@ -89,7 +99,7 @@
           "auth"
         ],
         "summary": "Answer a challenge and obtain a device token",
-        "description": "Verifies the gim-core AuthResponse against the user's stored DeviceList and this hub's `hub_id` (and, with a public URL, a version 2 challenge whose `audience_url` is this hub's `public_url`; without one, only version 1), then consumes the challenge: its nonce must have been issued by this hub for the same user and device, be unexpired and unused. The device must still be active (not revoked). The token is revoked when a later DeviceList revokes the device.",
+        "description": "Verifies the gim-core AuthResponse against the user's stored DeviceList and this hub's `hub_id` (and, with a public URL, a version 2 challenge whose `audience_url` is this hub's `public_url`; without one, only version 1), then consumes the challenge: its nonce must have been issued by this hub for the same user and device, be unexpired and unused. The device must still be active (not revoked) and the user not suspended by an admin. The token is revoked when a later DeviceList revokes the device or an admin suspends the user.",
         "operationId": "create_session",
         "requestBody": {
           "content": {
@@ -124,6 +134,16 @@
           },
           "401": {
             "description": "Unknown, used or expired challenge, one issued by another hub, for another URL or another device, or of the wrong version (`invalid_challenge`); bad signature (`invalid_signature`); device revoked or not in the DeviceList (`device_not_active`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "An admin suspended the user: `{\"error\":{\"code\":\"user_suspended\",\"message\":\"user is suspended\"}}`. Only the two sign-in endpoints return `user_suspended`; the suspension deleted the user's sessions, so endpoints called with an earlier token answer 401 `unauthorized`",
             "content": {
               "application/json": {
                 "schema": {
@@ -2938,8 +2958,8 @@
           },
           "version": {
             "type": "string",
-            "description": "Hub version.",
-            "example": "0.1.0"
+            "description": "Hub release version: the version the lode supervisor launched\n(`LODE_ACTIVE_VERSION`), else the package version.",
+            "example": "0.3.0"
           }
         }
       },
@@ -3207,8 +3227,8 @@
           },
           "version": {
             "type": "string",
-            "description": "Hub version.",
-            "example": "0.1.0"
+            "description": "Hub release version: the version the lode supervisor launched\n(`LODE_ACTIVE_VERSION`), else the package version.",
+            "example": "0.3.0"
           }
         }
       },
