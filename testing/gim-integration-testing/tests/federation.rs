@@ -9,16 +9,18 @@ use std::fs;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use gim_base::model::Membership;
+use gim_base::model::{Membership, SendFailure, SendState};
 use gim_base::StateReader;
 use gim_common::{ClientId, DeviceRef, GroupId, UserId};
 use gim_core::{ChatState, GimError, MediaRef, MessageContent, TimelineItem};
 use gim_integration_testing::federation::{Federation, Hub, FED_TIMEOUT};
+use gim_integration_testing::policy::DenyList;
 use gim_integration_testing::sdk::{FaultyHub, SdkDevice};
 use gim_integration_testing::{
     eventually, eventually_within, member_ids, message, text, Mirror, TestUser,
 };
 use gim_sdk::transport::{PostError, Transport, TransportError};
+use gim_sdk::ClientError;
 
 /// A valid 2x2 RGB PNG.
 const PNG: &[u8] = &[
@@ -640,4 +642,48 @@ async fn non_allowlisted_hub_refused() {
         ),
         "hub a resolved eve's hosting record"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a gim-hub federation: GIM_FEDERATION=1 scripts/integration-test.sh"]
+async fn peer_hub_policy_refuses_a_user() {
+    let Some(fed) = Federation::from_env("peer_hub_policy_refuses_a_user") else {
+        return;
+    };
+    let alice = SdkDevice::create(&fed.a.url, "Alice").await;
+    let bob = SdkDevice::create(&fed.b.url, "Bob").await;
+    let carol = SdkDevice::create(&fed.b.url, "Carol").await;
+    let g = bob
+        .client
+        .create_group_chat(Some("Owned by b".into()), &[alice.user_id()])
+        .await
+        .unwrap();
+    assert!(owned_by(g.as_str(), &fed.b), "{g}");
+    sync_until("alice joined", &alice, |d| joined(d, &g)).await;
+
+    // Hub b stops admitting alice, a user of hub a.
+    let alice_id = alice.user_id().to_string();
+    let policy = DenyList::new(&fed.b.container, &[&alice_id]);
+    policy.applied().await;
+
+    // Her message to the group b owns fails for good, with the cause.
+    let id = alice.client.send_text(&g, "hello?", None).await.unwrap();
+    let message = alice.store.message(&id).unwrap().unwrap();
+    assert_eq!(message.send_state, Some(SendState::Failed));
+    let entry = alice.store.outbox_entry(&id).unwrap().unwrap();
+    assert_eq!(
+        entry.failure,
+        Some(SendFailure::NotAdmittedByPeer),
+        "{entry:?}"
+    );
+    // Not retried in the background.
+    assert!(alice.client.flush_outbox().await.unwrap().is_none());
+
+    // Claiming a user of hub b reports the refusal.
+    let dm = alice.client.create_direct_chat(&carol.user_id()).await;
+    assert!(
+        matches!(&dm, Err(ClientError::ContactNotAdmitted { user_ids }) if *user_ids == [carol.user_id()]),
+        "{dm:?}"
+    );
+    drop(policy);
 }

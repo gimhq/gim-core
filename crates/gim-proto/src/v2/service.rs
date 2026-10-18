@@ -23,6 +23,13 @@ pub const DUPLICATE_KEY_PACKAGE: &str = "duplicate_key_package";
 /// Error code of a 403 on `POST /v2/auth/challenge` and
 /// `POST /v2/auth/session` (and nowhere else): an admin suspended the user.
 pub const USER_SUSPENDED: &str = "user_suspended";
+/// Error code of a 403 on `PUT /v2/users/{user_id}/device-list` (first
+/// upload only), `POST /v2/auth/challenge` and `POST /v2/auth/session`
+/// (and nowhere else): the hub's user policy does not admit the user.
+pub const USER_NOT_ADMITTED: &str = "user_not_admitted";
+/// Error code of a 403 on `POST /v2/groups/{gid}/commits` and
+/// `/messages`: the hub owning the group does not admit the caller.
+pub const NOT_ADMITTED_BY_PEER: &str = "not_admitted_by_peer";
 /// Marker in the message of a 400 `validation_failed` on
 /// `POST /v2/groups/{gid}/commits`: an Add's KeyPackage was not claimed
 /// through this hub.

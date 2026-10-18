@@ -256,6 +256,122 @@ async fn user_suspended_maps_on_the_sign_in_endpoints_only() {
 }
 
 #[tokio::test]
+async fn user_not_admitted_maps_on_registration_and_sign_in_only() {
+    let server = MockServer::start().await;
+    let refused = ResponseTemplate::new(403).set_body_json(error_body("user_not_admitted"));
+    Mock::given(method("PUT"))
+        .and(path(format!("/v2/users/{}/device-list", uid(1))))
+        .respond_with(refused.clone())
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v2/auth/challenge"))
+        .respond_with(refused.clone())
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v2/auth/session"))
+        .respond_with(refused.clone())
+        .mount(&server)
+        .await;
+    mount(&server, "GET", "/v2/groups/g_403", refused.clone()).await;
+    mount(&server, "POST", "/v2/groups/g_403/messages", refused).await;
+    let http = transport(&server);
+    let not_admitted = TransportError::UserNotAdmitted {
+        hub_id: String::new(),
+    };
+    assert_eq!(
+        http.put_device_list(&user(1), vec![1]).await,
+        Err(not_admitted.clone())
+    );
+    assert_eq!(
+        http.auth_challenge(&device(1)).await,
+        Err(not_admitted.clone())
+    );
+    assert_eq!(
+        http.create_session(vec![1]).await,
+        Err(SessionError::Transport(not_admitted))
+    );
+    // Only those endpoints return `user_not_admitted`.
+    let rejected = TransportError::Rejected {
+        status: 403,
+        code: "user_not_admitted".into(),
+        message: "nope".into(),
+    };
+    assert_eq!(
+        http.group_info(&token(), &gid("g_403")).await,
+        Err(rejected.clone())
+    );
+    assert_eq!(
+        http.post_message(
+            &token(),
+            &gid("g_403"),
+            ClientId::new("c1").unwrap(),
+            vec![1]
+        )
+        .await,
+        Err(PostError::Transport(rejected))
+    );
+}
+
+#[tokio::test]
+async fn not_admitted_by_peer_maps_on_group_posts_only() {
+    let server = MockServer::start().await;
+    let refused = ResponseTemplate::new(403).set_body_json(error_body("not_admitted_by_peer"));
+    mount(
+        &server,
+        "POST",
+        "/v2/groups/h2%2F1/messages",
+        refused.clone(),
+    )
+    .await;
+    mount(
+        &server,
+        "POST",
+        "/v2/groups/h2%2F1/commits",
+        refused.clone(),
+    )
+    .await;
+    mount(&server, "GET", "/v2/groups/h2%2F1", refused).await;
+    let http = transport(&server);
+    let g = gid("h2/1");
+    let not_admitted = PostError::Transport(TransportError::NotAdmittedByPeer {
+        hub_id: "h2".into(),
+        group_id: "h2/1".into(),
+    });
+    assert_eq!(
+        http.post_message(&token(), &g, ClientId::new("c1").unwrap(), vec![1])
+            .await,
+        Err(not_admitted.clone())
+    );
+    let commit = OutgoingCommit {
+        client_id: ClientId::new("c2").unwrap(),
+        mls_message: vec![1],
+        welcome: None,
+        welcome_recipients: vec![],
+    };
+    assert_eq!(
+        http.submit_commit(&token(), &g, commit).await,
+        Err(not_admitted)
+    );
+    let rejected = TransportError::Rejected {
+        status: 403,
+        code: "not_admitted_by_peer".into(),
+        message: "nope".into(),
+    };
+    assert_eq!(http.group_info(&token(), &g).await, Err(rejected));
+    // A definite answer: not resent, not a peer failure.
+    let PostError::Transport(err) = http
+        .post_message(&token(), &g, ClientId::new("c3").unwrap(), vec![1])
+        .await
+        .unwrap_err()
+    else {
+        unreachable!()
+    };
+    assert!(!err.outcome_unknown());
+}
+
+#[tokio::test]
 async fn users_and_handles() {
     let server = MockServer::start().await;
     mount(
@@ -352,7 +468,10 @@ async fn claim_key_packages_by_user() {
         .and(path("/v2/keypackages/claim"))
         .and(header("authorization", BEARER))
         .and(body_json(json!({
-            "targets": [{ "user_id": uid(2) }, { "user_id": uid(3) }, { "user_id": uid(4) }],
+            "targets": [
+                { "user_id": uid(2) }, { "user_id": uid(3) }, { "user_id": uid(4) },
+                { "user_id": uid(5) },
+            ],
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "key_packages": [{
@@ -360,11 +479,12 @@ async fn claim_key_packages_by_user() {
             }],
             "missing": [{ "user_id": uid(3) }],
             "unavailable": [{ "user_id": uid(4) }],
+            "not_admitted": [{ "user_id": uid(5) }],
         })))
         .mount(&server)
         .await;
     let claimed = transport(&server)
-        .claim_key_packages_federated(&token(), &[user(2), user(3), user(4)])
+        .claim_key_packages_federated(&token(), &[user(2), user(3), user(4), user(5)])
         .await
         .unwrap();
     assert_eq!(
@@ -375,6 +495,7 @@ async fn claim_key_packages_by_user() {
                 key_package: vec![4, 5],
             }],
             unavailable: vec![user(4)],
+            not_admitted: vec![user(5)],
         }
     );
 }

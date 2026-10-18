@@ -475,7 +475,8 @@ impl<S: StateStore + 'static> Client<S> {
             Err(
                 err @ (TransportError::Network(_)
                 | TransportError::Unauthorized
-                | TransportError::UserSuspended { .. }),
+                | TransportError::UserSuspended { .. }
+                | TransportError::UserNotAdmitted { .. }),
             ) => return Err(err.into()),
             Err(err) if strict && err.outcome_unknown() => return Err(err.into()),
             Err(err) => {

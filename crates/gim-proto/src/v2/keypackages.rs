@@ -44,6 +44,10 @@ pub struct ClaimKeyPackagesResponse {
     /// Targets on another hub that could not be reached, refused or timed
     /// out (federation; retryable).
     pub unavailable: Vec<ClaimTarget>,
+    /// Targets on another hub whose user policy does not admit the caller
+    /// (not retryable). Absent from hubs before 0.4.0.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_admitted: Vec<ClaimTarget>,
 }
 
 /// `ClaimedKeyPackage`.

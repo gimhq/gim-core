@@ -9,8 +9,8 @@ use gim_common::{now_ms, GroupId};
 use gim_proto::envelope::Content;
 use gim_sdk::testing::FakeTransport;
 use gim_ui::{
-    FixedOffset, MessageContent, MessageItem, ReactionGroup, SendState, TimeZone, Timeline,
-    TimelineItem, TimelineOptions, Vector, VectorDiff,
+    FixedOffset, MessageContent, MessageItem, ReactionGroup, SendFailure, SendState, TimeZone,
+    Timeline, TimelineItem, TimelineOptions, Vector, VectorDiff,
 };
 
 fn messages(items: &Vector<TimelineItem>) -> Vec<&MessageItem> {
@@ -194,7 +194,8 @@ async fn own_pending_failed_and_reply_preview() {
     assert_eq!(
         failed.send_state,
         Some(SendState::Failed {
-            reason: "rejected".into()
+            reason: "rejected".into(),
+            cause: SendFailure::Rejected,
         })
     );
     let reply = find(&items, &yes);
@@ -241,7 +242,7 @@ async fn own_pending_failed_and_reply_preview() {
     let last = items[4].as_message().unwrap();
     assert_eq!(body(&items[4]), "hello?");
     assert!(
-        matches!(&last.send_state, Some(SendState::Failed { reason }) if reason.contains("403 not_member")),
+        matches!(&last.send_state, Some(SendState::Failed { reason, cause: SendFailure::Rejected }) if reason.contains("403 not_member")),
         "{:?}",
         last.send_state
     );

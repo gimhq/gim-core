@@ -101,6 +101,16 @@ pub struct Controls {
     /// The user is suspended: tokens are rejected (401, or close 4401 on
     /// streams), and sign-ins fail with 403 `user_suspended`.
     pub suspended: AtomicBool,
+    /// The user policy does not admit the user: tokens are rejected (401,
+    /// or close 4401 on streams), sign-ins fail with 403
+    /// `user_not_admitted` (after `suspended`), and so does the first
+    /// DeviceList upload of a user.
+    pub not_admitted: AtomicBool,
+    /// Commits and messages of these groups answer 403
+    /// `not_admitted_by_peer`.
+    pub refused_groups: Mutex<BTreeSet<GroupId>>,
+    /// Claim targets reported under `not_admitted` (nothing is claimed).
+    pub claim_not_admitted: Mutex<BTreeSet<UserId>>,
     /// Every request served.
     pub requests: AtomicUsize,
 }
@@ -339,6 +349,7 @@ impl AppState {
     fn token(&self, headers: &HeaderMap) -> Result<AccessToken, TransportError> {
         if self.controls.reject.load(Ordering::SeqCst)
             || self.controls.suspended.load(Ordering::SeqCst)
+            || self.controls.not_admitted.load(Ordering::SeqCst)
         {
             return Err(TransportError::Unauthorized);
         }
@@ -353,6 +364,25 @@ impl AppState {
     fn authenticate(&self, headers: &HeaderMap) -> Result<DeviceRef, TransportError> {
         let token = self.token(headers)?;
         Ok(self.transport.service().authenticate(token.as_str())?)
+    }
+
+    /// 403 `not_admitted_by_peer` for a post to a refused group.
+    #[allow(clippy::result_large_err)]
+    fn refused(&self, group_id: &GroupId) -> Result<(), TransportError> {
+        if self
+            .controls
+            .refused_groups
+            .lock()
+            .unwrap()
+            .contains(group_id)
+        {
+            return Err(TransportError::Rejected {
+                status: 403,
+                code: v2::NOT_ADMITTED_BY_PEER.into(),
+                message: "a peer hub does not admit this user".into(),
+            });
+        }
+        Ok(())
     }
 
     /// The device of the token if it is a member of the group.
@@ -531,6 +561,9 @@ async fn auth_challenge(
     if state.controls.suspended.load(Ordering::SeqCst) {
         return error(StatusCode::FORBIDDEN, v2::USER_SUSPENDED);
     }
+    if state.controls.not_admitted.load(Ordering::SeqCst) {
+        return error(StatusCode::FORBIDDEN, v2::USER_NOT_ADMITTED);
+    }
     let result = async {
         let device = DeviceRef::parse(&request.user_id, &request.device_id).map_err(invalid)?;
         let mut challenge = state.transport.auth_challenge(&device).await?;
@@ -563,6 +596,9 @@ async fn create_session(
     if state.controls.suspended.load(Ordering::SeqCst) {
         return error(StatusCode::FORBIDDEN, v2::USER_SUSPENDED);
     }
+    if state.controls.not_admitted.load(Ordering::SeqCst) {
+        return error(StatusCode::FORBIDDEN, v2::USER_NOT_ADMITTED);
+    }
     match state.transport.create_session(request.response).await {
         Ok(session) => Json(v2::Session {
             token: session.token.as_str().to_string(),
@@ -583,6 +619,15 @@ async fn put_device_list(
     let result = async {
         let user = user_id(&user)?;
         let list = request.device_list;
+        if state.controls.not_admitted.load(Ordering::SeqCst)
+            && state.transport.device_list(None, &user).await?.is_none()
+        {
+            return Err(TransportError::Rejected {
+                status: 403,
+                code: v2::USER_NOT_ADMITTED.into(),
+                message: "user is not admitted on this hub".into(),
+            });
+        }
         state.transport.put_device_list(&user, list.clone()).await?;
         Ok(v2::DeviceList {
             user_id: user.to_string(),
@@ -811,6 +856,9 @@ async fn claim_key_packages(
             .iter()
             .map(|t| user_id(&t.user_id))
             .collect::<Result<Vec<_>, _>>()?;
+        let refused = state.controls.claim_not_admitted.lock().unwrap().clone();
+        let (not_admitted, users): (Vec<UserId>, Vec<UserId>) =
+            users.into_iter().partition(|u| refused.contains(u));
         let claimed = state.transport.claim_key_packages(&token, &users).await?;
         let missing = users
             .iter()
@@ -832,6 +880,13 @@ async fn claim_key_packages(
                 .collect(),
             missing,
             unavailable: Vec::new(),
+            not_admitted: not_admitted
+                .iter()
+                .map(|u| v2::ClaimTarget {
+                    user_id: u.to_string(),
+                    device_id: None,
+                })
+                .collect(),
         })
     }
     .await;
@@ -899,6 +954,7 @@ async fn submit_commit(
     let result = async {
         let token = state.token(&headers)?;
         let group_id = group_id(&gid)?;
+        state.refused(&group_id)?;
         let client_id = ClientId::new(request.client_id).map_err(invalid)?;
         let welcome_recipients = request
             .welcome_recipients
@@ -940,6 +996,7 @@ async fn post_message(
         let device = state.authenticate(&headers)?;
         let token = state.token(&headers)?;
         let group_id = group_id(&gid)?;
+        state.refused(&group_id)?;
         let client_id = ClientId::new(request.client_id).map_err(invalid)?;
         let seq = state
             .transport
@@ -1214,6 +1271,7 @@ async fn serve_stream(
         // The session is re-validated with every batch, like the hub.
         if controls.reject.load(Ordering::SeqCst)
             || controls.suspended.load(Ordering::SeqCst)
+            || controls.not_admitted.load(Ordering::SeqCst)
             || service.authenticate(&token).is_err()
         {
             return close(&mut socket, v2::STREAM_CLOSE_UNAUTHORIZED).await;

@@ -146,6 +146,24 @@ pub enum OutboxKind {
     MediaUpload(PendingMedia),
 }
 
+/// Why an outbox entry became `Failed`. Apps offer no retry for the
+/// refusals (`UserSuspended`, `UserNotAdmitted`, `NotAdmittedByPeer`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SendFailure {
+    /// A hub suspended the user (403 `user_suspended` on sign-in).
+    UserSuspended,
+    /// The user's hub does not admit the user (403 `user_not_admitted`).
+    UserNotAdmitted,
+    /// The hub owning the group does not admit the user (403
+    /// `not_admitted_by_peer`).
+    NotAdmittedByPeer,
+    /// Another definite refusal of the hub (4xx): resending it unchanged
+    /// cannot succeed.
+    Rejected,
+    /// Anything else, e.g. retries used up or a local failure.
+    Other,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OutboxState {
     /// Waiting for (another) attempt at `next_attempt_at_ms`.
@@ -176,6 +194,9 @@ pub struct OutboxEntry {
     pub last_error: Option<String>,
     pub prepared: Option<PreparedPayload>,
     pub created_at_ms: u64,
+    /// Why the entry is `Failed`; `None` while `Pending`, and for entries
+    /// that failed before the cause was recorded.
+    pub failure: Option<SendFailure>,
 }
 
 impl OutboxEntry {

@@ -244,6 +244,7 @@ fn cases() -> Vec<Case> {
                 "key_packages": [{"user_id": USER, "device_id": DEVICE, "key_package": b(), "last_resort": false}],
                 "missing": [{"user_id": USER_2}],
                 "unavailable": [{"user_id": USER_2, "device_id": DEVICE_2}],
+                "not_admitted": [{"user_id": USER_2}],
             }),
             json!({"key_packages": [], "missing": [], "unavailable": []}),
         ),
