@@ -69,7 +69,8 @@ Error       { ErrorCode code; string message; optional uint64 current_epoch; str
 - `Error.current_epoch` is set with `STALE_EPOCH` / `CONFLICT`: the group's current epoch at the
   owning hub. `Error.client_code` is the client API error code a member hub should surface when the
   owning hub rejected on behalf of group policy or validation (e.g. `not_member`, `forbidden`,
-  `validation_failed`); empty otherwise.
+  `validation_failed`) or of its user policy (`user_not_admitted`, see
+  [User policy](#user-policy)); empty otherwise.
 
 ## Peer binding
 
@@ -171,6 +172,8 @@ Notes:
 - The multi-homing operations (`NotifyHostingRecord`, `SeedReplica`, `CopyPendingWelcomes`) are
   specified in [`multihoming.md`](multihoming.md) §4.2-§4.4. All three are served with
   federation.
+- Operations acting for a user are also subject to the responder's user policy; see
+  [User policy](#user-policy).
 - `FetchBlob` returns bytes `[offset, offset + len(data))` of the blob and its total `size`;
   `max_len = 0` means the responder's chunk size, and the responder caps `max_len` at 4 MiB.
   `data` is empty only when `offset = size`; `offset > size` fails with `INVALID`. The requester
@@ -180,12 +183,32 @@ Notes:
   partial fetch is never served; an interrupted fetch (failure, restart) starts over. Specified
   in [`federation.md`](federation.md) §5.6.
 
+### User policy
+
+A hub's user policy (`GIM_HUB_USER_POLICY`, [`operations.md`](operations.md), "User policy")
+also applies to requests other hubs make on behalf of a user. The responder checks the acting
+user against its policy after the other authorization checks of the operation and refuses a user
+it does not admit with `UNAUTHORIZED` and `client_code` `user_not_admitted`:
+
+| Op | Acting user checked | Caller's handling |
+|---|---|---|
+| `ClaimKeyPackage` | `requester_user_id` | The next hub of the target's hosting record is tried; when no hub returns a package and at least one refused this way, the target is reported to the client under `not_admitted` (`POST /v2/keypackages/claim`). |
+| `SubmitCommit` | `sender_user_id` (on a group the responder owns) | The client gets 403 `not_admitted_by_peer`. |
+| `SubmitMessage` | `sender_user_id` (on a group the responder owns) | The client gets 403 `not_admitted_by_peer`. |
+| `DeliverWelcome` | `sender_user_id` | The outbox treats it as permanent: the entry is dropped, no hosting-record refresh, no retry. |
+
+`Deliver` is never filtered: messages of a group owned by another hub are always accepted
+(subject to the usual owner check), whoever sent them, so replicas stay complete. The policy uses
+only the user IDs carried by the request; nothing is decrypted. `GetDeviceList`,
+`GetHostingRecord`, `NotifyDeviceList`, `NotifyHostingRecord`, `FetchLog`, `SeedReplica`,
+`CopyPendingWelcomes` and `FetchBlob` are not subject to the user policy.
+
 ## Error codes
 
 | Code | Meaning | Caller action |
 |---|---|---|
 | `UNSPECIFIED` | Default value; never sent intentionally. | Treat as `INTERNAL`. |
-| `UNAUTHORIZED` | `Hello` refused (invalid certificate or hub not allowed by federation policy); caller's `hub_id` not listed in the acting user's current hosting record, or not the owning hub for `Deliver` / `DeliverWelcome`; a Commit rejected by group policy (then `client_code` says why, e.g. `not_member`); or a `FetchBlob` for a blob of another origin or by a hub without a relationship to the uploader. | Do not retry; refresh the hosting record if it may be stale. |
+| `UNAUTHORIZED` | `Hello` refused (invalid certificate or hub not allowed by federation policy); caller's `hub_id` not listed in the acting user's current hosting record, or not the owning hub for `Deliver` / `DeliverWelcome`; a Commit rejected by group policy (then `client_code` says why, e.g. `not_member`); an acting user the responder's user policy does not admit (`client_code` `user_not_admitted`); or a `FetchBlob` for a blob of another origin or by a hub without a relationship to the uploader. | Do not retry; refresh the hosting record if it may be stale. |
 | `NOT_FOUND` | Unknown user, device, group, record, or no KeyPackage available. | Do not retry the same request. |
 | `STALE_EPOCH` | An application message or Proposal for an epoch other than the group's current epoch; `current_epoch` is set. | Client fetches the latest state (via `FetchLog`) and resubmits. |
 | `CONFLICT` | A Commit whose epoch already has a sequenced Commit; `current_epoch` is set. | Client fetches the latest state and retries on top of it. |

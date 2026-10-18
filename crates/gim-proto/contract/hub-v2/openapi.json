@@ -37,7 +37,7 @@
           "auth"
         ],
         "summary": "Request a sign-in challenge",
-        "description": "Issues a single-use gim-core AuthChallenge (audience = this hub's `hub_id`, 32-byte random nonce, valid for 5 minutes) for a device listed as active in the user's stored DeviceList. A hub with a public URL issues version 2, which also carries `audience_url` = its `public_url`; a hub without one issues version 1. The device signs the challenge bytes into an AuthResponse and answers with POST /v2/auth/session before `expires_at`.",
+        "description": "Issues a single-use gim-core AuthChallenge (audience = this hub's `hub_id`, 32-byte random nonce, valid for 5 minutes) for a device listed as active in the user's stored DeviceList, unless the user is suspended or not admitted by the hub's user policy (403). A hub with a public URL issues version 2, which also carries `audience_url` = its `public_url`; a hub without one issues version 1. The device signs the challenge bytes into an AuthResponse and answers with POST /v2/auth/session before `expires_at`.",
         "operationId": "create_auth_challenge",
         "requestBody": {
           "content": {
@@ -71,7 +71,7 @@
             }
           },
           "403": {
-            "description": "An admin suspended the user: `{\"error\":{\"code\":\"user_suspended\",\"message\":\"user is suspended\"}}`. Only the two sign-in endpoints return `user_suspended`; the suspension deleted the user's sessions, so endpoints called with an earlier token answer 401 `unauthorized`",
+            "description": "An admin suspended the user: `{\"error\":{\"code\":\"user_suspended\",\"message\":\"user is suspended\"}}`; or the hub's user policy (`GIM_HUB_USER_POLICY`) does not admit the user: `{\"error\":{\"code\":\"user_not_admitted\",\"message\":\"user is not admitted on this hub\"}}`. A suspended user that is also not admitted gets `user_suspended`. Both deleted the user's sessions, so endpoints called with an earlier token answer 401 `unauthorized`",
             "content": {
               "application/json": {
                 "schema": {
@@ -99,7 +99,7 @@
           "auth"
         ],
         "summary": "Answer a challenge and obtain a device token",
-        "description": "Verifies the gim-core AuthResponse against the user's stored DeviceList and this hub's `hub_id` (and, with a public URL, a version 2 challenge whose `audience_url` is this hub's `public_url`; without one, only version 1), then consumes the challenge: its nonce must have been issued by this hub for the same user and device, be unexpired and unused. The device must still be active (not revoked) and the user not suspended by an admin. The token is revoked when a later DeviceList revokes the device or an admin suspends the user.",
+        "description": "Verifies the gim-core AuthResponse against the user's stored DeviceList and this hub's `hub_id` (and, with a public URL, a version 2 challenge whose `audience_url` is this hub's `public_url`; without one, only version 1), then consumes the challenge: its nonce must have been issued by this hub for the same user and device, be unexpired and unused. The device must still be active (not revoked), the user not suspended by an admin and admitted by the hub's user policy. The token is revoked when a later DeviceList revokes the device, an admin suspends the user or the user policy stops admitting the user.",
         "operationId": "create_session",
         "requestBody": {
           "content": {
@@ -143,7 +143,7 @@
             }
           },
           "403": {
-            "description": "An admin suspended the user: `{\"error\":{\"code\":\"user_suspended\",\"message\":\"user is suspended\"}}`. Only the two sign-in endpoints return `user_suspended`; the suspension deleted the user's sessions, so endpoints called with an earlier token answer 401 `unauthorized`",
+            "description": "An admin suspended the user: `{\"error\":{\"code\":\"user_suspended\",\"message\":\"user is suspended\"}}`; or the hub's user policy (`GIM_HUB_USER_POLICY`) does not admit the user: `{\"error\":{\"code\":\"user_not_admitted\",\"message\":\"user is not admitted on this hub\"}}`. A suspended user that is also not admitted gets `user_suspended`. Both deleted the user's sessions, so endpoints called with an earlier token answer 401 `unauthorized`",
             "content": {
               "application/json": {
                 "schema": {
@@ -593,7 +593,7 @@
           "groups"
         ],
         "summary": "Submit an MLS Commit or Proposal",
-        "description": "`mls_message` is an MLS PublicMessage (Commit or Proposal), so the hub can parse it. The hub reads the epoch from the MLS framing (there is no client epoch field) and accepts the Commit only for the group's current epoch, advancing it by one. Membership changes are derived from the Add/Remove/Update proposals, carried by value or referenced (ProposalRef) from Proposals sequenced in the same epoch (an unknown reference fails with 400); each added member's gim-core credential (type 0xF001) is validated against their DeviceList, members are identified by user ID + device ID from their credentials, and `group.member_added` / `group.member_removed` events carry the `user_id`. The optional Welcome is delivered as a `welcome` event to `welcome_recipients`.\n\nA Proposal (Add, Remove, SelfRemove or Update) must be for the current epoch; the hub sequences it and delivers it as a `message` of kind `proposal`, without changing the epoch or the roster: a later Commit that references it does. The result carries the Proposal's `seq` and the unchanged `epoch`; a Welcome is not allowed. Proposals of an epoch can no longer be referenced once the epoch advances.\n\nResubmitting the same Commit or Proposal (same hash) returns the original result with `duplicate: true` and emits nothing. Any other Commit or Proposal for a past epoch fails with 409 `stale_epoch`.\n\nFor a group owned by another hub (federation), this hub forwards the Commit or Proposal to the owning hub, which sequences it; the response is the owner's result and the local replica already holds the message. Added members on other hubs get their Welcome through their own hub. This needs the caller's hosting record listing this hub (403 `hosting_record_required`); when the owning hub refuses the request the result is 502 `peer_refused`, when it cannot be reached 503 `peer_unavailable` with `Retry-After` (retry the same Commit: it is idempotent by hash).",
+        "description": "`mls_message` is an MLS PublicMessage (Commit or Proposal), so the hub can parse it. The hub reads the epoch from the MLS framing (there is no client epoch field) and accepts the Commit only for the group's current epoch, advancing it by one. Membership changes are derived from the Add/Remove/Update proposals, carried by value or referenced (ProposalRef) from Proposals sequenced in the same epoch (an unknown reference fails with 400); each added member's gim-core credential (type 0xF001) is validated against their DeviceList, members are identified by user ID + device ID from their credentials, and `group.member_added` / `group.member_removed` events carry the `user_id`. The optional Welcome is delivered as a `welcome` event to `welcome_recipients`.\n\nA Proposal (Add, Remove, SelfRemove or Update) must be for the current epoch; the hub sequences it and delivers it as a `message` of kind `proposal`, without changing the epoch or the roster: a later Commit that references it does. The result carries the Proposal's `seq` and the unchanged `epoch`; a Welcome is not allowed. Proposals of an epoch can no longer be referenced once the epoch advances.\n\nResubmitting the same Commit or Proposal (same hash) returns the original result with `duplicate: true` and emits nothing. Any other Commit or Proposal for a past epoch fails with 409 `stale_epoch`.\n\nFor a group owned by another hub (federation), this hub forwards the Commit or Proposal to the owning hub, which sequences it; the response is the owner's result and the local replica already holds the message. Added members on other hubs get their Welcome through their own hub. This needs the caller's hosting record listing this hub (403 `hosting_record_required`); when the owning hub's user policy does not admit the caller the result is 403 `not_admitted_by_peer` (not retryable), when the owning hub refuses the request otherwise 502 `peer_refused`, when it cannot be reached 503 `peer_unavailable` with `Retry-After` (retry the same Commit: it is idempotent by hash).",
         "operationId": "submit_commit",
         "parameters": [
           {
@@ -659,7 +659,7 @@
             }
           },
           "403": {
-            "description": "Caller is not a member of the group (`not_member`), group policy forbids the change (`forbidden`), or the group is owned by another hub and the caller has no valid hosting record listing this hub (`hosting_record_required`)",
+            "description": "Caller is not a member of the group (`not_member`), group policy forbids the change (`forbidden`), or the group is owned by another hub and the caller has no valid hosting record listing this hub (`hosting_record_required`) or the owning hub's user policy does not admit the caller (`not_admitted_by_peer`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -834,7 +834,7 @@
           "messages"
         ],
         "summary": "Send an application message",
-        "description": "Stores the opaque MLS message, assigns the next `seq` and emits a `message` event to every member device except the sender. The epoch is read from the MLS framing; a message for another epoch fails with 409 `stale_epoch`.\n\nResending the same `client_id` from the same device returns the stored message with 200 and emits nothing. A decoded message larger than the hub limit (default 262144 bytes) fails with 413.\n\nFor a group owned by another hub (federation), this hub forwards the message to the owning hub, which assigns the `seq`; the response is the sequenced message. This needs the caller's hosting record listing this hub (403 `hosting_record_required`); when the owning hub refuses the request the result is 502 `peer_refused`, when it cannot be reached 503 `peer_unavailable` with `Retry-After` (retry with the same `client_id`).",
+        "description": "Stores the opaque MLS message, assigns the next `seq` and emits a `message` event to every member device except the sender. The epoch is read from the MLS framing; a message for another epoch fails with 409 `stale_epoch`.\n\nResending the same `client_id` from the same device returns the stored message with 200 and emits nothing. A decoded message larger than the hub limit (default 262144 bytes) fails with 413.\n\nFor a group owned by another hub (federation), this hub forwards the message to the owning hub, which assigns the `seq`; the response is the sequenced message. This needs the caller's hosting record listing this hub (403 `hosting_record_required`); when the owning hub's user policy does not admit the caller the result is 403 `not_admitted_by_peer` (not retryable), when the owning hub refuses the request otherwise 502 `peer_refused`, when it cannot be reached 503 `peer_unavailable` with `Retry-After` (retry with the same `client_id`).",
         "operationId": "send_message",
         "parameters": [
           {
@@ -900,7 +900,7 @@
             }
           },
           "403": {
-            "description": "Caller is not a member of the group (`not_member`), or the group is owned by another hub and the caller has no valid hosting record listing this hub (`hosting_record_required`)",
+            "description": "Caller is not a member of the group (`not_member`), or the group is owned by another hub and the caller has no valid hosting record listing this hub (`hosting_record_required`) or the owning hub's user policy does not admit the caller (`not_admitted_by_peer`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1281,7 +1281,7 @@
           "keypackages"
         ],
         "summary": "Claim one KeyPackage per active device",
-        "description": "For each target, atomically removes and returns one one-time KeyPackage per active device of the user's DeviceList (or only the given device). The device's last-resort KeyPackage is returned (and kept) only when its one-time packages are exhausted. Emits `keypackages.low` to a device whose one-time count drops below the threshold.\n\nWith federation, a target hosted on other hubs (per its hosting record) is claimed from its listed hubs in `(priority, hub_id)` order on the caller's behalf, moving to the next hub when one is unavailable or has no package; devices the first answering hub did not return are requested from the following hubs. Targets for which no hub answered and a hub could not be reached, refused or timed out are listed in `unavailable` (retryable). Claiming from another hub requires the caller to have a valid hosting record listing this hub. Claim and commit through the same hub.",
+        "description": "For each target, atomically removes and returns one one-time KeyPackage per active device of the user's DeviceList (or only the given device). The device's last-resort KeyPackage is returned (and kept) only when its one-time packages are exhausted. Emits `keypackages.low` to a device whose one-time count drops below the threshold.\n\nWith federation, a target hosted on other hubs (per its hosting record) is claimed from its listed hubs in `(priority, hub_id)` order on the caller's behalf, moving to the next hub when one is unavailable or has no package; devices the first answering hub did not return are requested from the following hubs. Targets for which no hub answered and a hub could not be reached, refused or timed out are listed in `unavailable` (retryable). Targets for which no hub returned a package and a hub refused because its user policy does not admit the caller (S2S `UNAUTHORIZED`, `client_code` `user_not_admitted`) are listed in `not_admitted` (not retryable: the target's hub does not accept contacts from the caller). Claiming from another hub requires the caller to have a valid hosting record listing this hub. Claim and commit through the same hub.",
         "operationId": "claim_key_packages",
         "requestBody": {
           "content": {
@@ -1830,7 +1830,7 @@
           "identity"
         ],
         "summary": "Upload a signed DeviceList",
-        "description": "No authentication: the DeviceList is self-certifying. The hub verifies the root key signature and that the list's user ID matches `user_id` (derived from the root key). The first upload creates the user on this hub. A later upload with a higher `seq` replaces the stored list; re-uploading the identical list (same `seq`, same bytes) is idempotent and returns 200. Devices revoked by the new list lose their tokens; a `device_list.updated` event is emitted to the user's other active devices and to every active device of users sharing a group with them. With federation, a replaced list of a hosted user is pushed to the hubs sharing groups with the user, which emit `device_list.updated` to their users in those groups.",
+        "description": "No authentication: the DeviceList is self-certifying. The hub verifies the root key signature and that the list's user ID matches `user_id` (derived from the root key). The first upload creates the user on this hub. A later upload with a higher `seq` replaces the stored list; re-uploading the identical list (same `seq`, same bytes) is idempotent and returns 200. The first upload of a user the hub's user policy (`GIM_HUB_USER_POLICY`) does not admit is refused with 403 `user_not_admitted`; later uploads of an existing user are not. Devices revoked by the new list lose their tokens; a `device_list.updated` event is emitted to the user's other active devices and to every active device of users sharing a group with them. With federation, a replaced list of a hosted user is pushed to the hubs sharing groups with the user, which emit `device_list.updated` to their users in those groups.",
         "operationId": "put_device_list",
         "parameters": [
           {
@@ -1877,6 +1877,16 @@
           },
           "400": {
             "description": "Malformed or invalid DeviceList, or user ID mismatch (`invalid_device_list`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "First upload (registration) of a user the hub's user policy does not admit: `{\"error\":{\"code\":\"user_not_admitted\",\"message\":\"user is not admitted on this hub\"}}`",
             "content": {
               "application/json": {
                 "schema": {
@@ -2508,6 +2518,13 @@
             },
             "description": "Targets that are unknown, have no active device, or have no KeyPackage at all."
           },
+          "not_admitted": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ClaimTarget"
+            },
+            "description": "Targets on another hub whose user policy does not admit the caller (S2S `UNAUTHORIZED`,\n`client_code` `user_not_admitted`): the target's hub does not accept contacts from the\ncaller. Not retryable."
+          },
           "unavailable": {
             "type": "array",
             "items": {
@@ -2959,7 +2976,7 @@
           "version": {
             "type": "string",
             "description": "Hub release version: the version the lode supervisor launched\n(`LODE_ACTIVE_VERSION`), else the package version.",
-            "example": "0.3.0"
+            "example": "0.4.0"
           }
         }
       },
@@ -3228,7 +3245,7 @@
           "version": {
             "type": "string",
             "description": "Hub release version: the version the lode supervisor launched\n(`LODE_ACTIVE_VERSION`), else the package version.",
-            "example": "0.3.0"
+            "example": "0.4.0"
           }
         }
       },

@@ -588,6 +588,7 @@ impl StoreTxn for SqliteTxn<'_> {
             attempts: entry.attempts,
             last_error: entry.last_error.clone(),
             prepared: entry.prepared.as_ref().map(Into::into),
+            failure: entry.failure.map(Into::into),
         })?;
         self.execute(
             "INSERT OR REPLACE INTO outbox \

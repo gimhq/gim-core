@@ -88,6 +88,14 @@ fn retry_after(response: &Response) -> Option<u64> {
         .and_then(|value| value.trim().parse::<u64>().ok())
 }
 
+/// [`error::group_post`] of a failed Commit or message post.
+fn post_error(err: PostError, group_id: &GroupId) -> PostError {
+    match err {
+        PostError::Transport(err) => error::group_post(err, group_id.as_str()).into(),
+        err => err,
+    }
+}
+
 fn hosting_record(record: v2::HostingRecord) -> StoredHostingRecord {
     StoredHostingRecord {
         record: record.hosting_record,
@@ -320,7 +328,8 @@ impl Transport for HttpTransport {
             )
             .json(&request),
         )
-        .await?;
+        .await
+        .map_err(error::device_list)?;
         Ok(())
     }
 
@@ -543,14 +552,16 @@ impl Transport for HttpTransport {
                 })
             })
             .collect::<TransportResult<_>>()?;
-        let unavailable = response
-            .unavailable
-            .iter()
-            .map(|target| convert::user_id(&target.user_id))
-            .collect::<TransportResult<_>>()?;
+        let users = |targets: &[v2::ClaimTarget]| {
+            targets
+                .iter()
+                .map(|target| convert::user_id(&target.user_id))
+                .collect::<TransportResult<_>>()
+        };
         Ok(KeyPackageClaim {
             key_packages,
-            unavailable,
+            unavailable: users(&response.unavailable)?,
+            not_admitted: users(&response.not_admitted)?,
         })
     }
 
@@ -602,7 +613,9 @@ impl Transport for HttpTransport {
         };
         let path = paths::group_commits(group_id.as_str());
         let result: v2::CommitResult =
-            Self::json_post(self.api(Method::POST, &path, Some(token)).json(&request)).await?;
+            Self::json_post(self.api(Method::POST, &path, Some(token)).json(&request))
+                .await
+                .map_err(|err| post_error(err, group_id))?;
         Ok(CommitAccepted {
             seq: result.seq,
             epoch: result.epoch,
@@ -623,7 +636,9 @@ impl Transport for HttpTransport {
         };
         let path = paths::group_messages(group_id.as_str());
         let stored: v2::Message =
-            Self::json_post(self.api(Method::POST, &path, Some(token)).json(&request)).await?;
+            Self::json_post(self.api(Method::POST, &path, Some(token)).json(&request))
+                .await
+                .map_err(|err| post_error(err, group_id))?;
         Ok(stored.seq)
     }
 

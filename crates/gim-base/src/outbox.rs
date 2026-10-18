@@ -15,7 +15,7 @@ use gim_proto::envelope::{self, Content, Envelope, MediaInfo, ReceiptKind};
 use crate::client::load_chat;
 use crate::model::{
     Membership, Message, MessageContent, OutboxEntry, OutboxKind, OutboxState, PendingMedia,
-    PreparedPayload, SendState, StateChange,
+    PreparedPayload, SendFailure, SendState, StateChange,
 };
 use crate::{BaseClient, BaseError, Result, StateReader, StateStore, StoreTxn};
 
@@ -238,13 +238,32 @@ impl BaseClient {
 
     /// Records a failed attempt. Retryable failures are scheduled with
     /// [`retry_delay_ms`] until [`MAX_SEND_ATTEMPTS`]; then, or for a
-    /// permanent failure, the entry and its message become `Failed`.
+    /// permanent failure, the entry and its message become `Failed`, with
+    /// the cause [`SendFailure::Other`] or [`SendFailure::Rejected`].
     pub fn mark_failed<S: StateStore>(
         &self,
         store: &S,
         message_id: &MessageId,
         error: &str,
         retryable: bool,
+        now_ms: u64,
+    ) -> Result<Vec<StateChange>> {
+        let cause = match retryable {
+            true => SendFailure::Other,
+            false => SendFailure::Rejected,
+        };
+        self.mark_failed_with(store, message_id, error, retryable, cause, now_ms)
+    }
+
+    /// [`Self::mark_failed`] recording `cause` if the entry becomes
+    /// `Failed`.
+    pub fn mark_failed_with<S: StateStore>(
+        &self,
+        store: &S,
+        message_id: &MessageId,
+        error: &str,
+        retryable: bool,
+        cause: SendFailure,
         now_ms: u64,
     ) -> Result<Vec<StateChange>> {
         store.transaction(|txn| {
@@ -258,6 +277,7 @@ impl BaseClient {
                 entry.next_attempt_at_ms = now_ms + retry_delay_ms(message_id, entry.attempts);
             } else {
                 entry.state = OutboxState::Failed;
+                entry.failure = Some(cause);
                 set_send_state(
                     txn,
                     message_id,
@@ -286,6 +306,7 @@ impl BaseClient {
             entry.attempts = 0;
             entry.next_attempt_at_ms = now_ms;
             entry.last_error = None;
+            entry.failure = None;
             txn.upsert_outbox(&entry)?;
             let mut changes = Vec::new();
             set_send_state(
@@ -418,6 +439,7 @@ fn new_entry(
         last_error: None,
         prepared: None,
         created_at_ms: now_ms,
+        failure: None,
     }
 }
 

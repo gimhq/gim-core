@@ -42,6 +42,9 @@ impl<S: StateStore + 'static> Client<S> {
     /// events (with the sync loop) and sends the hub map to the own other
     /// devices. `url` is entered on this device, so it may be contacted.
     ///
+    /// [`ClientError::UserNotAdmitted`] if the hub's user policy refuses
+    /// the user: nothing is listed or uploaded there.
+    ///
     /// Idempotent: for a listed hub, it only records `url` for it if this
     /// device has no verified URL there (as [`Client::set_hub_url`]).
     /// Returns the hub's status.
@@ -83,7 +86,11 @@ impl<S: StateStore + 'static> Client<S> {
             })
             .await?
             .ok_or_else(|| ClientError::Identity("the own device list is unknown".into()))?;
-        transport.put_device_list(&user_id, device_list).await?;
+        // A hub whose user policy refuses the registration stays unlisted.
+        transport
+            .put_device_list(&user_id, device_list)
+            .await
+            .map_err(|err| err.on_hub(&hub_id))?;
         self.handles().entry(hub_id.clone()).or_default().verified =
             Some((url.to_string(), transport.clone()));
         let target = HubTarget {

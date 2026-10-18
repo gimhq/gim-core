@@ -6,8 +6,8 @@ use gim_ui::VectorDiff;
 use crate::{
     ChatKind, ChatListDiff, ChatState, ChatSummary, DeviceInfo, HubInfo, HubState, MediaRef,
     MembershipChangeKind, MessageContent, MessageItem, MessagePreview, NotificationContent,
-    NotificationKind, PushRegistration, ReactionGroup, ReplyPreview, SendState, TimelineDiff,
-    TimelineItem, UserProfile,
+    NotificationKind, PushRegistration, ReactionGroup, ReplyPreview, SendFailure, SendState,
+    TimelineDiff, TimelineItem, UserProfile,
 };
 
 /// Maps a gim-ui diff onto an FFI diff enum with the same variants.
@@ -257,7 +257,22 @@ impl From<gim_ui::SendState> for SendState {
             gim_ui::SendState::Sent => Self::Sent,
             gim_ui::SendState::Delivered => Self::Delivered,
             gim_ui::SendState::Read => Self::Read,
-            gim_ui::SendState::Failed { reason } => Self::Failed { reason },
+            gim_ui::SendState::Failed { reason, cause } => Self::Failed {
+                reason,
+                cause: cause.into(),
+            },
+        }
+    }
+}
+
+impl From<gim_ui::SendFailure> for SendFailure {
+    fn from(cause: gim_ui::SendFailure) -> Self {
+        match cause {
+            gim_ui::SendFailure::UserSuspended => Self::UserSuspended,
+            gim_ui::SendFailure::UserNotAdmitted => Self::UserNotAdmitted,
+            gim_ui::SendFailure::NotAdmittedByPeer => Self::NotAdmittedByPeer,
+            gim_ui::SendFailure::Rejected => Self::Rejected,
+            gim_ui::SendFailure::Other => Self::Other,
         }
     }
 }

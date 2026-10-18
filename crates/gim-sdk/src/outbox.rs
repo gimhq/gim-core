@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use gim_base::model::{OutboxEntry, OutboxKind, OutboxState};
+use gim_base::model::{OutboxEntry, OutboxKind, OutboxState, SendFailure};
 use gim_base::{BaseClient, BaseError, StateReader, StateStore, StoreTxn, MAX_RETRY_DELAY_MS};
 use gim_common::{now_ms, ClientId, MessageId};
 use tokio::task::JoinHandle;
@@ -214,11 +214,12 @@ impl<S: StateStore + 'static> Client<S> {
             ClientError::Transport(err) if err.is_peer_failure() => err.retry_after(),
             _ => None,
         };
+        let cause = send_failure(&err);
         let (id, base, error) = (message_id.clone(), base.clone(), err.to_string());
         let changes = match self
             .run(move |store, _| {
                 let now = now_ms();
-                let changes = base.mark_failed(store, &id, &error, retryable, now)?;
+                let changes = base.mark_failed_with(store, &id, &error, retryable, cause, now)?;
                 if let Some(delay) = retry_after {
                     let delay = (delay.as_millis() as u64).min(MAX_RETRY_DELAY_MS);
                     store.transaction(|txn| {
@@ -282,6 +283,17 @@ impl<S: StateStore + 'static> Client<S> {
             self.remove_outgoing(&pending.local_path).await;
         }
         Ok(())
+    }
+}
+
+/// The cause recorded when `err` makes an entry `Failed`.
+fn send_failure(err: &ClientError) -> SendFailure {
+    match err {
+        ClientError::UserSuspended { .. } => SendFailure::UserSuspended,
+        ClientError::UserNotAdmitted { .. } => SendFailure::UserNotAdmitted,
+        ClientError::NotAdmittedByPeer { .. } => SendFailure::NotAdmittedByPeer,
+        ClientError::Transport(err) if !outcome_unknown(err) => SendFailure::Rejected,
+        _ => SendFailure::Other,
     }
 }
 

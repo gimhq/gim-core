@@ -287,10 +287,10 @@ is never deleted, so that both processes always lock the same file.
 | `startSync()` / `stopSync()` | | |
 | `setNetworkReachable(reachable)` | | Synchronous, never throws. Becoming reachable reconnects and retries the outbox at once; becoming unreachable changes nothing by itself. |
 | `findUser(handle)` | `UserProfile?` | `null`/`nil` if no such user. |
-| `createDirectChat(userId)` | chat id | Returns the existing direct chat if there is one. `NotFound` (and no chat is created) if the user does not exist or has no device; a user whose hub is unavailable is invited later (see *Federation*). |
-| `createGroupChat(name, memberUserIds)` | chat id | The name is shared with the members (and with members added later) in an encrypted group info message. Invitees that do not exist or have no device are skipped, each reported as a `MembershipChanged(Removed)` change for that user (not stored); `NotFound` (and no chat is created) if that is every invitee. |
+| `createDirectChat(userId)` | chat id | Returns the existing direct chat if there is one. `NotFound` (and no chat is created) if the user does not exist or has no device; `ContactNotAdmitted` (and no chat is created) if the user's hub does not admit this user (see *User policy*); a user whose hub is unavailable is invited later (see *Federation*). |
+| `createGroupChat(name, memberUserIds)` | chat id | The name is shared with the members (and with members added later) in an encrypted group info message. Invitees that do not exist or have no device, or whose hub does not admit this user, are skipped, each reported as a `MembershipChanged(Removed)` change for that user (not stored); if that is every invitee, no chat is created and the call fails with `ContactNotAdmitted` when at least one of them was refused, `NotFound` otherwise. |
 | `chatMembers(chatId)` | `[UserProfile]` | Current members, one entry per user (not per device), including the signed-in user. Names come from the local user directory, filled by `findUser`, registration, and directory lookups the client makes for members of created or joined chats, added members and unknown senders; until a lookup succeeds a user shows as its user id. Resolved names arrive as `ChatListDiff`s and timeline `Set`s. No members listener in M1: re-query when a `ChatListDiff` touches that chat or a `TimelineItem.MembershipChange` arrives. |
-| `addMembers(chatId, userIds)`, `removeMember(chatId, userId)` | | `addMembers` skips users that do not exist or have no device like `createGroupChat`, and fails with `NotFound` (nothing committed) if that is every user. |
+| `addMembers(chatId, userIds)`, `removeMember(chatId, userId)` | | `addMembers` skips users that do not exist, have no device or whose hub does not admit this user like `createGroupChat`, and fails with `ContactNotAdmitted` or `NotFound` (nothing committed) if that is every user. |
 | `leaveChat(chatId)` | | Submits a leave Proposal and returns once the hub accepted it, with the chat `ChatState.Leaving`; another member commits it, then the chat is `Left` and shows the own `Left` change. gim-core keeps and re-sends the leave across restarts (native code does not persist it); calling `leaveChat` again while leaving re-sends it. A leave the hub refuses for good (4xx) returns the chat to `Active` and throws the rejection. `ChatNotActive(Left)` once left. See *Chat state*. |
 | `chatState(chatId)` | `ChatState` | From local state, no network call: correct right after a restart, before any other call. `NotFound` for an unknown chat. |
 | `setGroupInfo(chatId, name?, avatarFilePath?)` | | `null`/`nil` leaves a field unchanged; at least one must be set. The avatar is encrypted and uploaded before the call returns (MIME type from the file extension), then the change is applied locally and sent to the members. `InvalidInput` for direct chats. |
@@ -407,7 +407,11 @@ user's own `Left` has `userId` equal to the own user id.
 `paginateBackwards` pages through locally stored history first, then through the server history:
 messages this device cannot decrypt (sent before it joined, or already read once and removed
 locally) are skipped, and it returns `false` once nothing older is readable. `MessageItem.sendState` is set only for own
-messages: `Pending → Sent → Delivered → Read`, or `Failed(reason)`. `Delivered` and `Read` are
+messages: `Pending → Sent → Delivered → Read`, or `Failed(reason, cause)`. `cause` is a
+`SendFailure`: `UserSuspended`, `UserNotAdmitted`, `NotAdmittedByPeer` (see *User policy*),
+`Rejected` (another definite refusal of the hub) or `Other` (retries used up, a local failure, or a
+failure recorded by an older build). The cause survives restarts. Hide Retry for `UserSuspended`,
+`UserNotAdmitted` and `NotAdmittedByPeer`. `Delivered` and `Read` are
 group ticks: they need a receipt from **every** device of **every** other member, so one
 recipient device that has not reported keeps the message at `Sent` (or `Delivered`).
 
@@ -618,10 +622,15 @@ The chat list is ordered most recently updated first; a timeline oldest first.
 | `HomeHub(hubId)` | `removeHub` of the hub the client was created for. | Explain; offer `setPrimaryHub` for another hub. |
 | `HubNotDrained(hubId, reason)` | `removeHub` while messages or member changes are not settled yet. | Retry later. |
 | `UserSuspended(hubId)` | An admin of the hub `hubId` suspended this user: the hub refused the sign-in with 403 `user_suspended`. The session and local data are kept. `hubId` is empty for a home hub without a hub identity. See *Suspended users*. | Show "account suspended" (naming the hub if the user has several). Do not retry and do not sign out. |
+| `UserNotAdmitted(hubId)` | The user policy of the hub `hubId` does not admit this user: it refused the registration (`createIdentity`, `restoreFromRecovery`, `waitLink`, `addHub`) or a sign-in with 403 `user_not_admitted`. Handled like `UserSuspended`. `hubId` is empty when not known (registration on the home hub). See *User policy*. | Show "this hub does not admit you". Do not retry. |
+| `NotAdmittedByPeer(hubId, chatId)` | The hub `hubId` owning the chat `chatId` does not admit this user: a member change or leave was refused there (403 `not_admitted_by_peer`). Messages fail with `SendState.Failed(cause = NotAdmittedByPeer)` instead. Other chats are not affected. | Show "this chat's hub does not admit you". Do not retry. |
+| `ContactNotAdmitted(userIds)` | `createDirectChat`, `createGroupChat`, `addMembers`: no user could be added and the hubs of `userIds` do not admit this user. | Show "this user does not accept contacts from you". Do not retry. |
 
 Kotlin throws `GimException.<Variant>`; Swift throws `GimError.<Variant>`. `ChatNotActive` was added
-after M2b, `HubOwnsGroups`, `LastHub`, `HomeHub` and `HubNotDrained` in M2c, and `UserSuspended`
-with hub H10: an exhaustive Swift `switch` / Kotlin `when` over the error needs the new cases.
+after M2b, `HubOwnsGroups`, `LastHub`, `HomeHub` and `HubNotDrained` in M2c, `UserSuspended`
+with hub H10, and `UserNotAdmitted`, `NotAdmittedByPeer` and `ContactNotAdmitted` with hub H12
+(which also added `SendState.Failed.cause` and `SendFailure`): an exhaustive Swift `switch` /
+Kotlin `when` over the error needs the new cases.
 
 ### Suspended users
 
@@ -650,6 +659,41 @@ when that sign-in answers `user_suspended`:
 
 Client guidance: when a call returns `UserSuspended`, show "account suspended", keep the local chats
 readable, and do not offer a retry or sign the user out; the user has to contact the hub operator.
+
+### User policy
+
+A hub can admit only some users (hub `api-v2.md` *User policy*: `allow` mode admits only listed
+users, `deny` mode everyone except listed users). gim-core maps its answers to three errors:
+
+- `UserNotAdmitted(hubId)`: this user's own hub refuses them. The first DeviceList upload
+  (registration) answers 403 `user_not_admitted`, and so do sign-ins (`POST /v2/auth/challenge`,
+  `POST /v2/auth/session`); no other endpoint returns it. When the policy changes, the hub deletes
+  the sessions of the users it no longer admits: the next call gets 401, signs in once and fails
+  with `UserNotAdmitted`. From there on everything works as for *Suspended users*: no sign-in on that
+  hub for 10 minutes, the home hub's sync loop waits offline, another listed hub is skipped like an
+  unreachable one, sends fail with `SendState.Failed(cause = UserNotAdmitted)`.
+  A refused registration leaves nothing behind: `createIdentity`, `restoreFromRecovery` and
+  `waitLink` fail with `UserNotAdmitted` and the unfinished enrollment is discarded, so the call can
+  be retried (against another hub, or once the hub admits the user). `addHub` fails with
+  `UserNotAdmitted(hubId)` and leaves the hub unlisted: no hosting record entry, no KeyPackages.
+- `NotAdmittedByPeer(hubId, chatId)`: the hub owning a chat refuses this user (it does not admit
+  them), while their own hub forwards fine. It answers commits and messages of that chat with 403
+  `not_admitted_by_peer`. This is a definite answer for that chat: gim-core does not retry it and
+  does not try another hub (they would forward to the same owner). A message becomes
+  `Failed(cause = NotAdmittedByPeer)` at once; a member change or leave fails with the error and
+  its pending commit is dropped (a leave returns the chat to `Active`). The hub is not blocked:
+  other chats keep working through it.
+- `ContactNotAdmitted(userIds)`: KeyPackage claims report targets whose hub does not admit this
+  user (`not_admitted`). Per user without a KeyPackage, a refusal takes precedence over an
+  unavailable hub, which takes precedence over an unknown user. Refused users are skipped like
+  unknown ones (a `MembershipChanged(Removed)` change each, a pending invite is dropped). Only when
+  no requested user can be added does `createDirectChat` / `createGroupChat` / `addMembers` fail,
+  with `ContactNotAdmitted` listing the refused users (or `NotFound` if none was refused).
+
+Client guidance: `UserNotAdmitted` → "this hub does not admit you"; `ContactNotAdmitted` → "this
+user does not accept contacts from you"; `NotAdmittedByPeer` → "this chat's hub does not admit
+you". Do not offer Retry for these errors, nor for messages that failed with `cause`
+`UserSuspended`, `UserNotAdmitted` or `NotAdmittedByPeer`.
 
 ## Other functions
 

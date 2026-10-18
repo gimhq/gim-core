@@ -24,7 +24,7 @@ pub use error::{Result, UiError};
 pub use eyeball_im::{Vector, VectorDiff};
 pub use items::{
     ChatKind, ChatListItem, ChatState, MediaRef, MembershipChangeKind, MessageContent, MessageItem,
-    MessagePreview, ReactionGroup, ReplyPreview, SendState, TimelineItem, UserProfile,
+    MessagePreview, ReactionGroup, ReplyPreview, SendFailure, SendState, TimelineItem, UserProfile,
 };
 pub use timeline::{FixedOffset, TimeZone, Timeline, TimelineOptions, DEFAULT_PAGE_SIZE};
 pub use typing::{TypingNotifications, TYPING_TIMEOUT};

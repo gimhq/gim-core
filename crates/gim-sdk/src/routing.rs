@@ -631,7 +631,8 @@ impl<S: StateStore + 'static> Client<S> {
             Err(
                 err @ (TransportError::Network(_)
                 | TransportError::Unauthorized
-                | TransportError::UserSuspended { .. }),
+                | TransportError::UserSuspended { .. }
+                | TransportError::UserNotAdmitted { .. }),
             ) => return Err(err.into()),
             Err(err) => {
                 tracing::debug!(hub_id = %hub.hub_id, error = %err, "cannot count KeyPackages; uploading a batch");

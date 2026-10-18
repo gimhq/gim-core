@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+pub use gim_base::model::SendFailure;
 use gim_base::model::{self, Chat, Message};
 use gim_base::{StateReader, StoreError};
 use gim_common::{GroupId, MessageId, UserId};
@@ -181,8 +182,9 @@ pub enum SendState {
     Delivered,
     /// Read by every recipient.
     Read,
-    /// Gave up; retry or cancel.
-    Failed { reason: String },
+    /// Gave up; retry or cancel. `cause` is
+    /// [`SendFailure::Other`] for failures recorded before causes were.
+    Failed { reason: String, cause: SendFailure },
 }
 
 type StoreResult<T> = Result<T, StoreError>;
@@ -380,7 +382,7 @@ pub(crate) fn reaction_groups(message: &Message, own: &UserId) -> Vec<ReactionGr
     groups.into_values().collect()
 }
 
-/// The UI send state; a failure carries the outbox error.
+/// The UI send state; a failure carries the outbox error and cause.
 pub(crate) fn send_state<R: StateReader + ?Sized>(
     store: &R,
     message: &Message,
@@ -391,11 +393,15 @@ pub(crate) fn send_state<R: StateReader + ?Sized>(
         Some(model::SendState::Sent) => Some(SendState::Sent),
         Some(model::SendState::Delivered) => Some(SendState::Delivered),
         Some(model::SendState::Read) => Some(SendState::Read),
-        Some(model::SendState::Failed) => Some(SendState::Failed {
-            reason: store
-                .outbox_entry(&message.message_id)?
-                .and_then(|entry| entry.last_error)
-                .unwrap_or_default(),
-        }),
+        Some(model::SendState::Failed) => {
+            let entry = store.outbox_entry(&message.message_id)?;
+            Some(SendState::Failed {
+                cause: entry
+                    .as_ref()
+                    .and_then(|e| e.failure)
+                    .unwrap_or(SendFailure::Other),
+                reason: entry.and_then(|e| e.last_error).unwrap_or_default(),
+            })
+        }
     })
 }

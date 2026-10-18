@@ -27,7 +27,8 @@ DeviceCert in the user's stored DeviceList. There is no handle-only registration
 
 1. Create the identity locally (gim-core), then upload the signed DeviceList:
    `PUT /v2/users/{user_id}/device-list {device_list}`. No token is needed: the list is
-   self-certifying. The first upload creates the user on this hub. A later upload with a higher
+   self-certifying. The first upload creates the user on this hub, unless the hub's user policy
+   does not admit the user (403 `user_not_admitted`, see *User policy* below). A later upload with a higher
    `seq` replaces the stored list (200); re-uploading the identical list (same `seq`, same bytes)
    is idempotent and also returns 200. A lower `seq`, or the same `seq` with different bytes, is
    409 `stale_device_list`. A replacement emits a `device_list.updated` event (payload: the new
@@ -36,7 +37,8 @@ DeviceCert in the user's stored DeviceList. There is no handle-only registration
    the new list.
 2. `POST /v2/auth/challenge {user_id, device_id}` returns `{challenge, expires_at, hub_id}`
    (404 `not_found` unless the device is active in the stored DeviceList; 403 `user_suspended`
-   while an admin has suspended the user, see *Suspended users* below). `challenge` is a
+   while an admin has suspended the user, see *Suspended users* below; 403 `user_not_admitted`
+   when the hub's user policy does not admit the user, see *User policy* below). `challenge` is a
    gim-core AuthChallenge (CBOR, base64) with `audience` = this hub's `hub_id`, a 32-byte random
    nonce and a 5-minute lifetime. A hub with `GIM_HUB_PUBLIC_URL` issues version 2, which also
    binds the URL the device talked to:
@@ -63,7 +65,8 @@ DeviceCert in the user's stored DeviceList. There is no handle-only registration
    `invalid_challenge` (unknown, used, expired or foreign challenge, another `audience_url`, or
    the wrong challenge version for this hub), `invalid_signature`, or
    `device_not_active` (device revoked or not in the DeviceList); 403 `user_suspended` (an admin
-   suspended the user, see *Suspended users* below).
+   suspended the user, see *Suspended users* below); 403 `user_not_admitted` (the user policy
+   does not admit the user, see *User policy* below).
 4. Use `Authorization: Bearer <token>` (or `?token=` on `GET /v2/stream`). Sign in again after
    `expires_at` or on 401.
 
@@ -91,6 +94,33 @@ then the devices sign in again as above.
 endpoint returns it: a suspended user has no session, so authenticated endpoints answer 401
 `unauthorized` (a client then tries to sign in again and receives 403 `user_suspended`).
 Unauthenticated endpoints are not affected.
+
+### User policy
+
+A hub may admit only some users: `GIM_HUB_USER_POLICY` = `allow` (only users on the hub's list)
+or `deny` (everyone except listed users); `open` (default) admits everyone
+([`operations.md`](operations.md), "User policy"). A user the policy does not admit gets:
+
+| Endpoint | When | Status | Body |
+| --- | --- | --- | --- |
+| `PUT /v2/users/{user_id}/device-list` | first upload (registration) of the user on this hub | 403 | `{"error":{"code":"user_not_admitted","message":"user is not admitted on this hub"}}` |
+| `POST /v2/auth/challenge` | always | 403 | `{"error":{"code":"user_not_admitted","message":"user is not admitted on this hub"}}` |
+| `POST /v2/auth/session` | always | 403 | `{"error":{"code":"user_not_admitted","message":"user is not admitted on this hub"}}` |
+| Every endpoint authenticated with a token issued before the policy change | the session was deleted | 401 | `{"error":{"code":"unauthorized","message":"missing or invalid bearer token"}}` |
+| `GET /v2/stream` with such a token | the session was deleted | | WebSocket close code 4401 |
+
+`user_not_admitted` is returned only by these three endpoints, always with status 403. A later
+DeviceList upload of a user that already exists on the hub is accepted. A suspended user that is
+also not admitted gets `user_suspended` (suspension takes precedence); a device that is not
+active gets 404 `not_found` from the challenge only when the user is admitted. Changing the
+policy deletes the sessions and pending challenges of every user it no longer admits; a client
+then tries to sign in again and receives 403 `user_not_admitted`. Unauthenticated endpoints are
+not affected.
+
+Another hub's policy can refuse a user of this hub (see *Remote users and cross-hub claims* and
+*Groups across hubs*): a claim reports the target under `not_admitted`, and a Commit or message
+forwarded to the owning hub answers 403 `not_admitted_by_peer`
+(`{"error":{"code":"not_admitted_by_peer","message":"a peer hub does not admit this user"}}`).
 
 Linking a new device: the new device shows a QR code with a `link_id`; the old device (signed in)
 posts `POST /v2/link-bundles {link_id, sealed_bundle, expires_in}` and uploads the DeviceList that
@@ -301,7 +331,9 @@ own hub:
   claimed locally; targets on another hub are claimed from their hubs (primary first, see
   [Multi-homing](#multi-homing)) on the caller's behalf (in parallel). The response gains
   `unavailable: [ClaimTarget]` for targets whose hub could not be reached, refused the request or
-  timed out; retry those later (claims are never retried by the hub). `missing` keeps its meaning (unknown user, no active device, no KeyPackage). If any
+  timed out; retry those later (claims are never retried by the hub). `not_admitted:
+  [ClaimTarget]` lists targets whose hub's user policy does not admit the caller (do not
+  retry; they cannot be added until that hub admits the caller). `missing` keeps its meaning (unknown user, no active device, no KeyPackage). If any
   target is on another hub, the caller needs a valid hosting record listing this hub (403
   `hosting_record_required`); no package is claimed then.
 
@@ -316,7 +348,8 @@ as on a single hub:
   another hub are forwarded to the owner; the response is the owner's result (same `seq`,
   `epoch`, `duplicate`, 409 `stale_epoch` with `current_epoch`, `client_id` replay), and the
   local replica already holds the message when the client gets it. Additional errors: 403
-  `hosting_record_required` (no valid hosting record lists this hub), 502 `peer_refused` (the
+  `hosting_record_required` (no valid hosting record lists this hub), 403 `not_admitted_by_peer`
+  (the owning hub's user policy does not admit the sender; do not retry), 502 `peer_refused` (the
   owning hub refused), 503 `peer_unavailable` with `Retry-After` (the owning hub is unreachable;
   retry with the same Commit or `client_id`, both are idempotent).
 - Adding a member of another hub works like a local Add: claim the KeyPackage through your own
@@ -361,12 +394,12 @@ without padding. A nonce that is not base64url without padding or does not decod
 GET /v2/hub
 {"hub_id":"hciqgrcknldyy6lbu2splf5frcdqeftipgfikjxbzeq6x6y55lggapay",
  "hub_root_pubkey":"F0VTtFbd38aQjsqxwQH+arIeK6oGF3lbfUOmNIKZP9U=",
- "version":"0.3.0","public_url":"https://hub-a.example.eu"}
+ "version":"0.4.0","public_url":"https://hub-a.example.eu"}
 
 GET /v2/hub?nonce=oKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr8
 {"hub_id":"hciqgrcknldyy6lbu2splf5frcdqeftipgfikjxbzeq6x6y55lggapay",
  "hub_root_pubkey":"F0VTtFbd38aQjsqxwQH+arIeK6oGF3lbfUOmNIKZP9U=",
- "version":"0.3.0","public_url":"https://hub-a.example.eu",
+ "version":"0.4.0","public_url":"https://hub-a.example.eu",
  "proof":"xDC4XeBqNVag459Oc3cA_DcSOAoJcOCtoe6CXOiFVP-ShX1tVjImuvh1fp6lEcVMbWSdfAVypyQsRolceTlIBQ"}
 ```
 

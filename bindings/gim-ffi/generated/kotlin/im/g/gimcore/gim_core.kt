@@ -9294,6 +9294,48 @@ sealed class GimException: kotlin.Exception() {
             get() = "hubId=${ `hubId` }"
     }
     
+    /**
+     * The user policy of the hub `hub_id` does not admit this user: the
+     * hub refused the registration (onboarding, `add_hub`: nothing was
+     * kept) or a sign-in. Handled like `UserSuspended`. Show "this hub
+     * does not admit you" and do not retry. `hub_id` is empty if unknown.
+     */
+    class UserNotAdmitted(
+        
+        val `hubId`: kotlin.String
+        ) : GimException() {
+        override val message
+            get() = "hubId=${ `hubId` }"
+    }
+    
+    /**
+     * The hub `hub_id` owning the chat `chat_id` does not admit this user:
+     * the message or member change was refused there and is not retried.
+     * Other chats are not affected. Do not offer a retry.
+     */
+    class NotAdmittedByPeer(
+        
+        val `hubId`: kotlin.String, 
+        
+        val `chatId`: kotlin.String
+        ) : GimException() {
+        override val message
+            get() = "hubId=${ `hubId` }, chatId=${ `chatId` }"
+    }
+    
+    /**
+     * `create_direct_chat` / `create_group_chat` / `add_members`: no user
+     * could be added, and the hubs of `user_ids` do not admit this user.
+     * Show "this user does not accept contacts from you".
+     */
+    class ContactNotAdmitted(
+        
+        val `userIds`: List<kotlin.String>
+        ) : GimException() {
+        override val message
+            get() = "userIds=${ `userIds` }"
+    }
+    
 
     
 
@@ -9366,6 +9408,16 @@ public object FfiConverterTypeGimError : FfiConverterRustBuffer<GimException> {
                 )
             18 -> GimException.UserSuspended(
                 FfiConverterString.read(buf),
+                )
+            19 -> GimException.UserNotAdmitted(
+                FfiConverterString.read(buf),
+                )
+            20 -> GimException.NotAdmittedByPeer(
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                )
+            21 -> GimException.ContactNotAdmitted(
+                FfiConverterSequenceString.read(buf),
                 )
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
@@ -9466,6 +9518,22 @@ public object FfiConverterTypeGimError : FfiConverterRustBuffer<GimException> {
                 4UL
                 + FfiConverterString.allocationSize(value.`hubId`)
             )
+            is GimException.UserNotAdmitted -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`hubId`)
+            )
+            is GimException.NotAdmittedByPeer -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`hubId`)
+                + FfiConverterString.allocationSize(value.`chatId`)
+            )
+            is GimException.ContactNotAdmitted -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterSequenceString.allocationSize(value.`userIds`)
+            )
         }
     }
 
@@ -9562,6 +9630,22 @@ public object FfiConverterTypeGimError : FfiConverterRustBuffer<GimException> {
             is GimException.UserSuspended -> {
                 buf.putInt(18)
                 FfiConverterString.write(value.`hubId`, buf)
+                Unit
+            }
+            is GimException.UserNotAdmitted -> {
+                buf.putInt(19)
+                FfiConverterString.write(value.`hubId`, buf)
+                Unit
+            }
+            is GimException.NotAdmittedByPeer -> {
+                buf.putInt(20)
+                FfiConverterString.write(value.`hubId`, buf)
+                FfiConverterString.write(value.`chatId`, buf)
+                Unit
+            }
+            is GimException.ContactNotAdmitted -> {
+                buf.putInt(21)
+                FfiConverterSequenceString.write(value.`userIds`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -9871,6 +9955,61 @@ public object FfiConverterTypeNotificationKind: FfiConverterRustBuffer<Notificat
 
 
 
+/**
+ * Why a message is `SendState::Failed`.
+ */
+
+enum class SendFailure {
+    
+    /**
+     * A hub suspended this user.
+     */
+    USER_SUSPENDED,
+    /**
+     * The user's hub does not admit this user.
+     */
+    USER_NOT_ADMITTED,
+    /**
+     * The hub owning the chat does not admit this user.
+     */
+    NOT_ADMITTED_BY_PEER,
+    /**
+     * The hub refused the message for good (e.g. not a member any more).
+     */
+    REJECTED,
+    /**
+     * Anything else (retries used up, a local failure, an older failure).
+     */
+    OTHER;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSendFailure: FfiConverterRustBuffer<SendFailure> {
+    override fun read(buf: ByteBuffer) = try {
+        SendFailure.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: SendFailure) = 4UL
+
+    override fun write(value: SendFailure, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
 sealed class SendState {
     
     /**
@@ -9898,10 +10037,12 @@ sealed class SendState {
     
     
     /**
-     * Gave up; `retry_send` or `cancel_send`.
+     * Gave up; `retry_send` or `cancel_send`. Hide Retry when `cause` is
+     * `UserSuspended`, `UserNotAdmitted` or `NotAdmittedByPeer`.
      */
     data class Failed(
-        val `reason`: kotlin.String) : SendState()
+        val `reason`: kotlin.String, 
+        val `cause`: im.g.gimcore.SendFailure) : SendState()
         
     {
         
@@ -9931,6 +10072,7 @@ public object FfiConverterTypeSendState : FfiConverterRustBuffer<SendState>{
             4 -> SendState.Read
             5 -> SendState.Failed(
                 FfiConverterString.read(buf),
+                FfiConverterTypeSendFailure.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
@@ -9966,6 +10108,7 @@ public object FfiConverterTypeSendState : FfiConverterRustBuffer<SendState>{
             (
                 4UL
                 + FfiConverterString.allocationSize(value.`reason`)
+                + FfiConverterTypeSendFailure.allocationSize(value.`cause`)
             )
         }
     }
@@ -9991,6 +10134,7 @@ public object FfiConverterTypeSendState : FfiConverterRustBuffer<SendState>{
             is SendState.Failed -> {
                 buf.putInt(5)
                 FfiConverterString.write(value.`reason`, buf)
+                FfiConverterTypeSendFailure.write(value.`cause`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }

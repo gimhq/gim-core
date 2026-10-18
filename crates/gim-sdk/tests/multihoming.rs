@@ -92,6 +92,9 @@ struct HubState {
     claimed: Mutex<HashSet<DeviceRef>>,
     /// Sign-ins answer 403 `user_suspended`.
     suspended: AtomicBool,
+    /// The user policy refuses the user: sign-ins and the first DeviceList
+    /// upload answer 403 `user_not_admitted`.
+    not_admitted: AtomicBool,
     /// Sign-in challenges requested.
     challenges: AtomicUsize,
     faults: Mutex<VecDeque<(Op, Fault)>>,
@@ -253,6 +256,13 @@ impl Transport for Hub {
     /// hub's users can sign in there.
     async fn put_device_list(&self, u: &UserId, list: Vec<u8>) -> TransportResult<()> {
         self.up()?;
+        if self.state.not_admitted.load(Ordering::SeqCst)
+            && self.own.service().device_list(u).is_none()
+        {
+            return Err(TransportError::UserNotAdmitted {
+                hub_id: String::new(),
+            });
+        }
         if self.own.service().hub_id() != self.owner.service().hub_id() {
             self.owner.put_device_list(u, list.clone()).await?;
         }
@@ -264,6 +274,11 @@ impl Transport for Hub {
         self.state.challenges.fetch_add(1, Ordering::SeqCst);
         if self.state.suspended.load(Ordering::SeqCst) {
             return Err(TransportError::UserSuspended {
+                hub_id: String::new(),
+            });
+        }
+        if self.state.not_admitted.load(Ordering::SeqCst) {
+            return Err(TransportError::UserNotAdmitted {
                 hub_id: String::new(),
             });
         }
@@ -417,7 +432,7 @@ impl Transport for Hub {
             .extend(claimed.iter().map(|k| k.device.clone()));
         Ok(KeyPackageClaim {
             key_packages: claimed,
-            unavailable: vec![],
+            ..KeyPackageClaim::default()
         })
     }
 
@@ -1171,6 +1186,68 @@ async fn added_hub_is_listed_signed_in_followed_and_shared_with_the_own_devices(
     assert!(on_tablet.signed_in);
     let tablet_device = tablet.client.session().unwrap().device;
     assert_eq!(s.fake_b.service().key_package_count(&tablet_device), batch);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hub_that_does_not_admit_the_user_is_not_added() {
+    let s = Setup::build(Options {
+        unlisted_b: true,
+        ..Options::default()
+    })
+    .await;
+    let device = s.device();
+    let b = Setup::hub_id(&s.fake_b);
+    s.hub_b.state.not_admitted.store(true, Ordering::SeqCst);
+    let result = s.alice.add_hub(HUB_B_URL).await;
+    assert!(
+        matches!(&result, Err(ClientError::UserNotAdmitted { hub_id }) if *hub_id == b),
+        "{result:?}"
+    );
+    // Unlisted: no hosting record entry, no sign-in, no KeyPackages there.
+    assert_eq!(s.alice.hubs().await.unwrap().len(), 1);
+    assert_eq!(s.stored_record(&s.fake_a).1.len(), 1);
+    assert!(s.hub_b.uploads().is_empty());
+    assert_eq!(s.fake_b.service().key_package_count(&device), 0);
+    assert!(s.fake_b.service().device_list(&device.user_id).is_none());
+    assert_eq!(s.hub_b.state.challenges.load(Ordering::SeqCst), 0);
+
+    // Once B admits the user, adding it works.
+    s.hub_b.state.not_admitted.store(false, Ordering::SeqCst);
+    let added = s.alice.add_hub(HUB_B_URL).await.unwrap();
+    assert_eq!(added.hub.hub_id, b);
+    assert_eq!(s.alice.hubs().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_hub_that_does_not_admit_the_user_is_skipped_like_an_unreachable_one() {
+    let s = Setup::new().await;
+    let b = Setup::hub_id(&s.fake_b);
+    let g = s.direct_chat().await;
+    s.alice.set_primary_hub(&b).await.unwrap();
+
+    // B's policy stops admitting alice: her session there is gone and B
+    // refuses sign-ins.
+    s.hub_b.state.not_admitted.store(true, Ordering::SeqCst);
+    s.fake_b.service().expire_sessions(&s.device());
+    let challenges = || s.hub_b.state.challenges.load(Ordering::SeqCst);
+    let before = challenges();
+    let posts_a = s.hub_a.posts().len();
+    let id = s.alice.send_text(&g, "via A", None).await.unwrap();
+    assert_eq!(
+        s.store.message(&id).unwrap().unwrap().send_state,
+        Some(SendState::Sent)
+    );
+    assert_eq!(s.hub_a.posts().len(), posts_a + 1);
+    assert_eq!(challenges(), before + 1);
+
+    // B is not asked again for 10 minutes.
+    let posts_b = s.hub_b.posts().len();
+    s.alice.send_text(&g, "via A again", None).await.unwrap();
+    assert_eq!(s.hub_a.posts().len(), posts_a + 2);
+    assert_eq!(s.hub_b.posts().len(), posts_b);
+    let synced = s.alice.sync_once().await;
+    assert!(synced.is_ok(), "{synced:?}");
+    assert_eq!(challenges(), before + 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

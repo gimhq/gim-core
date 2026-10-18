@@ -187,8 +187,24 @@ pub enum SendState {
     Delivered,
     /// Read on every device of every other member.
     Read,
-    /// Gave up; `retry_send` or `cancel_send`.
-    Failed { reason: String },
+    /// Gave up; `retry_send` or `cancel_send`. Hide Retry when `cause` is
+    /// `UserSuspended`, `UserNotAdmitted` or `NotAdmittedByPeer`.
+    Failed { reason: String, cause: SendFailure },
+}
+
+/// Why a message is `SendState::Failed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum SendFailure {
+    /// A hub suspended this user.
+    UserSuspended,
+    /// The user's hub does not admit this user.
+    UserNotAdmitted,
+    /// The hub owning the chat does not admit this user.
+    NotAdmittedByPeer,
+    /// The hub refused the message for good (e.g. not a member any more).
+    Rejected,
+    /// Anything else (retries used up, a local failure, an older failure).
+    Other,
 }
 
 /// Where a hub of the user's hosting record stands on this device.

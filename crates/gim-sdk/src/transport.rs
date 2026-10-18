@@ -101,6 +101,9 @@ pub struct KeyPackageClaim {
     /// Users whose hub could not be reached, refused the request or timed
     /// out (federation); claiming them again later may succeed.
     pub unavailable: Vec<UserId>,
+    /// Users whose hub's user policy does not admit this user
+    /// (federation); claiming them again cannot succeed.
+    pub not_admitted: Vec<UserId>,
 }
 
 /// A Commit (or a Proposal) to submit to a group.
@@ -242,6 +245,17 @@ pub enum TransportError {
     /// transport does not know it (a raw transport answer).
     #[error("user suspended on hub {hub_id}")]
     UserSuspended { hub_id: String },
+    /// 403 `user_not_admitted` from a sign-in or from the first DeviceList
+    /// upload (registration): the user policy of `hub_id` does not admit
+    /// the user. Handled like [`TransportError::UserSuspended`]; `hub_id`
+    /// is empty when the transport does not know it.
+    #[error("user not admitted on hub {hub_id}")]
+    UserNotAdmitted { hub_id: String },
+    /// 403 `not_admitted_by_peer` from a Commit or message post: `hub_id`,
+    /// the hub owning `group_id`, does not admit the user. A definite
+    /// answer for this request; every hub forwards to the same owner.
+    #[error("hub {hub_id} owning {group_id} does not admit the user")]
+    NotAdmittedByPeer { hub_id: String, group_id: String },
     /// The hub at the contacted URL did not prove that it is the expected
     /// hub at that URL (`GET /v2/hub` proof of possession, or the URL of
     /// its sign-in challenge): a wrong URL or a relay. Nothing that needs a
@@ -286,6 +300,25 @@ impl TransportError {
                 retry_after_secs, ..
             } => Some(Duration::from_secs(*retry_after_secs)),
             _ => None,
+        }
+    }
+
+    /// The hub refuses to sign the user in (suspended or not admitted):
+    /// no sign-in is attempted there for a while.
+    pub fn refuses_user(&self) -> bool {
+        matches!(
+            self,
+            Self::UserSuspended { .. } | Self::UserNotAdmitted { .. }
+        )
+    }
+
+    /// The same refusal, naming `hub_id`.
+    pub(crate) fn on_hub(self, hub_id: &str) -> Self {
+        let hub_id = hub_id.to_string();
+        match self {
+            Self::UserSuspended { .. } => Self::UserSuspended { hub_id },
+            Self::UserNotAdmitted { .. } => Self::UserNotAdmitted { hub_id },
+            err => err,
         }
     }
 
@@ -364,7 +397,9 @@ pub trait Transport: Send + Sync {
     }
 
     /// Stores the user's signed DeviceList (no token: it bootstraps the
-    /// user). `Conflict` if it does not supersede the stored one.
+    /// user). `Conflict` if it does not supersede the stored one;
+    /// [`TransportError::UserNotAdmitted`] if the hub refuses to register
+    /// the user.
     async fn put_device_list(&self, user_id: &UserId, device_list: Vec<u8>) -> TransportResult<()>;
 
     /// A sign-in challenge for `device`, which must be active in its user's
@@ -470,7 +505,7 @@ pub trait Transport: Send + Sync {
     ) -> TransportResult<KeyPackageClaim> {
         Ok(KeyPackageClaim {
             key_packages: self.claim_key_packages(token, users).await?,
-            unavailable: vec![],
+            ..KeyPackageClaim::default()
         })
     }
 
