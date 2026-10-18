@@ -177,6 +177,7 @@ impl Reader<'_> {
                 last_error: data.last_error,
                 prepared: data.prepared.map(Into::into),
                 created_at_ms: get(row, 4)?,
+                failure: data.failure.map(Into::into),
             })
         })
     }

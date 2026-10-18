@@ -22,6 +22,22 @@ pub enum ClientError {
     /// not retry. `hub_id` is empty if the home hub has no hub identity.
     #[error("user suspended on hub {hub_id}")]
     UserSuspended { hub_id: String },
+    /// The hub `hub_id` answered a sign-in or the registration (the first
+    /// DeviceList upload) with 403 `user_not_admitted`: its user policy
+    /// does not admit the user. Handled like [`ClientError::UserSuspended`]
+    /// (no sign-in there for 10 minutes). Show "this hub does not admit
+    /// you" and do not retry. `hub_id` is empty if not known.
+    #[error("user not admitted on hub {hub_id}")]
+    UserNotAdmitted { hub_id: String },
+    /// A Commit or message post to `group_id` answered 403
+    /// `not_admitted_by_peer`: `hub_id`, the hub owning the group, does
+    /// not admit the user. Not retried; other groups are not affected.
+    #[error("hub {hub_id} owning {group_id} does not admit the user")]
+    NotAdmittedByPeer { hub_id: String, group_id: String },
+    /// None of the users to add could be claimed, and the hubs of
+    /// `user_ids` do not admit this user (claim `not_admitted`).
+    #[error("users {user_ids:?} do not accept contacts from this user")]
+    ContactNotAdmitted { user_ids: Vec<gim_common::UserId> },
     #[error("already logged in")]
     AlreadyLoggedIn,
     #[error("invalid stored session: {0}")]
@@ -95,6 +111,10 @@ impl From<TransportError> for ClientError {
         match err {
             TransportError::DeviceNotActive(reason) => Self::DeviceNotActive(reason),
             TransportError::UserSuspended { hub_id } => Self::UserSuspended { hub_id },
+            TransportError::UserNotAdmitted { hub_id } => Self::UserNotAdmitted { hub_id },
+            TransportError::NotAdmittedByPeer { hub_id, group_id } => {
+                Self::NotAdmittedByPeer { hub_id, group_id }
+            }
             err => Self::Transport(err),
         }
     }

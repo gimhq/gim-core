@@ -77,14 +77,49 @@ pub(super) fn from_status(
 
 /// Maps the error of a sign-in request (`POST /v2/auth/challenge`,
 /// `POST /v2/auth/session`): 403 `user_suspended` becomes
-/// [`TransportError::UserSuspended`]. Only these two endpoints return that
-/// code; elsewhere it stays a generic [`TransportError::Rejected`].
+/// [`TransportError::UserSuspended`], 403 `user_not_admitted`
+/// [`TransportError::UserNotAdmitted`]. Only these endpoints (and the
+/// DeviceList upload for `user_not_admitted`) return those codes; elsewhere
+/// they stay a generic [`TransportError::Rejected`].
 pub(super) fn sign_in(err: TransportError) -> TransportError {
     match err {
         TransportError::Rejected {
             status: 403, code, ..
         } if code == v2::USER_SUSPENDED => TransportError::UserSuspended {
             hub_id: String::new(),
+        },
+        err => device_list(err),
+    }
+}
+
+/// Maps the error of `PUT /v2/users/{user_id}/device-list`: 403
+/// `user_not_admitted` (a registration the hub's user policy refuses)
+/// becomes [`TransportError::UserNotAdmitted`].
+pub(super) fn device_list(err: TransportError) -> TransportError {
+    match err {
+        TransportError::Rejected {
+            status: 403, code, ..
+        } if code == v2::USER_NOT_ADMITTED => TransportError::UserNotAdmitted {
+            hub_id: String::new(),
+        },
+        err => err,
+    }
+}
+
+/// Maps the error of `POST /v2/groups/{gid}/commits` and `/messages`: 403
+/// `not_admitted_by_peer` becomes [`TransportError::NotAdmittedByPeer`]
+/// for `group_id`, owned by the hub its id starts with.
+pub(super) fn group_post(err: TransportError, group_id: &str) -> TransportError {
+    match err {
+        TransportError::Rejected {
+            status: 403, code, ..
+        } if code == v2::NOT_ADMITTED_BY_PEER => TransportError::NotAdmittedByPeer {
+            hub_id: group_id
+                .split_once('/')
+                .map(|(hub, _)| hub)
+                .unwrap_or_default()
+                .to_string(),
+            group_id: group_id.to_string(),
         },
         err => err,
     }

@@ -80,6 +80,48 @@ impl Hub {
     }
 }
 
+/// Runs `cmd` in the running container `container` (`docker exec`
+/// through the Engine API): its exit code and output (stdout and stderr,
+/// with the Engine API's stream headers), or why the Engine API failed.
+pub fn docker_exec(container: &str, cmd: &[&str]) -> Result<(i64, String), String> {
+    let curl = |method: &str, path: &str, body: Option<String>| {
+        let mut args = vec![
+            "-sf".to_string(),
+            "--unix-socket".into(),
+            DOCKER_SOCKET.into(),
+            "-X".into(),
+            method.into(),
+        ];
+        if let Some(body) = body {
+            args.extend(["-H".into(), "Content-Type: application/json".into()]);
+            args.extend(["-d".into(), body]);
+        }
+        args.push(format!("http://localhost{path}"));
+        match Command::new("curl").args(&args).output() {
+            Ok(out) if out.status.success() => Ok(out.stdout),
+            _ => Err(format!("docker API {method} {path} failed")),
+        }
+    };
+    let json = |bytes: Vec<u8>| {
+        serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|e| e.to_string())
+    };
+    let create = serde_json::json!({"AttachStdout": true, "AttachStderr": true, "Cmd": cmd});
+    let created = json(curl(
+        "POST",
+        &format!("/containers/{container}/exec"),
+        Some(create.to_string()),
+    )?)?;
+    let id = created["Id"].as_str().ok_or("no exec id")?.to_string();
+    let output = curl(
+        "POST",
+        &format!("/exec/{id}/start"),
+        Some(r#"{"Detach":false,"Tty":false}"#.into()),
+    )?;
+    let inspected = json(curl("GET", &format!("/exec/{id}/json"), None)?)?;
+    let code = inspected["ExitCode"].as_i64().unwrap_or(-1);
+    Ok((code, String::from_utf8_lossy(&output).into_owned()))
+}
+
 /// POSTs to the Docker Engine API; 204 (done) and 304 (already in that
 /// state) succeed.
 fn docker_api(path: &str) {

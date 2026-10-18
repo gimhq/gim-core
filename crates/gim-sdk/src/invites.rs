@@ -83,7 +83,8 @@ struct Outcome {
     claimed: BTreeSet<UserId>,
     /// Still unreachable: claimed again later.
     unavailable: Vec<UserId>,
-    /// Expired, unknown to their hub, or without a device: dropped.
+    /// Expired, unknown to their hub, without a device, or their hub does
+    /// not admit this user: dropped.
     failed: Vec<UserId>,
 }
 

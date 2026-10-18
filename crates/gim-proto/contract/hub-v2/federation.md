@@ -145,7 +145,9 @@ Rules:
 
 ### 3.3 Allowlist and PSK
 
-`AllowlistPolicy` is configured by the file `GIM_HUB_FEDERATION_ALLOWLIST` (§10). The allowlist
+`AllowlistPolicy` is configured by the file `GIM_HUB_FEDERATION_ALLOWLIST` (§10) or, when that is
+unset, by the `federation_allowlist` table edited through the admin API or `gim-hub config
+allowlist set` (applied at once, like SIGHUP; [`operations.md`](operations.md), "Federation"). The allowlist
 holds **hub_ids** (which commit to the hub root public key), never PeerIds, so runtime-key
 rotation needs no allowlist change:
 
@@ -163,7 +165,7 @@ hbbbbbb...                                                # address learned from
   their outbox entries kept (they expire by TTL, §7.5).
 - An empty or missing allowlist with federation enabled stops startup.
 
-PSK (optional, `GIM_HUB_P2P_PSK_FILE`, libp2p `swarm.key` format
+PSK (optional, `GIM_HUB_P2P_PSK_FILE` or the content in `GIM_HUB_P2P_PSK`, libp2p `swarm.key` format
 `/key/swarm/psk/1.0.0/\n/base16/\n<64 hex chars>`):
 
 - libp2p pnet only wraps stream transports, so with a PSK **the hub runs TCP only**: QUIC is
@@ -1353,8 +1355,9 @@ invalid value stops the hub naming the variable). All are ignored unless `GIM_HU
 | `GIM_HUB_P2P_LISTEN` | `/ip4/0.0.0.0/udp/4001/quic-v1,/ip4/0.0.0.0/tcp/4001` | Comma-separated listen multiaddrs (TCP only when a PSK is set) |
 | `GIM_HUB_P2P_EXTERNAL_ADDRS` | unset | Comma-separated multiaddrs advertised in `Hello` and the locator (default: the listen addresses that are not unspecified) |
 | `GIM_HUB_P2P_BOOTSTRAP` | unset | Comma-separated bootstrap multiaddrs, `/p2p/<PeerId>` optional |
-| `GIM_HUB_FEDERATION_ALLOWLIST` | `$GIM_HUB_DATA_DIR/allowlist` | Allowlist file (§3.3), reloaded on SIGHUP |
+| `GIM_HUB_FEDERATION_ALLOWLIST` | unset | Allowlist file (§3.3), reloaded on SIGHUP; unset: the stored allowlist ([`operations.md`](operations.md), "Federation") |
 | `GIM_HUB_P2P_PSK_FILE` | unset | libp2p `swarm.key` file; set = pnet on, TCP only |
+| `GIM_HUB_P2P_PSK` | unset | The `swarm.key` content itself (secret, may be stored); the file wins when both are set |
 | `GIM_HUB_RUNTIME_CERT_DAYS` | `30` | Runtime certificate lifetime (minimum 2) |
 | `GIM_HUB_S2S_TIMEOUT_SECONDS` | `10` | Timeout of one S2S request |
 | `GIM_HUB_DHT_REPUBLISH_HOURS` | `12` | Republish cadence of hosted users' records |
@@ -1366,7 +1369,9 @@ invalid value stops the hub naming the variable). All are ignored unless `GIM_HU
 | `GIM_HUB_OUTBOX_BACKOFF_MAX_SECONDS` | `300` | Maximum retry backoff per peer |
 | `GIM_HUB_FETCH_BLOB_PER_MINUTE` | `600` | `FetchBlob` requests served per caller hub and minute (§5.6, minimum 1) |
 
-Data directory additions: `runtime_key`, `runtime_cert`, `allowlist` (default location). The
+Every variable except the bootstrap ones may also be stored in the database (precedence
+env > stored > default; [`operations.md`](operations.md), "Stored settings"). Data directory
+additions: `runtime_key`, `runtime_cert`, `allowlist` (legacy default location). The
 Docker image exposes 4001/tcp and 4001/udp. The `hub_id` and the PeerId are logged at startup;
 `gim-hub hub-id` prints the `hub_id` (needed to build allowlists before first start:
 `gim-hub hub-id` creates `hub_key` if missing).

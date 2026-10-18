@@ -331,6 +331,7 @@ impl Transport for FlakyTransport {
         Ok(KeyPackageClaim {
             key_packages: self.inner.claim_key_packages(t, &reachable).await?,
             unavailable,
+            ..KeyPackageClaim::default()
         })
     }
 

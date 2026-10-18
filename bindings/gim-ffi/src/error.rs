@@ -79,6 +79,22 @@ pub enum GimError {
     /// `hub_id` is empty if the home hub has no hub identity.
     #[error("user suspended on hub {hub_id}")]
     UserSuspended { hub_id: String },
+    /// The user policy of the hub `hub_id` does not admit this user: the
+    /// hub refused the registration (onboarding, `add_hub`: nothing was
+    /// kept) or a sign-in. Handled like `UserSuspended`. Show "this hub
+    /// does not admit you" and do not retry. `hub_id` is empty if unknown.
+    #[error("user not admitted on hub {hub_id}")]
+    UserNotAdmitted { hub_id: String },
+    /// The hub `hub_id` owning the chat `chat_id` does not admit this user:
+    /// the message or member change was refused there and is not retried.
+    /// Other chats are not affected. Do not offer a retry.
+    #[error("hub {hub_id} owning chat {chat_id} does not admit this user")]
+    NotAdmittedByPeer { hub_id: String, chat_id: String },
+    /// `create_direct_chat` / `create_group_chat` / `add_members`: no user
+    /// could be added, and the hubs of `user_ids` do not admit this user.
+    /// Show "this user does not accept contacts from you".
+    #[error("users {user_ids:?} do not accept contacts from this user")]
+    ContactNotAdmitted { user_ids: Vec<String> },
 }
 
 impl From<uniffi::UnexpectedUniFFICallbackError> for GimError {
@@ -125,6 +141,14 @@ impl From<gim_sdk::ClientError> for GimError {
             E::HomeHub(hub_id) => Self::HomeHub { hub_id },
             E::HubNotDrained { hub_id, reason } => Self::HubNotDrained { hub_id, reason },
             E::UserSuspended { hub_id } => Self::UserSuspended { hub_id },
+            E::UserNotAdmitted { hub_id } => Self::UserNotAdmitted { hub_id },
+            E::NotAdmittedByPeer { hub_id, group_id } => Self::NotAdmittedByPeer {
+                hub_id,
+                chat_id: group_id,
+            },
+            E::ContactNotAdmitted { user_ids } => Self::ContactNotAdmitted {
+                user_ids: user_ids.into_iter().map(Into::into).collect(),
+            },
         }
     }
 }
@@ -159,6 +183,11 @@ impl From<gim_sdk::TransportError> for GimError {
             E::TooLarge(_) => Self::InvalidInput { reason },
             E::DeviceNotActive(_) => Self::NotRegistered,
             E::UserSuspended { hub_id } => Self::UserSuspended { hub_id },
+            E::UserNotAdmitted { hub_id } => Self::UserNotAdmitted { hub_id },
+            E::NotAdmittedByPeer { hub_id, group_id } => Self::NotAdmittedByPeer {
+                hub_id,
+                chat_id: group_id,
+            },
             E::HubNotVerified(_) => Self::HubNotVerified { reason },
             E::HostingRecordRequired(_) => Self::Server {
                 status: 403,
@@ -379,5 +408,39 @@ mod tests {
             GimError::from(ClientError::Transport(forbidden)),
             GimError::Server { status: 403, .. }
         ));
+    }
+
+    #[test]
+    fn user_policy_refusals() {
+        let not_admitted = GimError::UserNotAdmitted {
+            hub_id: "hb".into(),
+        };
+        let from_transport = TransportError::UserNotAdmitted {
+            hub_id: "hb".into(),
+        };
+        assert_eq!(
+            GimError::from(ClientError::from(from_transport.clone())),
+            not_admitted
+        );
+        assert_eq!(GimError::from(from_transport), not_admitted);
+        let by_peer = TransportError::NotAdmittedByPeer {
+            hub_id: "hb".into(),
+            group_id: "hb/g1".into(),
+        };
+        let expected = GimError::NotAdmittedByPeer {
+            hub_id: "hb".into(),
+            chat_id: "hb/g1".into(),
+        };
+        assert_eq!(GimError::from(ClientError::from(by_peer.clone())), expected);
+        assert_eq!(GimError::from(by_peer), expected);
+        let user = gim_common::UserId::new("u_contact").unwrap();
+        assert_eq!(
+            GimError::from(ClientError::ContactNotAdmitted {
+                user_ids: vec![user.clone()]
+            }),
+            GimError::ContactNotAdmitted {
+                user_ids: vec![user.to_string()]
+            }
+        );
     }
 }

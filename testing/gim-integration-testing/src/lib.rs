@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 pub mod federation;
+pub mod policy;
 pub mod push;
 pub mod sdk;
 

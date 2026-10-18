@@ -10,8 +10,8 @@ use gim_base::model::{
     Chat, ChatKind, ChatMember, DepartedMember, GroupCursor, GroupMessage, HubRecord, HubState,
     KeyPackageRecord, MediaCacheEntry, Membership, MembershipChangeKind, MembershipEvent, Message,
     MessageContent, MessageKind, OutboxEntry, OutboxKind, OutboxState, PendingCommit,
-    PendingInvite, PendingLeave, PendingMedia, PendingWelcome, PreparedPayload, SendState,
-    UserInfo,
+    PendingInvite, PendingLeave, PendingMedia, PendingWelcome, PreparedPayload, SendFailure,
+    SendState, UserInfo,
 };
 use gim_base::{
     BaseError, MemoryStore, StateReader, StateStore, StoreError, StoreTxn, WriteTarget,
@@ -80,6 +80,47 @@ fn state_and_mls_groups_survive_reopen() {
     let hey = carol.send_text(&ds, &g, "hey");
     bob.sync(&ds);
     assert_eq!(bob.message(&hey).content, text_content("hey"));
+}
+
+#[test]
+fn send_failure_cause_survives_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let ds = FakeDeliveryService::new();
+    let g = group("crew");
+    let alice = Device::with_store("alice", SqliteStore::open(dir.path(), &key()).unwrap());
+    alice.create_chat(&ds, &g);
+    let refused = alice.enqueue(&g, text("refused"));
+    let rejected = alice.enqueue(&g, text("rejected"));
+    let retrying = alice.enqueue(&g, text("retrying"));
+    alice
+        .client
+        .mark_failed_with(
+            &alice.store,
+            &refused,
+            "not admitted",
+            false,
+            SendFailure::NotAdmittedByPeer,
+            NOW,
+        )
+        .unwrap();
+    alice
+        .client
+        .mark_failed(&alice.store, &rejected, "403", false, NOW)
+        .unwrap();
+    alice
+        .client
+        .mark_failed(&alice.store, &retrying, "timeout", true, NOW)
+        .unwrap();
+
+    let alice = reopen(alice, dir.path());
+    let failure = |id: &MessageId| alice.store.outbox_entry(id).unwrap().unwrap().failure;
+    assert_eq!(failure(&refused), Some(SendFailure::NotAdmittedByPeer));
+    assert_eq!(failure(&rejected), Some(SendFailure::Rejected));
+    assert_eq!(failure(&retrying), None);
+    assert_eq!(alice.message(&refused).send_state, Some(SendState::Failed));
+    // A manual retry clears the cause.
+    alice.client.retry(&alice.store, &refused, NOW).unwrap();
+    assert_eq!(failure(&refused), None);
 }
 
 #[cfg(unix)]
@@ -294,6 +335,7 @@ fn outbox(message_id: &str, state: OutboxState, next: u64, created: u64) -> Outb
         last_error: None,
         prepared: None,
         created_at_ms: created,
+        failure: None,
     }
 }
 

@@ -176,7 +176,8 @@ impl<S: StateStore + 'static> Client<S> {
     /// Expired tokens are renewed by signing in again; the loop stops by
     /// itself only when the hub rejects the device's sign-in; see
     /// [`Client::stop_sync`]. A hub that suspended the user
-    /// ([`ClientError::UserSuspended`]) is not contacted again for 10
+    /// ([`ClientError::UserSuspended`]) or does not admit them
+    /// ([`ClientError::UserNotAdmitted`]) is not contacted again for 10
     /// minutes; its loop waits offline meanwhile. Alongside, the user's hosting record is
     /// renewed when due: at start, daily and on `hosting_record.expiring`,
     /// and pending invites are retried (see [`Client::pending_invites`]).
@@ -446,7 +447,9 @@ impl<S: StateStore + 'static> Client<S> {
             self.report(&link, ConnectionState::Offline);
             let delay = match err {
                 // No sign-in there for a while: the hub is unusable.
-                ClientError::UserSuspended { .. } => SUSPENDED_RETRY,
+                ClientError::UserSuspended { .. } | ClientError::UserNotAdmitted { .. } => {
+                    SUSPENDED_RETRY
+                }
                 _ => backoff.next_delay(),
             };
             tracing::debug!(hub_id = link.name(), error = %err, ?delay, "hub sync failed; reconnecting");
@@ -476,7 +479,7 @@ impl<S: StateStore + 'static> Client<S> {
                 tracing::warn!("sign-in rejected; sync stopped");
                 return Err(ClientError::NotRegistered);
             }
-            if let ClientError::UserSuspended { .. } = err {
+            if let ClientError::UserSuspended { .. } | ClientError::UserNotAdmitted { .. } = err {
                 // Offline until the next sign-in attempt; the other hubs'
                 // loops keep running. A wake-up does not cut this short.
                 tracing::warn!(error = %err, retry = ?SUSPENDED_RETRY, "sync of the home hub paused");
@@ -570,7 +573,9 @@ impl<S: StateStore + 'static> Client<S> {
                     stream = Some(opened);
                 }
                 Err(
-                    err @ (TransportError::Unauthorized | TransportError::UserSuspended { .. }),
+                    err @ (TransportError::Unauthorized
+                    | TransportError::UserSuspended { .. }
+                    | TransportError::UserNotAdmitted { .. }),
                 ) => return Err(err.into()),
                 Ok(None) | Err(_) => {
                     tracing::debug!(
@@ -944,7 +949,8 @@ impl<S: StateStore + 'static> Client<S> {
             Err(
                 err @ (TransportError::Network(_)
                 | TransportError::Unauthorized
-                | TransportError::UserSuspended { .. }),
+                | TransportError::UserSuspended { .. }
+                | TransportError::UserNotAdmitted { .. }),
             ) => Err(err.into()),
             Err(err) => {
                 tracing::warn!(error = %err, "cannot list groups");
@@ -1238,7 +1244,8 @@ impl<S: StateStore + 'static> Client<S> {
                 Err(
                     err @ (TransportError::Network(_)
                     | TransportError::Unauthorized
-                    | TransportError::UserSuspended { .. }),
+                    | TransportError::UserSuspended { .. }
+                    | TransportError::UserNotAdmitted { .. }),
                 ) => return Err(err.into()),
                 // The join fails on the unknown members instead.
                 Err(err) => tracing::debug!(%group_id, error = %err, "no roster of a joined group"),
@@ -1416,7 +1423,8 @@ impl<S: StateStore + 'static> Client<S> {
                 Err(
                     err @ (TransportError::Network(_)
                     | TransportError::Unauthorized
-                    | TransportError::UserSuspended { .. }),
+                    | TransportError::UserSuspended { .. }
+                    | TransportError::UserNotAdmitted { .. }),
                 ) => return Err(err.into()),
                 Err(err) => {
                     tracing::debug!(%group_id, error = %err, "cannot read group history");

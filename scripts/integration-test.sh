@@ -9,7 +9,10 @@
 # on failure. The hub commit is printed before the tests run. The hub
 # pushes membership events (GIM_HUB_PUSH_MEMBER_EVENTS=true); a second hub
 # from the same image sends minimal push payloads (GIM_HUB_PUSH_MINIMAL=true,
-# GIM_HUB_MINIMAL_URL in the tests). Both serve the test push log.
+# GIM_HUB_MINIMAL_URL in the tests). Both serve the test push log. The
+# Docker socket is mounted and GIM_HUB_CONTAINER names the hub, so the user
+# policy tests can change its settings with `gim-hub config` (they restore
+# the open policy). The hubs start with the default policy, open.
 #
 # With GIM_FEDERATION=1 it runs the federation suite
 # (tests/federation.rs) instead: `gim-hub-dev.sh fed-start` starts a closed
@@ -106,6 +109,7 @@ echo "gim-hub commit under test: $("$repo/scripts/gim-hub-dev.sh" commit "$hub")
 docker run --rm --label ai-agent=true --network "$network" \
     -v "$repo:$repo" -w "$repo" \
     -v "$cargo_cache:/cache/cargo" -e CARGO_HOME=/cache/cargo \
+    -v /var/run/docker.sock:/var/run/docker.sock -e GIM_HUB_CONTAINER="$hub" \
     "${cargo_env[@]}" -e GIM_HUB_URL="http://$hub:8080" \
     -e GIM_HUB_PUSH_MEMBER_EVENTS=true -e GIM_HUB_MINIMAL_URL="http://$minimal_hub:8080" \
     rust:1 cargo test -p gim-integration-testing --no-fail-fast -- --include-ignored --nocapture "$@"

@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use gim_base::model::{
     ChatKind, ChatMember, Membership, MessageContent, MessageKind, OutboxKind, PendingCommit,
-    PendingLeave, PendingMedia, PendingWelcome, PreparedPayload, SendState,
+    PendingLeave, PendingMedia, PendingWelcome, PreparedPayload, SendFailure, SendState,
 };
 use gim_base::StoreError;
 use gim_common::{ClientId, DeviceRef, GroupId, MessageId, UserId};
@@ -287,6 +287,43 @@ pub(crate) struct OutboxData {
     pub attempts: u32,
     pub last_error: Option<String>,
     pub prepared: Option<PreparedRow>,
+    /// Absent from rows written before the cause was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<SendFailureRow>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SendFailureRow {
+    UserSuspended,
+    UserNotAdmitted,
+    NotAdmittedByPeer,
+    Rejected,
+    Other,
+}
+
+impl From<SendFailure> for SendFailureRow {
+    fn from(failure: SendFailure) -> Self {
+        match failure {
+            SendFailure::UserSuspended => Self::UserSuspended,
+            SendFailure::UserNotAdmitted => Self::UserNotAdmitted,
+            SendFailure::NotAdmittedByPeer => Self::NotAdmittedByPeer,
+            SendFailure::Rejected => Self::Rejected,
+            SendFailure::Other => Self::Other,
+        }
+    }
+}
+
+impl From<SendFailureRow> for SendFailure {
+    fn from(failure: SendFailureRow) -> Self {
+        match failure {
+            SendFailureRow::UserSuspended => Self::UserSuspended,
+            SendFailureRow::UserNotAdmitted => Self::UserNotAdmitted,
+            SendFailureRow::NotAdmittedByPeer => Self::NotAdmittedByPeer,
+            SendFailureRow::Rejected => Self::Rejected,
+            SendFailureRow::Other => Self::Other,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]

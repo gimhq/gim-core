@@ -28,8 +28,8 @@ pub use timeline::{LocalTimeZone, Timeline, TimelineDiff, TimelineListener};
 pub use types::{
     ChatKind, ChatState, ChatSummary, ConnectionState, DeviceInfo, HubInfo, HubState, MediaRef,
     MembershipChangeKind, MessageContent, MessageItem, MessagePreview, NotificationContent,
-    NotificationKind, PushRegistration, ReactionGroup, ReplyPreview, SendState, Session,
-    TimelineItem, UserProfile,
+    NotificationKind, PushRegistration, ReactionGroup, ReplyPreview, SendFailure, SendState,
+    Session, TimelineItem, UserProfile,
 };
 
 uniffi::setup_scaffolding!();
