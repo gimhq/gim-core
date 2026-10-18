@@ -292,10 +292,13 @@ impl<S: StateStore + 'static> Client<S> {
                     .await
                 {
                     // A commit of unknown outcome stays pending with them;
+                    // one the owning hub refuses for this user drops them;
                     // otherwise claim them again later.
-                    if !matches!(&err, ClientError::Transport(e) if crate::client::outcome_unknown(e))
+                    let claimed: Vec<UserId> = outcome.claimed.iter().cloned().collect();
+                    if let ClientError::NotAdmittedByPeer { .. } = err {
+                        outcome.failed.extend(claimed);
+                    } else if !matches!(&err, ClientError::Transport(e) if crate::client::outcome_unknown(e))
                     {
-                        let claimed: Vec<UserId> = outcome.claimed.iter().cloned().collect();
                         self.restore_invites(group_id, &claimed, now);
                     }
                     self.fail_invites(session, group_id, outcome.failed).await?;
