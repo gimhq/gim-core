@@ -6166,6 +6166,28 @@ enum GimError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
      */
     case UserSuspended(hubId: String
     )
+    /**
+     * The user policy of the hub `hub_id` does not admit this user: the
+     * hub refused the registration (onboarding, `add_hub`: nothing was
+     * kept) or a sign-in. Handled like `UserSuspended`. Show "this hub
+     * does not admit you" and do not retry. `hub_id` is empty if unknown.
+     */
+    case UserNotAdmitted(hubId: String
+    )
+    /**
+     * The hub `hub_id` owning the chat `chat_id` does not admit this user:
+     * the message or member change was refused there and is not retried.
+     * Other chats are not affected. Do not offer a retry.
+     */
+    case NotAdmittedByPeer(hubId: String, chatId: String
+    )
+    /**
+     * `create_direct_chat` / `create_group_chat` / `add_members`: no user
+     * could be added, and the hubs of `user_ids` do not admit this user.
+     * Show "this user does not accept contacts from you".
+     */
+    case ContactNotAdmitted(userIds: [String]
+    )
 
     
 
@@ -6248,6 +6270,16 @@ public struct FfiConverterTypeGimError: FfiConverterRustBuffer {
             )
         case 18: return .UserSuspended(
             hubId: try FfiConverterString.read(from: &buf)
+            )
+        case 19: return .UserNotAdmitted(
+            hubId: try FfiConverterString.read(from: &buf)
+            )
+        case 20: return .NotAdmittedByPeer(
+            hubId: try FfiConverterString.read(from: &buf), 
+            chatId: try FfiConverterString.read(from: &buf)
+            )
+        case 21: return .ContactNotAdmitted(
+            userIds: try FfiConverterSequenceString.read(from: &buf)
             )
 
          default: throw UniffiInternalError.unexpectedEnumCase
@@ -6352,6 +6384,22 @@ public struct FfiConverterTypeGimError: FfiConverterRustBuffer {
         case let .UserSuspended(hubId):
             writeInt(&buf, Int32(18))
             FfiConverterString.write(hubId, into: &buf)
+            
+        
+        case let .UserNotAdmitted(hubId):
+            writeInt(&buf, Int32(19))
+            FfiConverterString.write(hubId, into: &buf)
+            
+        
+        case let .NotAdmittedByPeer(hubId,chatId):
+            writeInt(&buf, Int32(20))
+            FfiConverterString.write(hubId, into: &buf)
+            FfiConverterString.write(chatId, into: &buf)
+            
+        
+        case let .ContactNotAdmitted(userIds):
+            writeInt(&buf, Int32(21))
+            FfiConverterSequenceString.write(userIds, into: &buf)
             
         }
     }
@@ -6745,6 +6793,111 @@ public func FfiConverterTypeNotificationKind_lower(_ value: NotificationKind) ->
 
 
 
+/**
+ * Why a message is `SendState::Failed`.
+ */
+
+public enum SendFailure: Equatable, Hashable {
+    
+    /**
+     * A hub suspended this user.
+     */
+    case userSuspended
+    /**
+     * The user's hub does not admit this user.
+     */
+    case userNotAdmitted
+    /**
+     * The hub owning the chat does not admit this user.
+     */
+    case notAdmittedByPeer
+    /**
+     * The hub refused the message for good (e.g. not a member any more).
+     */
+    case rejected
+    /**
+     * Anything else (retries used up, a local failure, an older failure).
+     */
+    case other
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SendFailure: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSendFailure: FfiConverterRustBuffer {
+    typealias SwiftType = SendFailure
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SendFailure {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .userSuspended
+        
+        case 2: return .userNotAdmitted
+        
+        case 3: return .notAdmittedByPeer
+        
+        case 4: return .rejected
+        
+        case 5: return .other
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SendFailure, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .userSuspended:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .userNotAdmitted:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .notAdmittedByPeer:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .rejected:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .other:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSendFailure_lift(_ buf: RustBuffer) throws -> SendFailure {
+    return try FfiConverterTypeSendFailure.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSendFailure_lower(_ value: SendFailure) -> RustBuffer {
+    return FfiConverterTypeSendFailure.lower(value)
+}
+
+
+
 
 public enum SendState: Equatable, Hashable {
     
@@ -6765,9 +6918,10 @@ public enum SendState: Equatable, Hashable {
      */
     case read
     /**
-     * Gave up; `retry_send` or `cancel_send`.
+     * Gave up; `retry_send` or `cancel_send`. Hide Retry when `cause` is
+     * `UserSuspended`, `UserNotAdmitted` or `NotAdmittedByPeer`.
      */
-    case failed(reason: String
+    case failed(reason: String, cause: SendFailure
     )
 
 
@@ -6798,7 +6952,7 @@ public struct FfiConverterTypeSendState: FfiConverterRustBuffer {
         
         case 4: return .read
         
-        case 5: return .failed(reason: try FfiConverterString.read(from: &buf)
+        case 5: return .failed(reason: try FfiConverterString.read(from: &buf), cause: try FfiConverterTypeSendFailure.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -6825,9 +6979,10 @@ public struct FfiConverterTypeSendState: FfiConverterRustBuffer {
             writeInt(&buf, Int32(4))
         
         
-        case let .failed(reason):
+        case let .failed(reason,cause):
             writeInt(&buf, Int32(5))
             FfiConverterString.write(reason, into: &buf)
+            FfiConverterTypeSendFailure.write(cause, into: &buf)
             
         }
     }
