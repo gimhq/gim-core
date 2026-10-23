@@ -18,7 +18,7 @@ use super::{StateReader, StateStore, StoreResult, StoreTxn};
 use crate::model::{
     Chat, DepartedMember, GroupCursor, GroupMessage, HubRecord, KeyPackageRecord, MediaCacheEntry,
     MembershipEvent, Message, OutboxEntry, OutboxState, PendingCommit, PendingInvite, PendingLeave,
-    UserInfo,
+    Privacy, UserInfo,
 };
 use crate::{BaseError, StoreError};
 
@@ -51,6 +51,7 @@ struct Rows {
     self_groups: Vec<GroupId>,
     hubs: BTreeMap<String, HubRecord>,
     key_packages: BTreeMap<Vec<u8>, KeyPackageRecord>,
+    privacy: Privacy,
 }
 
 #[derive(Debug, Default)]
@@ -278,6 +279,10 @@ impl StateReader for MemoryStore {
     fn key_package_records(&self) -> StoreResult<Vec<KeyPackageRecord>> {
         Ok(read(&self.rows)?.key_packages.values().cloned().collect())
     }
+
+    fn privacy(&self) -> StoreResult<Privacy> {
+        Ok(read(&self.rows)?.privacy.clone())
+    }
 }
 
 impl StateReader for MemoryTxn {
@@ -388,6 +393,10 @@ impl StateReader for MemoryTxn {
 
     fn key_package_records(&self) -> StoreResult<Vec<KeyPackageRecord>> {
         Ok(self.rows.key_packages.values().cloned().collect())
+    }
+
+    fn privacy(&self) -> StoreResult<Privacy> {
+        Ok(self.rows.privacy.clone())
     }
 }
 
@@ -576,6 +585,11 @@ impl StoreTxn for MemoryTxn {
         self.rows
             .key_packages
             .insert(record.kp_ref.clone(), record.clone());
+        Ok(())
+    }
+
+    fn set_privacy(&mut self, privacy: &Privacy) -> StoreResult<()> {
+        self.rows.privacy = privacy.clone();
         Ok(())
     }
 

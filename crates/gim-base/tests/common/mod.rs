@@ -66,7 +66,12 @@ pub fn to_events(event: Event) -> Vec<IncomingEvent> {
 
 impl Device {
     pub fn new(user: &str) -> Self {
-        let id = gim_test::TestIdentity::new(user);
+        Self::new_device(user, 0)
+    }
+
+    /// Device `index` of the user `user`.
+    pub fn new_device(user: &str, index: u8) -> Self {
+        let id = gim_test::TestIdentity::device(user, index);
         let me = id.device.clone();
         let engine =
             MlsEngine::with_device_list_lookup(std::sync::Arc::new(gim_test::test_device_list));
@@ -109,8 +114,15 @@ impl Device {
             .collect()
     }
 
-    /// Uploads this device's DeviceList, so the hub knows it as active.
+    /// Uploads this device's DeviceList, so the hub knows it as active,
+    /// unless it is active already.
     pub fn register(&self, ds: &FakeDeliveryService) {
+        if ds
+            .devices(&self.me.user_id)
+            .is_ok_and(|devices| devices.contains(&self.me))
+        {
+            return;
+        }
         ds.put_device_list(
             &self.me.user_id,
             1,

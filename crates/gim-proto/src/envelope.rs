@@ -27,18 +27,22 @@
 //! | `"receipt"` | `k` `"delivered"` or `"read"`, `ids` array of message ids |
 //! | `"typing"` | `a` bool (active) |
 //! | `"group_info"` | `n` name (optional), `av` media map (optional) |
-//! | `"profile"` | `n` display name of the sender's user |
+//! | `"profile"` | `n` display name of the sender's user, `av` media map of the profile photo (optional; absent: none) |
 //! | `"self.device_list"` | `dl` signed gim-identity DeviceList (bstr) |
-//! | `"self.profile"` | `n` display name of the own user |
+//! | `"self.profile"` | `n` display name of the own user, `av` media map of the profile photo (optional; absent: none) |
 //! | `"self.contacts"` | `u` array of contact maps |
 //! | `"self.read_marker"` | `g` group id, `s` seq of the last read message |
 //! | `"self.hubs"` | `h` array of hub maps |
+//! | `"self.privacy"` | `rr` bool (send read receipts), `ty` bool (send typing), `bl` array of blocked user ids |
+//! | `"self.chat_settings"` | `g` group id, `mu` muted until (Unix ms; 0 not muted, `u64::MAX` always), `pn` bool pinned, `ar` bool archived |
 //!
 //! The `self.*` contents travel only in the self group, the MLS group of
 //! one user's own devices, and are ignored from any other user. A contact
 //! map has `id` user id (text) and optional `h` handle and `n` display name
 //! (text). A hub map has `id` hub id (text), `u` client API base URL
 //! (text) and `p` priority in the hosting record (uint, 0-255).
+//! `self.privacy` and `self.chat_settings` carry the whole state; the one
+//! with the latest envelope `ts` wins.
 //!
 //! A media map has `id` blob id (text), `k` AES-256 key (32-byte bstr),
 //! `d` SHA-256 of the encrypted blob (32-byte bstr), `mt` MIME type (text),
@@ -115,18 +119,20 @@ pub enum Content {
         name: Option<String>,
         avatar: Option<MediaInfo>,
     },
-    /// The sender's display name, announced to a chat on join and on
-    /// change.
+    /// The sender's display name and profile photo, announced to a chat
+    /// on join and on change.
     Profile {
         display_name: String,
+        avatar: Option<MediaInfo>,
     },
     /// Self group: the user's signed DeviceList, broadcast on change.
     SelfDeviceList {
         device_list: Vec<u8>,
     },
-    /// Self group: the own display name.
+    /// Self group: the own display name and profile photo.
     SelfProfile {
         display_name: String,
+        avatar: Option<MediaInfo>,
     },
     /// Self group: contacts to add to (or update in) the user directory
     /// cache.
@@ -142,6 +148,19 @@ pub enum Content {
     /// which the signed record does not say. Broadcast when it changes.
     SelfHubs {
         hubs: Vec<HubLocation>,
+    },
+    /// Self group: the privacy settings and the blocked users.
+    SelfPrivacy {
+        read_receipts: bool,
+        typing: bool,
+        blocked: Vec<UserId>,
+    },
+    /// Self group: the settings of one chat.
+    SelfChatSettings {
+        group_id: GroupId,
+        muted_until_ms: u64,
+        pinned: bool,
+        archived: bool,
     },
 }
 
@@ -312,6 +331,8 @@ enum WireContent {
     },
     Profile {
         n: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        av: Option<WireMedia>,
     },
     #[serde(rename = "self.device_list")]
     SelfDeviceList {
@@ -320,6 +341,8 @@ enum WireContent {
     #[serde(rename = "self.profile")]
     SelfProfile {
         n: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        av: Option<WireMedia>,
     },
     #[serde(rename = "self.contacts")]
     SelfContacts {
@@ -333,6 +356,19 @@ enum WireContent {
     #[serde(rename = "self.hubs")]
     SelfHubs {
         h: Vec<HubLocation>,
+    },
+    #[serde(rename = "self.privacy")]
+    SelfPrivacy {
+        rr: bool,
+        ty: bool,
+        bl: Vec<UserId>,
+    },
+    #[serde(rename = "self.chat_settings")]
+    SelfChatSettings {
+        g: GroupId,
+        mu: u64,
+        pn: bool,
+        ar: bool,
     },
 }
 
@@ -384,17 +420,49 @@ impl From<&Content> for WireContent {
                 n: name,
                 av: avatar.map(WireMedia::from),
             },
-            Content::Profile { display_name } => Self::Profile { n: display_name },
+            Content::Profile {
+                display_name,
+                avatar,
+            } => Self::Profile {
+                n: display_name,
+                av: avatar.map(WireMedia::from),
+            },
             Content::SelfDeviceList { device_list } => Self::SelfDeviceList {
                 dl: ByteBuf::from(device_list),
             },
-            Content::SelfProfile { display_name } => Self::SelfProfile { n: display_name },
+            Content::SelfProfile {
+                display_name,
+                avatar,
+            } => Self::SelfProfile {
+                n: display_name,
+                av: avatar.map(WireMedia::from),
+            },
             Content::SelfContacts { contacts } => Self::SelfContacts { u: contacts },
             Content::SelfReadMarker { group_id, seq } => Self::SelfReadMarker {
                 g: group_id,
                 s: seq,
             },
             Content::SelfHubs { hubs } => Self::SelfHubs { h: hubs },
+            Content::SelfPrivacy {
+                read_receipts,
+                typing,
+                blocked,
+            } => Self::SelfPrivacy {
+                rr: read_receipts,
+                ty: typing,
+                bl: blocked,
+            },
+            Content::SelfChatSettings {
+                group_id,
+                muted_until_ms,
+                pinned,
+                archived,
+            } => Self::SelfChatSettings {
+                g: group_id,
+                mu: muted_until_ms,
+                pn: pinned,
+                ar: archived,
+            },
         }
     }
 }
@@ -428,17 +496,34 @@ impl TryFrom<WireContent> for Content {
                 name: n,
                 avatar: av.map(MediaInfo::try_from).transpose()?,
             },
-            WireContent::Profile { n } => Self::Profile { display_name: n },
+            WireContent::Profile { n, av } => Self::Profile {
+                display_name: n,
+                avatar: av.map(MediaInfo::try_from).transpose()?,
+            },
             WireContent::SelfDeviceList { dl } => Self::SelfDeviceList {
                 device_list: dl.into_vec(),
             },
-            WireContent::SelfProfile { n } => Self::SelfProfile { display_name: n },
+            WireContent::SelfProfile { n, av } => Self::SelfProfile {
+                display_name: n,
+                avatar: av.map(MediaInfo::try_from).transpose()?,
+            },
             WireContent::SelfContacts { u } => Self::SelfContacts { contacts: u },
             WireContent::SelfReadMarker { g, s } => Self::SelfReadMarker {
                 group_id: g,
                 seq: s,
             },
             WireContent::SelfHubs { h } => Self::SelfHubs { hubs: h },
+            WireContent::SelfPrivacy { rr, ty, bl } => Self::SelfPrivacy {
+                read_receipts: rr,
+                typing: ty,
+                blocked: bl,
+            },
+            WireContent::SelfChatSettings { g, mu, pn, ar } => Self::SelfChatSettings {
+                group_id: g,
+                muted_until_ms: mu,
+                pinned: pn,
+                archived: ar,
+            },
         })
     }
 }

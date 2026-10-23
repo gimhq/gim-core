@@ -8,12 +8,12 @@ use std::sync::Arc;
 use gim_common::{now_ms, ClientId, DeviceRef, GroupId, MessageId, UserId};
 use gim_crypto::{decrypt_to_envelope, CryptoError, DecryptedMessage, MlsEngine, ProcessedMessage};
 use gim_identity::SignedDeviceList;
-use gim_proto::envelope::{Contact, Content, Envelope, HubLocation, ReceiptKind};
+use gim_proto::envelope::{Contact, Content, Envelope, HubLocation, MediaInfo, ReceiptKind};
 
 use crate::model::{
     to_message_id, Chat, ChatKind, ChatMember, DepartedMember, GroupMessage, HubRecord, HubState,
     IncomingEvent, Membership, MembershipChangeKind, MembershipEvent, Message, MessageContent,
-    MessageKind, PendingCommit, PendingLeave, SendState, StateChange, UserInfo,
+    MessageKind, PendingCommit, PendingLeave, Privacy, SendState, StateChange, UserInfo,
 };
 use crate::{Result, StateReader, StateStore, StoreTxn};
 
@@ -648,6 +648,10 @@ impl BaseClient {
         message: &GroupMessage,
         changes: &mut Vec<StateChange>,
     ) -> Result<Outcome> {
+        // A blocked user cannot add this user to a chat.
+        if txn.privacy()?.blocked.contains(&message.sender.user_id) {
+            return Ok(Outcome::Applied);
+        }
         let joined = match engine.join_from_welcome(&*txn, &message.payload) {
             Ok(joined) => joined,
             Err(err @ CryptoError::Store { .. }) => return Err(err.into()),
@@ -896,6 +900,9 @@ impl BaseClient {
             content,
             ..
         } = envelope;
+        let privacy = txn.privacy()?;
+        let blocked =
+            sender.user_id != self.own.user_id && privacy.blocked.contains(&sender.user_id);
         let message = |content| Message {
             message_id,
             group_id: group_id.clone(),
@@ -911,6 +918,18 @@ impl BaseClient {
             receipts: Default::default(),
         };
         match content {
+            // Nothing a blocked user says is kept.
+            Content::Text { .. }
+            | Content::Media { .. }
+            | Content::Edit { .. }
+            | Content::Delete { .. }
+            | Content::Reaction { .. }
+            | Content::Receipt { .. }
+            | Content::Typing { .. }
+                if blocked =>
+            {
+                Ok(())
+            }
             Content::Text { body } => {
                 self.insert_message(txn, message(MessageContent::Text { body }), now_ms, changes)
             }
@@ -956,7 +975,8 @@ impl BaseClient {
                 }
             }),
             Content::Receipt { kind, message_ids } => {
-                if sender.user_id != self.own.user_id {
+                let hidden = kind == ReceiptKind::Read && !privacy.read_receipts;
+                if sender.user_id != self.own.user_id && !hidden {
                     for id in &message_ids {
                         self.apply_receipt(txn, group_id, sender, kind, id, changes)?;
                     }
@@ -964,7 +984,7 @@ impl BaseClient {
                 Ok(())
             }
             Content::Typing { active } => {
-                if seq.is_some() {
+                if seq.is_some() && privacy.typing {
                     changes.push(StateChange::Typing {
                         group_id: group_id.clone(),
                         user_id: sender.user_id.clone(),
@@ -985,19 +1005,23 @@ impl BaseClient {
                 changes.push(StateChange::ChatUpserted(chat));
                 Ok(())
             }
-            Content::Profile { display_name } => {
-                self.apply_profile(txn, &sender.user_id, display_name, changes)
-            }
+            Content::Profile {
+                display_name,
+                avatar,
+            } => self.apply_profile(txn, &sender.user_id, display_name, avatar, changes),
             // Self group contents: only from the own user's devices.
             _ if sender.user_id != self.own.user_id => Ok(()),
             Content::SelfDeviceList { device_list } => {
                 txn.add_self_group(group_id)?;
                 self.apply_own_device_list(txn, &device_list)
             }
-            Content::SelfProfile { display_name } => {
+            Content::SelfProfile {
+                display_name,
+                avatar,
+            } => {
                 txn.add_self_group(group_id)?;
                 let own_user = self.own.user_id.clone();
-                self.apply_profile(txn, &own_user, display_name, changes)
+                self.apply_profile(txn, &own_user, display_name, avatar, changes)
             }
             Content::SelfContacts { contacts } => {
                 txn.add_self_group(group_id)?;
@@ -1017,16 +1041,55 @@ impl BaseClient {
                 txn.add_self_group(group_id)?;
                 apply_hub_locations(txn, hubs)
             }
+            Content::SelfPrivacy {
+                read_receipts,
+                typing,
+                blocked,
+            } => {
+                txn.add_self_group(group_id)?;
+                if sent_at_ms > privacy.updated_at_ms {
+                    let privacy = Privacy {
+                        read_receipts,
+                        typing,
+                        blocked: blocked.into_iter().collect(),
+                        updated_at_ms: sent_at_ms,
+                    };
+                    txn.set_privacy(&privacy)?;
+                    changes.push(StateChange::PrivacyChanged(privacy));
+                }
+                Ok(())
+            }
+            Content::SelfChatSettings {
+                group_id: chat_id,
+                muted_until_ms,
+                pinned,
+                archived,
+            } => {
+                txn.add_self_group(group_id)?;
+                if let Some(mut chat) = txn.chat(&chat_id)? {
+                    if sent_at_ms > chat.settings_at_ms {
+                        chat.muted_until_ms = muted_until_ms;
+                        chat.pinned = pinned;
+                        chat.archived = archived;
+                        chat.settings_at_ms = sent_at_ms;
+                        txn.upsert_chat(&chat)?;
+                        changes.push(StateChange::ChatUpserted(chat));
+                    }
+                }
+                Ok(())
+            }
         }
     }
 
-    /// Stores `display_name` as the user's display name (an empty one is
-    /// ignored) and renames the user's members in every chat.
+    /// Stores `display_name` and `avatar` as the user's profile (a profile
+    /// with an empty name is ignored) and renames the user's members in
+    /// every chat.
     fn apply_profile<T: StoreTxn>(
         &self,
         txn: &mut T,
         user_id: &UserId,
         display_name: String,
+        avatar: Option<MediaInfo>,
         changes: &mut Vec<StateChange>,
     ) -> Result<()> {
         if display_name.is_empty() {
@@ -1036,11 +1099,13 @@ impl BaseClient {
             user_id: user_id.clone(),
             handle: String::new(),
             display_name: String::new(),
+            avatar: None,
         });
-        if user.display_name == display_name {
+        if user.display_name == display_name && user.avatar == avatar {
             return Ok(());
         }
         user.display_name = display_name.clone();
+        user.avatar = avatar;
         txn.upsert_user(&user)?;
         for mut chat in txn.chats()? {
             let mut renamed = false;
@@ -1093,6 +1158,7 @@ impl BaseClient {
             user_id: contact.user_id.clone(),
             handle: String::new(),
             display_name: String::new(),
+            avatar: None,
         });
         if user.handle.is_empty() {
             user.handle = contact.handle.unwrap_or_default();

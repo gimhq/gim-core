@@ -75,12 +75,18 @@ fn all_contents() -> Vec<Content> {
         },
         Content::Profile {
             display_name: "Eleni".into(),
+            avatar: None,
+        },
+        Content::Profile {
+            display_name: "Eleni".into(),
+            avatar: Some(media(false)),
         },
         Content::SelfDeviceList {
             device_list: vec![0x82, 0x40, 0x40],
         },
         Content::SelfProfile {
             display_name: "Eleni on Hydra".into(),
+            avatar: Some(media(true)),
         },
         Content::SelfContacts {
             contacts: vec![
@@ -116,6 +122,28 @@ fn all_contents() -> Vec<Content> {
             ],
         },
         Content::SelfHubs { hubs: vec![] },
+        Content::SelfPrivacy {
+            read_receipts: false,
+            typing: true,
+            blocked: vec![UserId::new("umallory").unwrap()],
+        },
+        Content::SelfPrivacy {
+            read_receipts: true,
+            typing: false,
+            blocked: vec![],
+        },
+        Content::SelfChatSettings {
+            group_id: GroupId::new("hub/abc").unwrap(),
+            muted_until_ms: u64::MAX,
+            pinned: true,
+            archived: false,
+        },
+        Content::SelfChatSettings {
+            group_id: GroupId::new("hub/abc").unwrap(),
+            muted_until_ms: 0,
+            pinned: false,
+            archived: true,
+        },
     ]
 }
 
@@ -324,7 +352,8 @@ fn profile_and_self_group_tags() {
     };
     assert_eq!(
         tag(Content::Profile {
-            display_name: "x".into()
+            display_name: "x".into(),
+            avatar: None,
         }),
         "profile"
     );
@@ -336,7 +365,8 @@ fn profile_and_self_group_tags() {
     );
     assert_eq!(
         tag(Content::SelfProfile {
-            display_name: "x".into()
+            display_name: "x".into(),
+            avatar: None,
         }),
         "self.profile"
     );
@@ -352,6 +382,55 @@ fn profile_and_self_group_tags() {
         "self.read_marker"
     );
     assert_eq!(tag(Content::SelfHubs { hubs: vec![] }), "self.hubs");
+    assert_eq!(
+        tag(Content::SelfPrivacy {
+            read_receipts: true,
+            typing: true,
+            blocked: vec![],
+        }),
+        "self.privacy"
+    );
+    assert_eq!(
+        tag(Content::SelfChatSettings {
+            group_id: GroupId::new("hub/abc").unwrap(),
+            muted_until_ms: 0,
+            pinned: false,
+            archived: false,
+        }),
+        "self.chat_settings"
+    );
+    let privacy = content_map(&envelope(Content::SelfPrivacy {
+        read_receipts: false,
+        typing: true,
+        blocked: vec![UserId::new("umallory").unwrap()],
+    }));
+    assert_eq!(
+        privacy,
+        [
+            ("t".to_owned(), Value::Text("self.privacy".into())),
+            ("rr".to_owned(), Value::Bool(false)),
+            ("ty".to_owned(), Value::Bool(true)),
+            (
+                "bl".to_owned(),
+                Value::Array(vec![Value::Text("umallory".into())])
+            ),
+        ]
+    );
+    let settings = content_map(&envelope(Content::SelfChatSettings {
+        group_id: GroupId::new("hub/abc").unwrap(),
+        muted_until_ms: 5,
+        pinned: true,
+        archived: false,
+    }));
+    let keys: Vec<&str> = settings.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, ["t", "g", "mu", "pn", "ar"]);
+    // A profile without a photo has no `av` key.
+    let profile = content_map(&envelope(Content::Profile {
+        display_name: "x".into(),
+        avatar: None,
+    }));
+    let keys: Vec<&str> = profile.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, ["t", "n"]);
     let hubs = content_map(&envelope(Content::SelfHubs {
         hubs: vec![HubLocation {
             hub_id: "hpiraeus".into(),

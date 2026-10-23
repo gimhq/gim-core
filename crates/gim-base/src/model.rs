@@ -46,6 +46,14 @@ pub struct Chat {
     pub last_read_seq: u64,
     pub updated_at_ms: u64,
     pub membership: Membership,
+    /// Notifications are muted until this Unix ms time: 0 not muted,
+    /// `u64::MAX` until unmuted.
+    pub muted_until_ms: u64,
+    pub pinned: bool,
+    pub archived: bool,
+    /// Envelope time of the settings above (last writer wins across the
+    /// own devices); 0 for defaults.
+    pub settings_at_ms: u64,
 }
 
 impl Chat {
@@ -62,7 +70,16 @@ impl Chat {
             last_read_seq: 0,
             updated_at_ms: now_ms,
             membership: Membership::Joined,
+            muted_until_ms: 0,
+            pinned: false,
+            archived: false,
+            settings_at_ms: 0,
         }
+    }
+
+    /// Whether notifications of this chat are muted at `now_ms`.
+    pub fn is_muted(&self, now_ms: u64) -> bool {
+        self.muted_until_ms > now_ms
     }
 }
 
@@ -405,6 +422,33 @@ pub struct UserInfo {
     pub user_id: UserId,
     pub handle: String,
     pub display_name: String,
+    /// Profile photo announced by the user.
+    pub avatar: Option<MediaInfo>,
+}
+
+/// The own user's privacy settings, shared by the own devices.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Privacy {
+    /// Send read receipts (and show those of others).
+    pub read_receipts: bool,
+    /// Send typing notifications (and show those of others).
+    pub typing: bool,
+    /// Users whose messages, invitations and Welcomes are refused.
+    pub blocked: BTreeSet<UserId>,
+    /// Envelope time of these settings (last writer wins across the own
+    /// devices); 0 for defaults.
+    pub updated_at_ms: u64,
+}
+
+impl Default for Privacy {
+    fn default() -> Self {
+        Self {
+            read_receipts: true,
+            typing: true,
+            blocked: BTreeSet::new(),
+            updated_at_ms: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -464,6 +508,7 @@ pub enum StateChange {
     },
     /// The hub asks for more KeyPackages.
     KeyPackagesLow,
+    PrivacyChanged(Privacy),
 }
 
 #[cfg(test)]
