@@ -129,6 +129,27 @@ fn read_receipts_and_typing_of_others_are_hidden_when_switched_off() {
         .any(|c| matches!(c, StateChange::Typing { .. })));
 }
 
+#[test]
+fn no_read_receipt_is_sent_when_switched_off() {
+    let ds = FakeDeliveryService::new();
+    let g = group("crew");
+    let (alice, bob) = (Device::new("alice"), Device::new("bob"));
+    setup(&ds, &g, &[&alice, &bob]);
+    set_privacy(
+        &alice,
+        Privacy {
+            read_receipts: false,
+            ..Privacy::default()
+        },
+    );
+
+    bob.send_text(&ds, &g, "hello");
+    alice.sync(&ds);
+    let (receipt, _) = alice.client.mark_read(&alice.store, &g, NOW).unwrap();
+    assert_eq!(receipt, None);
+    assert_eq!(alice.store.chat(&g).unwrap().unwrap().unread_count, 0);
+}
+
 /// alice's two devices in their self group `g`.
 fn own_devices(ds: &FakeDeliveryService, g: &gim_common::GroupId) -> (Device, Device) {
     let (phone, tablet) = (Device::new("alice"), Device::new_device("alice", 1));

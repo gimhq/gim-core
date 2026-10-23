@@ -495,7 +495,8 @@ impl BaseClient {
                 txn.upsert_chat(&chat)?;
                 changes.push(StateChange::ChatUpserted(chat));
             }
-            let receipt = if ids.is_empty() || leaving {
+            // Read receipts switched off: the chat is still marked read.
+            let receipt = if ids.is_empty() || leaving || !txn.privacy()?.read_receipts {
                 None
             } else {
                 Some(self.enqueue_receipt(txn, group_id, ReceiptKind::Read, ids, now_ms)?)
