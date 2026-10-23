@@ -1,0 +1,38 @@
+{
+  "cases": [
+    {
+      "body": "",
+      "gim_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+      "gim_signature": "e8LZ099iwfjdoknBQSaUNFvN0DGbB6TDPQ6xHg1LGvW-IefItUsPCZoI9sJHsiqF-3Lr0l-R0xuVlMexoINjDw",
+      "message": "67696d2f726f6f742d726571756573742f7631004745540a2f6170692f7261772f67696d2f76312f73746f726167652f73657474696e67730a313736303438363430303030300a65336230633434323938666331633134396166626634633839393666623932343237616534316534363439623933346361343935393931623738353262383535",
+      "method": "GET",
+      "path": "/api/raw/gim/v1/storage/settings",
+      "root_seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "timestamp_ms": 1760486400000,
+      "user_id": "uciqfmr22u5kggr2makc56xn7fpflopngke2yqopjw52idmxkwedxbda"
+    },
+    {
+      "body": "7b2276657273696f6e223a302c2264617461223a2241414543227d",
+      "gim_key": "d3bocLkzVPKgskwj8qNsxOgOIjIYwbl5Jv3QGDlqK5s",
+      "gim_signature": "8tcDYwdIBcgEbtrIXrqPJb5WtpHt09Mz-ppebtE3tZwwGLXENppZTUNsnGDtebj-D5qkyokV52SN5O31ZCbXAg",
+      "message": "67696d2f726f6f742d726571756573742f7631005055540a2f6170692f7261772f67696d2f76312f73746f726167652f73657474696e67730a313736303438363430303030310a39363633336162373666316364613938343961343435663565663331346165656164383734326637313031373564393765613731396666653066376236383865",
+      "method": "PUT",
+      "path": "/api/raw/gim/v1/storage/settings",
+      "root_seed": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+      "timestamp_ms": 1760486400001,
+      "user_id": "uciqauw3hkskufsnfl3lkqc5fy5sgwe4djvwvufoc4p7n27najw2frbq"
+    },
+    {
+      "body": "",
+      "gim_key": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc",
+      "gim_signature": "aK5X-PfcSpfTy8VaqiKbf9k_MsinjPAqRYVjZUQgQPS5xHycFHLGQ0y75EA4ERwxqyynAqHKuohJ-hlmM1HwBg",
+      "message": "67696d2f726f6f742d726571756573742f76310044454c4554450a2f76322f75736572732f752d706c616365686f6c6465723f726561736f6e3d757365720a313736303438363430303030320a65336230633434323938666331633134396166626634633839393666623932343237616534316534363439623933346361343935393931623738353262383535",
+      "method": "DELETE",
+      "path": "/v2/users/u-placeholder?reason=user",
+      "root_seed": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "timestamp_ms": 1760486400002,
+      "user_id": "uciqcj5xnnlf74eajyaynpsswpqz4usbqsekjqi3lkvq2nsbkx3c54ka"
+    }
+  ],
+  "description": "gim root-signed request vectors, see docs/identity.md \"Root-signed requests\": signature = Ed25519(root key, \"gim/root-request/v1\" || 0x00 || method \"\\n\" path \"\\n\" decimal(timestamp_ms) \"\\n\" hex(SHA-256(body))); `message` is the exact signed input; gim_key and gim_signature are the header values (unpadded base64url)."
+}

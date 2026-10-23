@@ -2,8 +2,8 @@
 
 Normative specification of the identity wire formats implemented by
 `crates/gim-identity`. Test vectors: `crates/gim-identity/tests/vectors/identity.json`,
-`hosting.json`, `auth.json`, `auth-v2.json`, `hub-proof.json` and `public-url.json`
-in the same directory; negative vectors in `negative.json` (see *Negative vectors*).
+`hosting.json`, `auth.json`, `auth-v2.json`, `hub-proof.json`, `public-url.json`
+and `request.json` in the same directory; negative vectors in `negative.json` (see *Negative vectors*).
 
 The key words MUST, MUST NOT and SHOULD are to be interpreted as in RFC 2119.
 
@@ -586,6 +586,46 @@ the sender) before joining; the committer's leaf, the update-path leaf, and
 every Add and Update proposal of an incoming commit before merging it; Add
 and Update proposals before storing them; and the KeyPackages it adds
 itself. A rejected Welcome or commit leaves the local group state unchanged.
+
+## Root-signed requests
+
+Test vectors: `crates/gim-identity/tests/vectors/request.json`.
+
+An HTTP request signed with the user's root key proves that the sender
+holds the root key of the user id the presented key derives; the verifier
+needs no stored state. gim app servers authenticate every request this way,
+and hubs authenticate account deletion.
+
+```
+tbs       = method "\n" path "\n" decimal(timestamp_ms) "\n" hex(SHA-256(body))
+signature = Ed25519(root key, "gim/root-request/v1" || 0x00 || tbs)
+```
+
+- `method` is the uppercase HTTP method; `path` the request path with its
+  query string exactly as sent; `timestamp_ms` Unix milliseconds in decimal
+  without leading zeros; the digest is lowercase hex (the empty body for a
+  request without one). All UTF-8.
+- Headers: `Gim-Key` (the 32-byte root public key), `Gim-Timestamp`
+  (`timestamp_ms`) and `Gim-Signature` (64 bytes); keys and signatures in
+  unpadded base64url.
+- The verifier MUST check the signature with strict verification, MUST
+  reject a timestamp more than 5 minutes from its clock (either way), and
+  takes `user_id` as derived from `Gim-Key` (see *Identifiers*). A route
+  scoped to a user MUST compare that id with the user in the path.
+
+### App-server storage
+
+What a user stores on an app server is sealed with a key the server never
+sees:
+
+```
+storage_key = HKDF-SHA256(salt = none, ikm = root seed, info = "gim/app-storage/v1", L = 32)
+sealed      = nonce(12) || AES-256-GCM(storage_key, nonce, plaintext, aad = slot name)
+```
+
+The slot name (UTF-8) is bound as AAD, so a server cannot swap two slots.
+Every own device holds the root key, and a restore from the recovery code
+recovers it, so each of them can open the slots.
 
 ## Reserved
 

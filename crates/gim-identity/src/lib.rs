@@ -1,8 +1,9 @@
 //! gim identity: Ed25519 root and device keys, `user_id` / `device_id`
 //! derivation, root-signed device certificates and device lists, hub
 //! identity and proof of possession, hosting records, hub URLs and device
-//! authentication. Pure encoding and verification; no I/O. The normative wire format is
-//! `docs/identity.md`.
+//! authentication, root-signed HTTP requests and app-server storage
+//! encryption. Pure encoding and verification; no I/O. The normative wire
+//! format is `docs/identity.md`.
 
 #![forbid(unsafe_code)]
 
@@ -14,10 +15,12 @@ mod hosting;
 mod ids;
 mod keys;
 mod list;
+mod request;
 mod url;
 
 pub mod link;
 pub mod recovery;
+pub mod storage;
 
 pub use auth::{
     AuthChallenge, AuthResponse, AUTH_CHALLENGE_MAX_LIFETIME_MS, AUTH_CHALLENGE_V2,
@@ -34,6 +37,9 @@ pub use hosting::{
 pub use ids::{parse_device_id, parse_user_id};
 pub use keys::{DevicePublicKey, DeviceSigningKey, RootKey, RootPublicKey};
 pub use list::{DeviceList, SignedDeviceList, DEVICE_LIST_CONTEXT};
+pub use request::{
+    root_request_tbs, RootRequestSignature, ROOT_REQUEST_CONTEXT, ROOT_REQUEST_MAX_SKEW_MS,
+};
 pub use url::{normalize_hub_url, MAX_HUB_URL_LEN};
 
 /// Version number carried as the first element of every signed body.
