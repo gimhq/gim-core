@@ -14,5 +14,8 @@ gim-proto.workspace = true
 openmls_memory_storage.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { workspace = true, features = ["js"] }
+
 [dev-dependencies]
 gim-test.workspace = true

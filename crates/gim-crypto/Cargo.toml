@@ -20,6 +20,10 @@ sha2.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { workspace = true, features = ["js"] }
+openmls = { workspace = true, features = ["js"] }
+
 [dev-dependencies]
 data-encoding.workspace = true
 gim-test.workspace = true

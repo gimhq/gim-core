@@ -58,6 +58,22 @@ jobs:
             exit 1
           fi
 
+  # The protocol crates do no I/O and must keep building for the web.
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy for wasm32-unknown-unknown
+        run: |
+          for crate in gim-common gim-proto gim-identity gim-crypto gim-base; do
+            cargo clippy --locked --target wasm32-unknown-unknown -p "$crate" -- -D warnings
+          done
+
   # gim-hub is private: its read-only deploy key is a secret that fork PRs do
   # not get, so the integration job is skipped there instead of failing.
   integration-gate:

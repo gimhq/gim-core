@@ -11,7 +11,7 @@ point downwards only
 | Crate | Role |
 |---|---|
 | `crates/gim-common` | ids (`UserId`, `DeviceId`, `GroupId`, `ClientId`, `MessageId`, `DeviceRef`), error helpers, time; no I/O |
-| `crates/gim-proto` | gim-server v1 REST/stream DTOs, gim-hub API v2 DTOs (`v2`, vendored contract in `contract/hub-v2/`) and the versioned CBOR envelope schema |
+| `crates/gim-proto` | gim-hub API v2 DTOs (`v2`, vendored contract in `contract/hub-v2/`) and the versioned CBOR envelope schema |
 | `crates/gim-crypto` | OpenMLS wrapper (`MlsEngine`), `CryptoStore` trait + `MemoryCryptoStore`; no networking |
 | `crates/gim-identity` | root and device Ed25519 keys, `user_id`/`device_id` derivation, signed `DeviceCert` and `DeviceList` (spec: `docs/identity.md`); no I/O |
 | `crates/gim-base` | client state machine without networking, `StateStore` trait (skeleton) |
@@ -21,7 +21,7 @@ point downwards only
 | `bindings/gim-ffi` | the only UniFFI crate; builds `libgim_core.{so,a,dylib}` |
 | `bindings/android`, `bindings/apple` | packaging scripts |
 | `uniffi-bindgen` | `uniffi-bindgen` binary used by the packaging scripts |
-| `testing/gim-test` | fixtures and `FakeDeliveryService` (in-memory gim-server delivery) |
+| `testing/gim-test` | fixtures and `FakeDeliveryService` (in-memory gim-hub API v2) |
 | `testing/gim-integration-testing` | tests against a real gim-hub container (`scripts/integration-test.sh`) |
 
 MLS ciphersuite: `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`, pure-Rust
@@ -304,7 +304,7 @@ chunk_i = AES-256-GCM(key, nonce = nonce_prefix || i (u32 BE),
 
 All chunks but the last carry exactly `chunk_size` plaintext bytes; empty
 media is one empty final chunk. The key and the SHA-256 of the whole blob
-travel in the envelope's media map, never to gim-server. `encrypt_media` /
+travel in the envelope's media map, never to the hub. `encrypt_media` /
 `decrypt_media` work on buffers (digest checked in constant time before
 decrypting); `MediaEncryptor` / `MediaDecryptor` stream over
 `std::io::Read`/`Write`.
@@ -330,6 +330,9 @@ bitcode and link-test notes. `out/` is never committed.
   --all-targets -- -D warnings`, `cargo test`, a `scripts/generate-swift.sh` smoke
   run, and a check that `scripts/generate-bindings.sh` leaves the committed
   bindings unchanged.
+- `wasm` (every push, pull request, manual run): `cargo clippy -D warnings` for
+  `wasm32-unknown-unknown` on each of `gim-common`, `gim-proto`, `gim-identity`,
+  `gim-crypto` and `gim-base`.
 - `xcframework` (pushes to `main` and manual runs, macOS): runs
   `scripts/build-xcframework.sh` and uploads `gim-core-ios-<sha>` with the zip,
   its checksum, the Swift sources and `GIM_CORE_VERSION`.

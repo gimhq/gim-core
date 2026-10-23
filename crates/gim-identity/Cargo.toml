@@ -24,6 +24,9 @@ thiserror.workspace = true
 x25519-dalek.workspace = true
 zeroize.workspace = true
 
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { workspace = true, features = ["js"] }
+
 [dev-dependencies]
 gim-identity = { workspace = true, features = ["test-params"] }
 serde_json.workspace = true

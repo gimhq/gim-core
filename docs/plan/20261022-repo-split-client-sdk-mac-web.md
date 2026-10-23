@@ -1,6 +1,6 @@
 # Plan: split gim-core, gim-client-sdk, gim-mac, gim-web
 
-Status: proposed 2026-10-22 (plan only, nothing is implemented yet)
+Status: implementing since 2026-10-22 (phase 0: task `20261022-2039-p0-core-cleanup-wasm`)
 
 User decisions (2026-10-22):
 
@@ -112,6 +112,30 @@ Every phase ends with all existing gates green:
 3. Make the store traits async-safe for a single-threaded runtime (no `Send`
    requirement leaking into the trait objects where the web store cannot meet
    it). This is a design check now, code later.
+
+Phase 0 findings (2026-10-22):
+
+- Item 1 was already done in code: `gim-proto` has no v1 DTOs left and
+  `FakeDeliveryService` models API v2. Only README text still named
+  gim-server.
+- Item 2 needed only dependency features on `wasm32-unknown-unknown`:
+  `getrandom` 0.2 with `js`, OpenMLS with its `js` feature (getrandom 0.4
+  `wasm_js` and `web-time`), and `web-time` for `gim_common::now_ms`. No
+  source change besides that import.
+- Item 3: `CryptoStore`, `StateReader`, `StoreTxn` and `StateStore` are
+  synchronous, and the SDK already runs every transaction through
+  `spawn_blocking`. Two consequences for the web:
+  - A web store must be synchronous inside the worker. sqlite-wasm on an OPFS
+    synchronous access handle (dedicated workers only) meets that and keeps
+    the one-transaction guarantee for MLS state and rows. IndexedDB is
+    async-only and would need an in-memory working set with an async flush,
+    which weakens that guarantee. This tilts the P4 open point towards
+    sqlite-wasm on OPFS.
+  - `StateStore: Send + Sync` is a supertrait. A store holding JS handles is
+    not `Send` on wasm32. Move the bound from the trait to the native SDK
+    call sites (`spawn_blocking`) in P2; removing it now would only break
+    the SDK. `CryptoStore::Error: Send + Sync` and the `DeviceListLookup`
+    bound are fine (pure Rust types).
 
 ### Phase 1: create gim-client-sdk
 

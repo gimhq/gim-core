@@ -1,4 +1,4 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use web_time::{SystemTime, UNIX_EPOCH};
 
 /// Milliseconds since the Unix epoch; 0 if the clock is before the epoch.
 pub fn now_ms() -> u64 {
