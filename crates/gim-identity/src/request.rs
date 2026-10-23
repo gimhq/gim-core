@@ -1,5 +1,5 @@
-//! HTTP requests signed with the user's root key: every request to a gim
-//! app server, and account deletion on a hub. The signature proves the
+//! HTTP requests signed with the user's root key: every request to the gim
+//! meta server, and account deletion on a hub. The signature proves the
 //! sender holds the root key of the user id derived from the key it
 //! presents; the server needs no stored state to check it.
 

@@ -1,7 +1,7 @@
 //! gim identity: Ed25519 root and device keys, `user_id` / `device_id`
 //! derivation, root-signed device certificates and device lists, hub
 //! identity and proof of possession, hosting records, hub URLs and device
-//! authentication, root-signed HTTP requests and app-server storage
+//! authentication, root-signed HTTP requests and meta-server storage
 //! encryption. Pure encoding and verification; no I/O. The normative wire
 //! format is `docs/identity.md`.
 
