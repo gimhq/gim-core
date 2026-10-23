@@ -6,13 +6,16 @@ members = [
     "crates/gim-crypto",
     "crates/gim-identity",
     "crates/gim-base",
-    "crates/gim-sqlite",
+    "testing/gim-test",
+]
+# Moved to gim-client-sdk; kept here only until they are deleted.
+exclude = [
     "crates/gim-sdk",
     "crates/gim-ui",
+    "crates/gim-sqlite",
     "bindings/gim-ffi",
     "apps/gim-cli",
     "uniffi-bindgen",
-    "testing/gim-test",
     "testing/gim-integration-testing",
 ]
 
@@ -28,73 +31,27 @@ gim-proto = { path = "crates/gim-proto" }
 gim-crypto = { path = "crates/gim-crypto" }
 gim-identity = { path = "crates/gim-identity" }
 gim-base = { path = "crates/gim-base" }
-gim-sqlite = { path = "crates/gim-sqlite" }
-gim-sdk = { path = "crates/gim-sdk" }
-gim-ui = { path = "crates/gim-ui" }
 gim-test = { path = "testing/gim-test" }
 
 aes-gcm = "=0.10.3"
 argon2 = "=0.5.3"
-async-trait = "=0.1.92"
-axum = { version = "=0.8.9", default-features = false, features = [
-    "http1",
-    "json",
-    "query",
-    "tokio",
-    "ws",
-] }
 base64 = "=0.22.1"
 ciborium = "=0.2.2"
-clap = { version = "=4.6.7", features = ["derive", "env"] }
 data-encoding = "=2.11.1"
 ed25519-dalek = "=2.2.0"
-eyeball = "=0.8.8"
-eyeball-im = "=0.9.1"
-futures-core = "=0.3.34"
-futures-util = "=0.3.34"
 getrandom = "=0.2.17"
 hkdf = "=0.12.4"
 openmls = "=0.9.1"
 openmls_memory_storage = "=0.6.0"
 openmls_rust_crypto = "=0.6.0"
-openmls_sqlite_storage = "=0.3.0"
 openmls_traits = "=0.6.0"
-# rustls with the ring provider and webpki roots: no aws-lc/cmake/OpenSSL in
-# Android/iOS cross-compiles.
-reqwest = { version = "=0.12.28", default-features = false, features = [
-    "json",
-    "rustls-tls-webpki-roots",
-    "stream",
-] }
-# Same TLS stack as reqwest for the WebSocket stream: ring provider, webpki
-# roots.
-rustls = { version = "=0.23.46", default-features = false, features = [
-    "ring",
-    "std",
-    "tls12",
-] }
-# SQLCipher with a vendored, statically linked OpenSSL (libcrypto) on every
-# target, including Apple (see bindings/apple/README.md).
-rusqlite = { version = "=0.37.0", features = ["bundled-sqlcipher-vendored-openssl"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_bytes = "=0.11.19"
 serde_json = "=1.0.154"
 sha2 = "=0.10.9"
 subtle = "=2.6.1"
-tempfile = "=3.27.0"
 thiserror = "=2.0.21"
-tokio = "=1.53.1"
-tokio-tungstenite = { version = "=0.29.0", default-features = false, features = [
-    "connect",
-    "rustls-tls-webpki-roots",
-] }
-tokio-util = { version = "=0.7.18", default-features = false, features = ["io"] }
-tracing = { version = "=0.1.44", default-features = false, features = ["std"] }
-uniffi = "=0.32.2"
-url = "=2.5.8"
 web-time = "=1.1.0"
-webpki-roots = "=1.0.9"
-wiremock = "=0.6.5"
 x25519-dalek = { version = "=2.0.1", features = ["static_secrets"] }
 zeroize = { version = "=1.9.1", features = ["derive"] }
 
@@ -112,13 +69,3 @@ codegen-units = 1
 strip = "debuginfo"
 panic = "unwind"
 
-# Static libraries of GIMCore.xcframework (bindings/apple/build-xcframework.sh).
-# opt-level "s" measured slightly smaller than "z" and ~20% smaller than 3 once
-# stripped; panic stays "unwind" for UniFFI. `strip` has no effect on
-# staticlibs (no link step), so the script strips the .a files.
-[profile.release-apple]
-inherits = "release"
-opt-level = "s"
-lto = "fat"
-codegen-units = 1
-debug = false
