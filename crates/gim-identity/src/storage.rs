@@ -1,4 +1,4 @@
-//! Encryption of what a user stores on the gim meta server: a key derived from
+//! Encryption of what a user stores on the gim keep server: a key derived from
 //! the root key, so every own device (and a restore from the recovery code)
 //! can read it and the server cannot.
 
@@ -11,11 +11,11 @@ use zeroize::Zeroizing;
 use crate::{IdentityError, RootKey};
 
 /// HKDF-SHA256 `info` of the storage key.
-pub const STORAGE_KEY_INFO: &[u8] = b"gim/meta-storage/v1";
+pub const STORAGE_KEY_INFO: &[u8] = b"gim/keep-storage/v1";
 
 const NONCE_LEN: usize = 12;
 
-/// AES-256-GCM key for the user's meta-server slots:
+/// AES-256-GCM key for the user's keep-server slots:
 /// `HKDF-SHA256(salt = none, ikm = root seed, info = STORAGE_KEY_INFO)`.
 pub struct StorageKey(Zeroizing<[u8; 32]>);
 

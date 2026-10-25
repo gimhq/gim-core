@@ -1,5 +1,5 @@
-//! Root-signed requests and meta-server storage keys. Asserts
-//! `tests/vectors/request.json` (shared with the gim meta server). After an
+//! Root-signed requests and keep-server storage keys. Asserts
+//! `tests/vectors/request.json` (shared with the gim keep server). After an
 //! intentional format change, regenerate it with
 //! `cargo test -p gim-identity --test request -- --ignored regenerate`.
 

@@ -593,7 +593,7 @@ Test vectors: `crates/gim-identity/tests/vectors/request.json`.
 
 An HTTP request signed with the user's root key proves that the sender
 holds the root key of the user id the presented key derives; the verifier
-needs no stored state. The gim meta server (gim-meta) authenticates every
+needs no stored state. The gim keep server (gim-keep) authenticates every
 request this way, and hubs authenticate account deletion.
 
 ```
@@ -613,13 +613,13 @@ signature = Ed25519(root key, "gim/root-request/v1" || 0x00 || tbs)
   takes `user_id` as derived from `Gim-Key` (see *Identifiers*). A route
   scoped to a user MUST compare that id with the user in the path.
 
-### Meta-server storage
+### Keep-server storage
 
-What a user stores on the meta server is sealed with a key the server never
+What a user stores on the keep server is sealed with a key the server never
 sees:
 
 ```
-storage_key = HKDF-SHA256(salt = none, ikm = root seed, info = "gim/meta-storage/v1", L = 32)
+storage_key = HKDF-SHA256(salt = none, ikm = root seed, info = "gim/keep-storage/v1", L = 32)
 sealed      = nonce(12) || AES-256-GCM(storage_key, nonce, plaintext, aad = slot name)
 ```
 
