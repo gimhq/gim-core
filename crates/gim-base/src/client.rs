@@ -466,6 +466,88 @@ impl BaseClient {
         })
     }
 
+    /// The other user of a direct chat, or the own user for the direct
+    /// chat with yourself (note to self); `None` for other kinds. The peer
+    /// is the first other user among the current members, else among the
+    /// users who were members (membership events), else among the pending
+    /// invites of the chat; with none of these the chat is the direct chat
+    /// with yourself.
+    pub fn direct_peer<R: StateReader + ?Sized>(
+        &self,
+        store: &R,
+        chat: &Chat,
+    ) -> Result<Option<UserId>> {
+        if chat.kind != ChatKind::Direct {
+            return Ok(None);
+        }
+        let own = &self.own.user_id;
+        let other = |user: &UserId| user != own;
+        if let Some(member) = chat.members.iter().find(|m| other(&m.device.user_id)) {
+            return Ok(Some(member.device.user_id.clone()));
+        }
+        let events = store.membership_events(&chat.group_id)?;
+        if let Some(event) = events.into_iter().find(|e| other(&e.user_id)) {
+            return Ok(Some(event.user_id));
+        }
+        let invites = store.pending_invites()?;
+        if let Some(invite) = invites
+            .into_iter()
+            .find(|i| i.group_id == chat.group_id && other(&i.user_id))
+        {
+            return Ok(Some(invite.user_id));
+        }
+        Ok(Some(own.clone()))
+    }
+
+    /// The joined direct chat with `user_id`, the own user id included
+    /// (note to self). If several exist (two devices created one at the
+    /// same time), the one with the lowest group id wins.
+    pub fn direct_chat_with<R: StateReader + ?Sized>(
+        &self,
+        store: &R,
+        user_id: &UserId,
+    ) -> Result<Option<Chat>> {
+        let mut found: Option<Chat> = None;
+        for chat in store.chats()? {
+            if chat.membership != Membership::Joined
+                || self.direct_peer(store, &chat)?.as_ref() != Some(user_id)
+            {
+                continue;
+            }
+            if found.as_ref().is_none_or(|f| chat.group_id < f.group_id) {
+                found = Some(chat);
+            }
+        }
+        Ok(found)
+    }
+
+    /// Checks that the devices of `users` may be added to the chat: a
+    /// direct chat admits only the own user and its peer, so the direct
+    /// chat with yourself admits only the own devices. Fails with
+    /// `InvalidState` otherwise; other chats admit anyone.
+    pub fn check_add<R: StateReader + ?Sized>(
+        &self,
+        store: &R,
+        group_id: &GroupId,
+        users: &[UserId],
+    ) -> Result<()> {
+        let Some(chat) = store.chat(group_id)? else {
+            return Err(crate::BaseError::NotFound(format!("chat {group_id}")));
+        };
+        let Some(peer) = self.direct_peer(store, &chat)? else {
+            return Ok(());
+        };
+        match users
+            .iter()
+            .find(|u| **u != peer && **u != self.own.user_id)
+        {
+            Some(user) => Err(crate::BaseError::InvalidState(format!(
+                "direct chat {group_id} with {peer} cannot admit {user}"
+            ))),
+            None => Ok(()),
+        }
+    }
+
     /// Marks the chat read up to its latest message: resets the unread count
     /// and enqueues a read receipt for the other users' messages. Returns the
     /// receipt's outbox id, if one was needed.
@@ -985,7 +1067,8 @@ impl BaseClient {
                 Ok(())
             }
             Content::Typing { active } => {
-                if seq.is_some() && privacy.typing {
+                // The own devices never show each other typing.
+                if seq.is_some() && privacy.typing && sender.user_id != self.own.user_id {
                     changes.push(StateChange::Typing {
                         group_id: group_id.clone(),
                         user_id: sender.user_id.clone(),

@@ -61,6 +61,28 @@ travel in the envelope's media map, never to the hub. `encrypt_media` /
 decrypting); `MediaEncryptor` / `MediaDecryptor` stream over
 `std::io::Read`/`Write`.
 
+## Users and chats
+
+A user is identified only by `user_id` (derived from the root key). There
+are no usernames (handles): hubs neither store nor look up users by name;
+users find each other by `user_id` (QR code or pasted id).
+
+**Note to self** is the direct chat with yourself: a `ChatKind::Direct` chat
+(hub kind `direct`) whose members are only the own user's devices, synced
+across them. There is no separate kind or marker:
+
+- `BaseClient::direct_peer` gives the other user of a direct chat: the first
+  other user among the members, else among past members (membership
+  events), else among pending invites; with none, the own user.
+- `BaseClient::direct_chat_with(user_id)` finds the joined direct chat with
+  a user, the own user included. If two own devices created one at the same
+  time, the one with the lowest group id wins.
+- `BaseClient::check_add` refuses adding a user other than the own user and
+  the peer to a direct chat, so the direct chat with yourself admits only
+  the own devices.
+- All its messages come from the own user: no unread counts and no read
+  receipts; typing from the own devices is never shown.
+
 ## CI
 
 `.github/workflows/ci.yml`:
