@@ -80,8 +80,8 @@ across them. There is no separate kind or marker:
 - `BaseClient::check_add` refuses adding a user other than the own user and
   the peer to a direct chat, so the direct chat with yourself admits only
   the own devices.
-- All its messages come from the own user: no unread counts and no read
-  receipts; typing from the own devices is never shown.
+- Otherwise it is an ordinary direct chat: every content type behaves as
+  in any other chat.
 
 ## CI
 

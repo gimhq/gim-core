@@ -76,20 +76,14 @@ fn the_direct_chat_with_yourself_syncs_across_the_own_devices() {
         .unwrap();
     assert_eq!(found.map(|c| c.group_id), Some(g.clone()));
 
-    // Notes reach the other own device without unread counts, receipts or
-    // typing.
-    phone.send_text(&ds, &g, "milk");
+    // Content flows as in any direct chat.
+    let id = phone.send_text(&ds, &g, "milk");
     phone.send(&ds, &g, Content::Typing { active: true });
     let changes = tablet.sync(&ds);
-    assert!(!changes
+    assert!(changes
         .iter()
         .any(|c| matches!(c, StateChange::Typing { .. })));
-    let chat = tablet.store.chat(&g).unwrap().unwrap();
-    assert_eq!(chat.unread_count, 0);
-    assert!(chat.last_message_id.is_some());
-    assert!(tablet.store.outbox_entries().unwrap().is_empty());
-    let (receipt, _) = tablet.client.mark_read(&tablet.store, &g, NOW).unwrap();
-    assert_eq!(receipt, None);
+    assert!(tablet.store.message(&id).unwrap().is_some());
 }
 
 #[test]

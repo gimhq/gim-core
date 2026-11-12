@@ -1067,8 +1067,7 @@ impl BaseClient {
                 Ok(())
             }
             Content::Typing { active } => {
-                // The own devices never show each other typing.
-                if seq.is_some() && privacy.typing && sender.user_id != self.own.user_id {
+                if seq.is_some() && privacy.typing {
                     changes.push(StateChange::Typing {
                         group_id: group_id.clone(),
                         user_id: sender.user_id.clone(),
