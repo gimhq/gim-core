@@ -35,4 +35,3 @@ Each task is a single line linking to its detail file. All detailed information 
 
 - [x] [**20261022-2039-p0-core-cleanup-wasm P0: core cleanup and wasm32 build**](20261022-2039-p0-core-cleanup-wasm.md) `P1`
 - [-] [**20261023-0638-p1-gim-client-sdk-repo P1: create the gim-client-sdk repository**](20261023-0638-p1-gim-client-sdk-repo.md) `P1`
-- [x] [**20261112-1930-remove-handles-note-chat Remove user handles; note-to-self chat kind**](20261112-1930-remove-handles-note-chat.md) `P1`

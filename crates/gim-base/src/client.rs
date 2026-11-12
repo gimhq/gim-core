@@ -79,10 +79,7 @@ impl BaseClient {
     }
 
     /// Creates the MLS group and its chat. Members are added afterwards with
-    /// [`MlsEngine::add_members`] and [`BaseClient::merge_own_commit`]. A
-    /// [`ChatKind::Note`] chat gets a note group
-    /// ([`MlsEngine::create_note_group`]); only the own devices may be
-    /// added to it.
+    /// [`MlsEngine::add_members`] and [`BaseClient::merge_own_commit`].
     pub fn create_chat<S: StateStore>(
         &self,
         store: &S,
@@ -93,11 +90,7 @@ impl BaseClient {
         now_ms: u64,
     ) -> Result<Vec<StateChange>> {
         store.transaction(|txn| {
-            if kind == ChatKind::Note {
-                engine.create_note_group(&*txn, group_id)?;
-            } else {
-                engine.create_group(&*txn, group_id)?;
-            }
+            engine.create_group(&*txn, group_id)?;
             let mut chat = Chat::new(group_id.clone(), kind, now_ms);
             chat.name = name;
             chat.members = chat_members(txn, &engine.group_members(&*txn, group_id)?)?;
@@ -671,19 +664,10 @@ impl BaseClient {
             engine.delete_group(&*txn, &joined.group_id)?;
             return Ok(Outcome::Applied);
         }
-        // A note group holds the own devices only.
-        if joined.note && !only_user(&joined.members, &self.own.user_id) {
-            engine.delete_group(&*txn, group_id)?;
-            self.rejected.fetch_add(1, Ordering::Relaxed);
-            return Ok(Outcome::Applied);
-        }
         let now = now_ms();
         let mut chat = txn
             .chat(group_id)?
             .unwrap_or_else(|| Chat::new(group_id.clone(), ChatKind::Group, now));
-        if joined.note {
-            chat.kind = ChatKind::Note;
-        }
         chat.membership = Membership::Joined;
         chat.members = chat_members(txn, &joined.members)?;
         chat.updated_at_ms = chat.updated_at_ms.max(now);
@@ -738,10 +722,6 @@ impl BaseClient {
             None => {
                 let members = engine.group_members(&*txn, group_id)?;
                 chat.members = chat_members(txn, &members)?;
-                // Another user in a note chat ends it being one.
-                if chat.kind == ChatKind::Note && !only_user(&members, &self.own.user_id) {
-                    chat.kind = ChatKind::Group;
-                }
                 members
             }
         };
@@ -1447,11 +1427,6 @@ fn apply_hub_locations<T: StoreTxn>(txn: &mut T, hubs: Vec<HubLocation>) -> Resu
         txn.upsert_hub(&hub)?;
     }
     Ok(())
-}
-
-/// Whether every device belongs to `user_id`.
-fn only_user(devices: &[DeviceRef], user_id: &UserId) -> bool {
-    devices.iter().all(|d| &d.user_id == user_id)
 }
 
 /// The stored chat, or a new joined group chat if there is none yet.

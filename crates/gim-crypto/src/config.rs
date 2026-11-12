@@ -1,9 +1,8 @@
 //! The single place where gim's MLS group parameters are defined.
 
 use openmls::prelude::{
-    Capabilities, Ciphersuite, CredentialType, Extension, ExtensionType, Extensions,
-    MlsGroupCreateConfig, MlsGroupJoinConfig, SenderRatchetConfiguration, UnknownExtension,
-    MIXED_PLAINTEXT_WIRE_FORMAT_POLICY,
+    Capabilities, Ciphersuite, CredentialType, ExtensionType, MlsGroupCreateConfig,
+    MlsGroupJoinConfig, SenderRatchetConfiguration, MIXED_PLAINTEXT_WIRE_FORMAT_POLICY,
 };
 
 use crate::GIM_CREDENTIAL_TYPE;
@@ -22,27 +21,17 @@ pub const MAXIMUM_FORWARD_DISTANCE: u32 = 1000;
 /// just before a commit still decrypt after it was merged.
 pub const MAX_PAST_EPOCHS: usize = 3;
 
-/// Group context extension (private-use range) that marks a note-to-self
-/// group: a chat of one user's own devices. Its data is empty. It is set
-/// when the group is created and travels in every Welcome, so a device
-/// joining the group recognises it.
-pub const NOTE_EXTENSION_TYPE: u16 = 0xF002;
-
 /// Ciphertexts are padded to a multiple of this many bytes.
 pub const PADDING_SIZE: usize = 32;
 
 /// Leaf node capabilities of every KeyPackage and group leaf. Lists the
-/// LastResort extension so last-resort KeyPackages validate, the
-/// [`NOTE_EXTENSION_TYPE`] so every device can join a note group, and
+/// LastResort extension so last-resort KeyPackages validate, and
 /// [`GIM_CREDENTIAL_TYPE`] as the only credential type.
 pub(crate) fn leaf_capabilities() -> Capabilities {
     Capabilities::new(
         None,
         None,
-        Some(&[
-            ExtensionType::LastResort,
-            ExtensionType::Unknown(NOTE_EXTENSION_TYPE),
-        ]),
+        Some(&[ExtensionType::LastResort]),
         None,
         Some(&[CredentialType::Other(GIM_CREDENTIAL_TYPE)]),
     )
@@ -57,20 +46,8 @@ pub(crate) fn leaf_capabilities() -> Capabilities {
 ///   accepts both framings and rejects PublicMessage application messages;
 ///   [`crate::MlsEngine::process_message`] rejects PrivateMessage handshake
 ///   messages.
-/// - A note group carries the [`NOTE_EXTENSION_TYPE`] group context
-///   extension.
-pub(crate) fn group_create_config(capabilities: Capabilities, note: bool) -> MlsGroupCreateConfig {
-    let extensions = if note {
-        Extensions::single(Extension::Unknown(
-            NOTE_EXTENSION_TYPE,
-            UnknownExtension(Vec::new()),
-        ))
-        .expect("an unknown extension is valid in the group context")
-    } else {
-        Extensions::default()
-    };
+pub(crate) fn group_create_config(capabilities: Capabilities) -> MlsGroupCreateConfig {
     MlsGroupCreateConfig::builder()
-        .with_group_context_extensions(extensions)
         .ciphersuite(CIPHERSUITE)
         .capabilities(capabilities)
         .use_ratchet_tree_extension(true)
@@ -87,7 +64,7 @@ pub(crate) fn group_create_config(capabilities: Capabilities, note: bool) -> Mls
 /// Group configuration used when joining from a Welcome; identical runtime
 /// parameters to [`group_create_config`].
 pub(crate) fn group_join_config() -> MlsGroupJoinConfig {
-    group_create_config(leaf_capabilities(), false)
+    group_create_config(leaf_capabilities())
         .join_config()
         .clone()
 }
