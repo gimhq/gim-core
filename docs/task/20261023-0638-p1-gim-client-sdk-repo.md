@@ -41,3 +41,6 @@ Creating the gim-client-sdk repository
   `main` at `a0301c5`). Open: SDK CI still gates the integration job on
   `GIM_HUB_DEPLOY_KEY` although gim-hub is public; remove the SDK crates from
   gim-core; switch gim-ios and gim-android to SDK releases.
+- 2026-11-12: removed the SDK crates, bindings, CLI, integration tests,
+  build scripts and `docs/API.md` from gim-core; they live in
+  gim-client-sdk only.

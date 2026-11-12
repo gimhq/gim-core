@@ -726,7 +726,7 @@ Adds a new device to a user who already has a device. Implemented in
 
 #### Device link flow
 
-How gim-core (`gim-sdk`, exposed by gim-ffi) runs the flow against a hub.
+How gim-client-sdk (`gim-sdk`, exposed by gim-ffi) runs the flow against a hub.
 The bundle carries the root key seed, the new device's certificate and the
 DeviceList certifying it, and **no self-group Welcome**: a Welcome needs a
 KeyPackage of the new device, and the new device can only publish

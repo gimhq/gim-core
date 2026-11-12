@@ -8,16 +8,6 @@ members = [
     "crates/gim-base",
     "testing/gim-test",
 ]
-# Moved to gim-client-sdk; kept here only until they are deleted.
-exclude = [
-    "crates/gim-sdk",
-    "crates/gim-ui",
-    "crates/gim-sqlite",
-    "bindings/gim-ffi",
-    "apps/gim-cli",
-    "uniffi-bindgen",
-    "testing/gim-integration-testing",
-]
 
 [workspace.package]
 version = "0.1.0"
