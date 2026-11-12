@@ -79,6 +79,7 @@ fn pair() -> (Dev, Dev) {
     assert_eq!(joined.group_id, gid("g"));
     assert_eq!(joined.epoch, 1);
     assert_eq!(joined.members, vec![alice.me(), bob.me()]);
+    assert!(!joined.note);
     (alice, bob)
 }
 
@@ -200,6 +201,26 @@ fn create_and_delete_group() {
     e.delete_group(&alice.store, &gid("g")).unwrap();
     assert!(!e.has_group(&alice.store, &gid("g")).unwrap());
     assert!(e.group_ids(&alice.store).unwrap().is_empty());
+}
+
+#[test]
+fn note_marker_travels_in_welcomes() {
+    let (alice, bob, carol) = (dev("alice"), dev("bob"), dev("carol"));
+    let e = &alice.engine;
+    e.create_note_group(&alice.store, &gid("n")).unwrap();
+    assert!(e.is_note_group(&alice.store, &gid("n")).unwrap());
+    let out = alice.add("n", &bob.kps(1));
+    alice.merge("n");
+    assert!(bob.join(&out.welcome.unwrap()).unwrap().note);
+    // The marker outlives later commits and reaches later joiners.
+    let out = alice.add("n", &carol.kps(1));
+    alice.merge("n");
+    bob.process("n", &out.commit).unwrap();
+    assert!(bob.engine.is_note_group(&bob.store, &gid("n")).unwrap());
+    assert!(carol.join(&out.welcome.unwrap()).unwrap().note);
+
+    alice.create("g");
+    assert!(!e.is_note_group(&alice.store, &gid("g")).unwrap());
 }
 
 #[test]

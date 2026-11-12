@@ -61,6 +61,24 @@ travel in the envelope's media map, never to the hub. `encrypt_media` /
 decrypting); `MediaEncryptor` / `MediaDecryptor` stream over
 `std::io::Read`/`Write`.
 
+## Users and chats
+
+A user is identified only by `user_id` (derived from the root key). There
+are no usernames (handles): hubs neither store nor look up users by name;
+users find each other by `user_id` (QR code or pasted id).
+
+**Note to self** (`ChatKind::Note`): a chat whose members are only the own
+user's devices, synced across them. Its MLS group carries the group context
+extension `gim_crypto::NOTE_EXTENSION_TYPE` (`0xF002`, empty data), set at
+creation (`BaseClient::create_chat(.., ChatKind::Note, ..)`, which calls
+`MlsEngine::create_note_group`) and listed in every leaf's capabilities. A
+device joining from a Welcome reads it (`GroupJoined::note`) and stores the
+chat as `ChatKind::Note`; a Welcome of a note group with another user's
+device is refused, and a note chat that gains another user's device becomes
+a `ChatKind::Group`. The hub does not know the kind: it sees a group of kind
+`group` with one user's devices. The self group (sync of the own devices'
+state) is separate and never a note chat.
+
 ## CI
 
 `.github/workflows/ci.yml`:

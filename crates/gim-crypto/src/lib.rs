@@ -17,7 +17,8 @@ mod memory_store;
 mod store;
 
 pub use config::{
-    CIPHERSUITE, MAXIMUM_FORWARD_DISTANCE, MAX_PAST_EPOCHS, OUT_OF_ORDER_TOLERANCE, PADDING_SIZE,
+    CIPHERSUITE, MAXIMUM_FORWARD_DISTANCE, MAX_PAST_EPOCHS, NOTE_EXTENSION_TYPE,
+    OUT_OF_ORDER_TOLERANCE, PADDING_SIZE,
 };
 pub use credential::{
     CredentialError, DeviceListLookup, GimCredential, NoDeviceLists, GIM_CREDENTIAL_TYPE,

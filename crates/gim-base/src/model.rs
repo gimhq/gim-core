@@ -10,6 +10,9 @@ use gim_proto::envelope::{Envelope, MediaInfo, ReceiptKind};
 pub enum ChatKind {
     Direct,
     Group,
+    /// Note to self: a chat of the own user's devices only, recognised by
+    /// the MLS note marker of its group (`gim_crypto::NOTE_EXTENSION_TYPE`).
+    Note,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

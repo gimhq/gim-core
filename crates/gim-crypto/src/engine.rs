@@ -10,7 +10,9 @@ use openmls_traits::signatures::{Signer, SignerError};
 use openmls_traits::storage::{StorageProvider, CURRENT_VERSION};
 use openmls_traits::OpenMlsProvider;
 
-use crate::config::{group_create_config, group_join_config, leaf_capabilities, CIPHERSUITE};
+use crate::config::{
+    group_create_config, group_join_config, leaf_capabilities, CIPHERSUITE, NOTE_EXTENSION_TYPE,
+};
 use crate::credential::{self, DeviceListLookup, GimCredential, NoDeviceLists};
 use crate::{CryptoError, CryptoStore, StoredIdentity, GIM_CREDENTIAL_TYPE};
 
@@ -37,6 +39,8 @@ pub struct GroupJoined {
     pub group_id: GroupId,
     pub epoch: u64,
     pub members: Vec<DeviceRef>,
+    /// The group is a note group (see [`MlsEngine::create_note_group`]).
+    pub note: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,6 +280,22 @@ impl MlsEngine {
 
     /// Creates a group whose MLS GroupId is the UTF-8 bytes of `group_id`.
     pub fn create_group(&self, store: &impl CryptoStore, group_id: &GroupId) -> Result<()> {
+        self.create(store, group_id, false)
+    }
+
+    /// Creates a note group: a [`MlsEngine::create_group`] whose group
+    /// context carries the [`NOTE_EXTENSION_TYPE`] marker, which every
+    /// device joining it sees in its Welcome ([`GroupJoined::note`]).
+    pub fn create_note_group(&self, store: &impl CryptoStore, group_id: &GroupId) -> Result<()> {
+        self.create(store, group_id, true)
+    }
+
+    /// Whether the group carries the note marker.
+    pub fn is_note_group(&self, store: &impl CryptoStore, group_id: &GroupId) -> Result<bool> {
+        Ok(is_note(load_group(store, group_id)?.extensions()))
+    }
+
+    fn create(&self, store: &impl CryptoStore, group_id: &GroupId, note: bool) -> Result<()> {
         let account = self.account(store)?;
         if group_ids(store)?.contains(group_id) {
             return Err(CryptoError::invalid(format!(
@@ -285,7 +305,7 @@ impl MlsEngine {
         MlsGroup::new_with_group_id(
             &self.provider(store),
             &account.signer,
-            &group_create_config(account.capabilities()),
+            &group_create_config(account.capabilities(), note),
             mls_group_id(group_id),
             account.credential_with_key(),
         )
@@ -540,6 +560,7 @@ impl MlsEngine {
             group_id,
             epoch: group.epoch().as_u64(),
             members: members_of(&group)?,
+            note: is_note(group.extensions()),
         })
     }
 
@@ -814,6 +835,10 @@ fn group_ids(store: &impl CryptoStore) -> Result<BTreeSet<GroupId>> {
 
 fn mls_group_id(group_id: &GroupId) -> MlsGroupId {
     MlsGroupId::from_slice(group_id.as_str().as_bytes())
+}
+
+fn is_note(extensions: &Extensions<GroupContext>) -> bool {
+    extensions.unknown(NOTE_EXTENSION_TYPE).is_some()
 }
 
 fn load_group(store: &impl CryptoStore, group_id: &GroupId) -> Result<MlsGroup> {
