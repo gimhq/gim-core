@@ -967,193 +967,6 @@
         ]
       }
     },
-    "/v2/handles/{handle}": {
-      "get": {
-        "tags": [
-          "handles"
-        ],
-        "summary": "Look up a handle",
-        "operationId": "get_handle",
-        "parameters": [
-          {
-            "name": "handle",
-            "in": "path",
-            "description": "Handle: 3-32 chars of a-z, 0-9, _",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[a-z0-9_]{3,32}$"
-            },
-            "example": "alice"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Directory entry",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Handle"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing or invalid bearer token (`unauthorized`)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found (`not_found`)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      },
-      "put": {
-        "tags": [
-          "handles"
-        ],
-        "summary": "Claim a handle for the calling user",
-        "description": "Optional per-hub directory mapping a handle to a user ID. Handles are never used as federation (DHT) keys. A user holds at most one handle per hub; claiming a new one releases the previous one. Re-claiming the caller's own handle is a no-op.",
-        "operationId": "put_handle",
-        "parameters": [
-          {
-            "name": "handle",
-            "in": "path",
-            "description": "Handle: 3-32 chars of a-z, 0-9, _",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[a-z0-9_]{3,32}$"
-            },
-            "example": "alice"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Handle claimed",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Handle"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Validation failed (`validation_failed`)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing or invalid bearer token (`unauthorized`)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Handle belongs to another user (`handle_taken`)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      },
-      "delete": {
-        "tags": [
-          "handles"
-        ],
-        "summary": "Release a handle",
-        "operationId": "delete_handle",
-        "parameters": [
-          {
-            "name": "handle",
-            "in": "path",
-            "description": "Handle: 3-32 chars of a-z, 0-9, _",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[a-z0-9_]{3,32}$"
-            },
-            "example": "alice"
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Handle released"
-          },
-          "401": {
-            "description": "Missing or invalid bearer token (`unauthorized`)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Handle belongs to another user (`forbidden`)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found (`not_found`)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
     "/v2/hub": {
       "get": {
         "tags": [
@@ -1704,7 +1517,7 @@
           "identity"
         ],
         "summary": "Get a user",
-        "description": "No authentication (a bearer token, if sent, is ignored); returns only public data: the self-certifying DeviceList and the handle. Rate limited per client IP and per `user_id`, shared with `GET /v2/users/{user_id}/device-list`. For a user of another hub, the DeviceList comes from the cache of remote DeviceLists (fetched from the user's hub when missing or stale) and `handle` is absent.",
+        "description": "No authentication (a bearer token, if sent, is ignored); returns only public data: the self-certifying DeviceList. Rate limited per client IP and per `user_id`, shared with `GET /v2/users/{user_id}/device-list`. For a user of another hub, the DeviceList comes from the cache of remote DeviceLists (fetched from the user's hub when missing or stale).",
         "operationId": "get_user",
         "parameters": [
           {
@@ -2941,27 +2754,6 @@
           }
         }
       },
-      "Handle": {
-        "type": "object",
-        "description": "A handle directory entry.",
-        "required": [
-          "handle",
-          "user_id"
-        ],
-        "properties": {
-          "handle": {
-            "type": "string",
-            "description": "Handle: 3-32 chars of a-z, 0-9, _.",
-            "example": "alice",
-            "pattern": "^[a-z0-9_]{3,32}$"
-          },
-          "user_id": {
-            "type": "string",
-            "description": "Opaque user ID (format owned by gim-core).",
-            "example": "uciqgytfj5l477ei2pprxmxv2dgxqygyfkj4b6ho7onbwmqrwamhwaaa"
-          }
-        }
-      },
       "Health": {
         "type": "object",
         "description": "Liveness probe result.",
@@ -3364,15 +3156,6 @@
             "type": "string",
             "description": "Opaque device ID (format owned by gim-core).",
             "example": "d54ta5gvdyzz26janc6rgmbeagy"
-          },
-          "handle": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Handle claimed in this hub's directory, if any.",
-            "example": "alice",
-            "pattern": "^[a-z0-9_]{3,32}$"
           },
           "user_id": {
             "type": "string",
@@ -3928,15 +3711,6 @@
             "description": "gim-core DeviceList CBOR, base64.",
             "contentEncoding": "base64"
           },
-          "handle": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Handle claimed in this hub's directory, if any.",
-            "example": "alice",
-            "pattern": "^[a-z0-9_]{3,32}$"
-          },
           "user_id": {
             "type": "string",
             "description": "Opaque user ID (format owned by gim-core).",
@@ -4046,10 +3820,6 @@
     {
       "name": "identity",
       "description": "Users and their self-certifying DeviceLists"
-    },
-    {
-      "name": "handles",
-      "description": "Optional per-hub handle directory"
     },
     {
       "name": "recovery",

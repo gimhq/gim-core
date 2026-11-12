@@ -1098,7 +1098,6 @@ impl BaseClient {
         }
         let mut user = txn.user(user_id)?.unwrap_or_else(|| UserInfo {
             user_id: user_id.clone(),
-            handle: String::new(),
             display_name: String::new(),
             avatar: None,
         });
@@ -1149,7 +1148,7 @@ impl BaseClient {
     }
 
     /// Adds a contact shared by another own device to the user directory
-    /// cache; known names and handles are kept.
+    /// cache; a known name is kept.
     fn apply_contact<T: StoreTxn>(&self, txn: &mut T, contact: Contact) -> Result<()> {
         if contact.user_id == self.own.user_id {
             return Ok(());
@@ -1157,13 +1156,9 @@ impl BaseClient {
         let stored = txn.user(&contact.user_id)?;
         let mut user = stored.clone().unwrap_or_else(|| UserInfo {
             user_id: contact.user_id.clone(),
-            handle: String::new(),
             display_name: String::new(),
             avatar: None,
         });
-        if user.handle.is_empty() {
-            user.handle = contact.handle.unwrap_or_default();
-        }
         if user.display_name.is_empty() {
             user.display_name = contact.display_name.unwrap_or_default();
         }

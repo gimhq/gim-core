@@ -138,7 +138,6 @@ propagation ops of §3.2, §4.2-§4.4.
 | `hosting_records` row | yes, identical record | client `PUT` to every listed hub; `NotifyHostingRecord` (§4.2) |
 | `push_registrations` | yes | client registers on each hub (§8) |
 | `recovery_backups` | yes | client `PUT` on each hub (it is the same encrypted blob) |
-| `handles` | per hub, optional | handles are a per-hub directory (api-v2); not propagated |
 
 ### 3.2 DeviceList propagation to co-hosts (change to fed §5.1)
 
@@ -442,14 +441,14 @@ Then, during the grace period `GIM_HUB_UNHOSTED_GRACE_HOURS` (default 168, the o
 |---|---|
 | sign-in, `GET` endpoints, `GET /v2/stream`, `GET /v2/events`, `GET /v2/welcomes/pending`, `POST /v2/welcomes/{gid}/ack` | served (devices drain their cursor) |
 | `PUT .../device-list`, `PUT .../hosting-record` | accepted (revocations still land; a record that lists this hub again clears `removed_at` and ends the removal) |
-| every other write (`POST /v2/groups`, commits, messages, KeyPackage upload and claim, blob upload, link bundles, handles, recovery backup, push registration) | 403 `hosting_record_required`, message `user is not hosted on this hub` |
+| every other write (`POST /v2/groups`, commits, messages, KeyPackage upload and claim, blob upload, link bundles, recovery backup, push registration) | 403 `hosting_record_required`, message `user is not hosted on this hub` |
 
 No push is sent for a removed user (§8). Federation: the hub sends no request on U's behalf
 (fed §3.7: only hosted users) and answers `ClaimKeyPackage` for U with `NOT_FOUND`;
 `GetDeviceList` / `GetHostingRecord` for U are still answered until the purge.
 
 Purge, by the hourly retention task when `removed_at + grace <= now`: delete the `users` row
-(cascading `devices`, `sessions`, `key_packages`, `handles`, `recovery_backups`,
+(cascading `devices`, `sessions`, `key_packages`, `recovery_backups`,
 `push_registrations`), U's `events` and `pending_welcomes`, and U's `remote_kp_claims` rows as
 requester. Kept: the `hosting_records` row as a tombstone (it keeps ordering future uploads, so an
 old record that still lists this hub cannot be replayed to make it host U again), and owned groups

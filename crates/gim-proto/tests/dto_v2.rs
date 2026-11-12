@@ -145,12 +145,12 @@ fn cases() -> Vec<Case> {
         ),
         case::<Me>(
             "Me",
-            json!({"user_id": USER, "device_id": DEVICE, "handle": "alice"}),
+            json!({"user_id": USER, "device_id": DEVICE}),
             json!({"user_id": USER, "device_id": DEVICE}),
         ),
         case::<User>(
             "User",
-            json!({"user_id": USER, "device_list": b(), "handle": "alice"}),
+            json!({"user_id": USER, "device_list": b()}),
             json!({"user_id": USER, "device_list": b()}),
         ),
         case::<DeviceList>(
@@ -162,11 +162,6 @@ fn cases() -> Vec<Case> {
             "PutDeviceListRequest",
             json!({"device_list": b()}),
             json!({"device_list": b()}),
-        ),
-        case::<Handle>(
-            "Handle",
-            json!({"handle": "alice", "user_id": USER}),
-            json!({"handle": "alice", "user_id": USER}),
         ),
         case::<PutRecoveryBackupRequest>(
             "PutRecoveryBackupRequest",
@@ -591,7 +586,7 @@ fn event_types_match() {
     }
 }
 
-/// Every route in openapi.json is covered by `paths` (35 operations).
+/// Every route in openapi.json is covered by `paths` (32 operations).
 #[test]
 fn paths_cover_openapi() {
     let spec = spec();
@@ -602,7 +597,7 @@ fn paths_cover_openapi() {
         .values()
         .map(|item| item.as_object().unwrap().len())
         .sum();
-    assert_eq!(operations, 35);
+    assert_eq!(operations, 32);
 
     // Builders called with the template names reproduce the spec's paths
     // once the escaped braces are restored.
@@ -612,7 +607,6 @@ fn paths_cover_openapi() {
         paths::user_recovery_backup("{user_id}"),
         paths::user_hosting_entry("{user_id}"),
         paths::user_hosting_record("{user_id}"),
-        paths::handle("{handle}"),
         paths::link_bundle("{link_id}"),
         paths::group("{gid}"),
         paths::group_commits("{gid}"),
@@ -759,7 +753,6 @@ fn path_parameters_are_percent_encoded() {
         paths::user_hosting_entry("a/b"),
         "/v2/users/a%2Fb/hosting-entry"
     );
-    assert_eq!(paths::handle("a b?#%"), "/v2/handles/a%20b%3F%23%25");
     assert_eq!(paths::blob("x-._~"), "/v2/blobs/x-._~");
     assert_eq!(paths::link_bundle("é"), "/v2/link-bundles/%C3%A9");
 }
@@ -796,11 +789,6 @@ fn explicit_nulls_are_accepted() {
     .unwrap();
     assert_eq!(commit.welcome, None);
     assert_eq!(commit.welcome_recipients, None);
-
-    let me: Me =
-        serde_json::from_value(json!({"user_id": USER, "device_id": DEVICE, "handle": null}))
-            .unwrap();
-    assert_eq!(me.handle, None);
 
     let target: ClaimTarget =
         serde_json::from_value(json!({"user_id": USER, "device_id": null})).unwrap();

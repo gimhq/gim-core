@@ -9,7 +9,6 @@
 //!   longer active, and removes nothing from groups (members commit that);
 //! - devices sign in with a single-use challenge and get a bearer token
 //!   while they are active in their user's list;
-//! - handles are an optional directory (one handle per user);
 //! - KeyPackages are uploaded per device; a claim for a user takes one per
 //!   active device: a one-time package, else the never-consumed last-resort
 //!   one, and pushes `keypackages.low` once fewer than
@@ -113,7 +112,6 @@ pub struct GroupInfo {
 pub struct User {
     pub user_id: UserId,
     pub device_list: Vec<u8>,
-    pub handle: Option<String>,
     /// Not part of hub API v2: a test-only profile name, see
     /// [`FakeDeliveryService::set_display_name`].
     pub display_name: Option<String>,
@@ -180,8 +178,6 @@ pub enum DeliveryError {
     },
     #[error("409 stale_device_list")]
     StaleDeviceList,
-    #[error("409 handle {0} is taken")]
-    HandleTaken(String),
     #[error("409 link id {0} is in use")]
     LinkIdTaken(String),
     #[error("400 validation_failed: {0}")]
@@ -245,7 +241,6 @@ struct KeyPackages {
 #[derive(Debug, Default)]
 struct State {
     users: HashMap<UserId, UserState>,
-    handles: BTreeMap<String, UserId>,
     tokens: HashMap<String, DeviceRef>,
     /// Issued, unredeemed challenges and their devices.
     challenges: HashMap<Vec<u8>, DeviceRef>,
@@ -379,7 +374,6 @@ impl FakeDeliveryService {
         Some(User {
             user_id: user_id.clone(),
             device_list: user.device_list.clone(),
-            handle: state.handle_of(user_id),
             display_name: user.display_name.clone(),
         })
     }
@@ -431,29 +425,6 @@ impl FakeDeliveryService {
     /// Drops every session of `device` (as after their expiry).
     pub fn expire_sessions(&self, device: &DeviceRef) {
         self.lock().tokens.retain(|_, d| d != device);
-    }
-
-    pub fn claim_handle(&self, user_id: &UserId, handle: &str) -> Result<(), DeliveryError> {
-        let mut state = self.lock();
-        match state.handles.get(handle) {
-            Some(owner) if owner == user_id => return Ok(()),
-            Some(_) => return Err(DeliveryError::HandleTaken(handle.to_string())),
-            None => {}
-        }
-        state.handles.retain(|_, owner| owner != user_id);
-        state.handles.insert(handle.to_string(), user_id.clone());
-        Ok(())
-    }
-
-    pub fn release_handle(&self, user_id: &UserId, handle: &str) {
-        let mut state = self.lock();
-        if state.handles.get(handle) == Some(user_id) {
-            state.handles.remove(handle);
-        }
-    }
-
-    pub fn find_handle(&self, handle: &str) -> Option<UserId> {
-        self.lock().handles.get(handle).cloned()
     }
 
     pub fn put_recovery_backup(
@@ -963,13 +934,6 @@ impl State {
             .is_some_and(|u| u.active.contains(&device.device_id))
     }
 
-    fn handle_of(&self, user_id: &UserId) -> Option<String> {
-        self.handles
-            .iter()
-            .find(|(_, owner)| *owner == user_id)
-            .map(|(handle, _)| handle.clone())
-    }
-
     fn claim(&mut self, device: &DeviceRef) -> Option<Claimed> {
         let stored = self.key_packages.get_mut(device)?;
         if let Some(key_package) = stored.one_time.pop_front() {
@@ -1206,14 +1170,6 @@ mod tests {
             |e| matches!(e, Event::DeviceListUpdated { device_list, .. } if device_list == b"a2")
         ));
         assert_eq!(ds.devices(&user_id).unwrap(), vec![a[0].clone()]);
-
-        ds.claim_handle(&user_id, "alice").unwrap();
-        assert_eq!(ds.find_handle("alice"), Some(user_id.clone()));
-        let other = user(&ds, "b", &["d1"])[0].user_id.clone();
-        assert!(ds.claim_handle(&other, "alice").is_err());
-        assert_eq!(ds.user(&user_id).unwrap().handle.as_deref(), Some("alice"));
-        ds.release_handle(&user_id, "alice");
-        assert_eq!(ds.find_handle("alice"), None);
 
         ds.issue_challenge(b"c".to_vec(), &a[0]);
         assert!(ds.redeem_challenge(b"c", &a[0]));

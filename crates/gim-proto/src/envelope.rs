@@ -38,8 +38,7 @@
 //!
 //! The `self.*` contents travel only in the self group, the MLS group of
 //! one user's own devices, and are ignored from any other user. A contact
-//! map has `id` user id (text) and optional `h` handle and `n` display name
-//! (text). A hub map has `id` hub id (text), `u` client API base URL
+//! map has `id` user id (text) and optional `n` display name (text). A hub map has `id` hub id (text), `u` client API base URL
 //! (text) and `p` priority in the hosting record (uint, 0-255).
 //! `self.privacy` and `self.chat_settings` carry the whole state; the one
 //! with the latest envelope `ts` wins.
@@ -181,8 +180,6 @@ pub struct HubLocation {
 pub struct Contact {
     #[serde(rename = "id")]
     pub user_id: UserId,
-    #[serde(default, rename = "h", skip_serializing_if = "Option::is_none")]
-    pub handle: Option<String>,
     #[serde(default, rename = "n", skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
 }

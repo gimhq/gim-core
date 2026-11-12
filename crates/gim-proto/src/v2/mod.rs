@@ -17,7 +17,7 @@
 //! |---|---|
 //! | `Health`, `HealthStatus`, `HubInfo` | [`Health`], [`HealthStatus`], [`HubInfo`] |
 //! | `AuthChallengeRequest`, `AuthChallenge`, `CreateSessionRequest`, `Session` | [`AuthChallengeRequest`], [`AuthChallenge`], [`CreateSessionRequest`], [`Session`] |
-//! | `Me`, `User`, `DeviceList`, `PutDeviceListRequest`, `Handle` | [`Me`], [`User`], [`DeviceList`], [`PutDeviceListRequest`], [`Handle`] |
+//! | `Me`, `User`, `DeviceList`, `PutDeviceListRequest` | [`Me`], [`User`], [`DeviceList`], [`PutDeviceListRequest`] |
 //! | `PutRecoveryBackupRequest`, `RecoveryBackup` | [`PutRecoveryBackupRequest`], [`RecoveryBackup`] |
 //! | `CreateLinkBundleRequest`, `LinkBundleCreated`, `LinkBundle` | [`CreateLinkBundleRequest`], [`LinkBundleCreated`], [`LinkBundle`] |
 //! | `CreateHostingEntryRequest`, `HostingEntry`, `PutHostingRecordRequest`, `HostingRecord`, `HostingRecordHub` | [`CreateHostingEntryRequest`], [`HostingEntry`], [`PutHostingRecordRequest`], [`HostingRecord`], [`HostingRecordHub`] |
@@ -80,6 +80,6 @@ pub use service::{
     USER_SUSPENDED,
 };
 pub use users::{
-    CreateLinkBundleRequest, DeviceList, Handle, LinkBundle, LinkBundleCreated, LinkBundleQuery,
-    Me, PutDeviceListRequest, PutRecoveryBackupRequest, RecoveryBackup, User,
+    CreateLinkBundleRequest, DeviceList, LinkBundle, LinkBundleCreated, LinkBundleQuery, Me,
+    PutDeviceListRequest, PutRecoveryBackupRequest, RecoveryBackup, User,
 };

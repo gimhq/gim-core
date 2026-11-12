@@ -92,12 +92,10 @@ fn all_contents() -> Vec<Content> {
             contacts: vec![
                 Contact {
                     user_id: UserId::new("ubob").unwrap(),
-                    handle: Some("bob".into()),
                     display_name: Some("Bob".into()),
                 },
                 Contact {
                     user_id: UserId::new("ucarol").unwrap(),
-                    handle: None,
                     display_name: None,
                 },
             ],
@@ -468,7 +466,6 @@ fn profile_and_self_group_tags() {
     let contacts = content_map(&envelope(Content::SelfContacts {
         contacts: vec![Contact {
             user_id: UserId::new("ubob").unwrap(),
-            handle: None,
             display_name: None,
         }],
     }));

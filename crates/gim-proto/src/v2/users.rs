@@ -5,9 +5,6 @@ use serde::{Deserialize, Serialize};
 pub struct Me {
     pub user_id: String,
     pub device_id: String,
-    /// Handle claimed in this hub's directory, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub handle: Option<String>,
 }
 
 /// `User`: `GET /v2/users/{user_id}`.
@@ -17,8 +14,6 @@ pub struct User {
     /// Signed gim-core DeviceList CBOR.
     #[serde(with = "super::base64::bytes")]
     pub device_list: Vec<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub handle: Option<String>,
 }
 
 /// `DeviceList`: `GET`/`PUT /v2/users/{user_id}/device-list` response and
@@ -37,14 +32,6 @@ pub struct PutDeviceListRequest {
     /// Signed gim-core DeviceList CBOR.
     #[serde(with = "super::base64::bytes")]
     pub device_list: Vec<u8>,
-}
-
-/// `Handle`: `GET`/`PUT /v2/handles/{handle}` (`PUT` has no body).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Handle {
-    /// 3-32 chars of `a-z`, `0-9`, `_`.
-    pub handle: String,
-    pub user_id: String,
 }
 
 /// `PutRecoveryBackupRequest`: `PUT /v2/users/{user_id}/recovery-backup`.

@@ -420,7 +420,6 @@ pub struct MembershipEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserInfo {
     pub user_id: UserId,
-    pub handle: String,
     pub display_name: String,
     /// Profile photo announced by the user.
     pub avatar: Option<MediaInfo>,

@@ -23,7 +23,8 @@ by gim-core.
 ## Auth flow
 
 The hub authenticates a device by a signature over a challenge, checked against the device's
-DeviceCert in the user's stored DeviceList. There is no handle-only registration.
+DeviceCert in the user's stored DeviceList. A user is identified only by `user_id`: there are no
+usernames (handles) and no lookup of users by name.
 
 1. Create the identity locally (gim-core), then upload the signed DeviceList:
    `PUT /v2/users/{user_id}/device-list {device_list}`. No token is needed: the list is
@@ -141,9 +142,8 @@ not yet in the DeviceList, so it cannot sign in, but it must read the current li
 next `seq`. This exposes nothing new: DeviceLists are self-certifying and already uploaded without
 a token, and `user_id` is an unguessable hash (the same exposure as hosting records in the DHT).
 
-- They return only public data: `{user_id, device_list}` and, for `GET /v2/users/{user_id}`, the
-  optional `handle` of this hub's directory. No presence, last-seen time, device activity, group
-  or session information.
+- They return only public data: `{user_id, device_list}`. No presence, last-seen time, device
+  activity, group or session information.
 - Remote users resolve as described under *Remote users and cross-hub claims* (cached copy, fetch
   from the user's hub, or 503 `peer_unavailable` with `Retry-After`).
 - Both endpoints share token-bucket limits, checked per client IP first (before any lookup or
@@ -323,7 +323,7 @@ own hub:
   hub when it is not cached or older than `GIM_HUB_DEVICE_LIST_CACHE_HOURS` (default 24). A stale
   copy is served while the user's hub is unreachable; without any copy the answer is 503
   `peer_unavailable` (with `Retry-After` seconds), and 404 `not_found` if no hosting record of the
-  user is known. `handle` is absent for remote users (handles are per-hub).
+  user is known.
 - When a hosted user's DeviceList is replaced, the hub pushes it to the hubs sharing groups with
   the user; those hubs emit `device_list.updated` to their users in those groups, as for a local
   update.
@@ -473,9 +473,9 @@ test-only `GET /v2/debug/push-log` (off by default): [`push.md`](push.md).
 |---|---|---|
 | Prefix | `/v1` | `/v2` |
 | Sign-in | `POST /v1/devices {handle, display_name}` returns a token | DeviceList upload + `POST /v2/auth/challenge` + `POST /v2/auth/session` |
-| Users | handle and display name required | `user_id` derived from the root key; `GET /v2/users/{user_id}` returns the DeviceList and an optional handle; no display name on the hub |
+| Users | handle and display name required | `user_id` derived from the root key; `GET /v2/users/{user_id}` returns the DeviceList; no handle or display name on the hub |
 | Devices | `GET /v1/users/{user_id}/devices` | `GET`/`PUT /v2/users/{user_id}/device-list` (signed gim-core DeviceList) |
-| Handles | lookup `GET /v1/users?handle=` | optional directory: `PUT`/`DELETE`/`GET /v2/handles/{handle}`; never a federation key |
+| Handles | lookup `GET /v1/users?handle=` | removed: users are found by `user_id` only (QR code or pasted id) |
 | New | - | recovery backups, link-bundle relay, push registration (`PUT`/`DELETE /v2/push/registration`) |
 | KeyPackage upload | `last_resort` is a separate package field | `last_resort: true` flag; the request then holds exactly one package |
 | KeyPackage claim | `{device_ids}` | `{targets: [{user_id, device_id?}]}`, one package per active device; results carry `user_id` |
@@ -500,7 +500,7 @@ ranges.
 ## Status
 
 Implemented: `/healthz`, `/v2/hub`, sign-in (`/v2/auth/*`), DeviceLists and users (`/v2/users/*`, `/v2/me`),
-recovery backups, device linking (`/v2/link-bundles*`), handles, KeyPackages, groups and commits,
+recovery backups, device linking (`/v2/link-bundles*`), KeyPackages, groups and commits,
 messages, pending Welcomes, events (long-poll and `/v2/stream`), blobs, hosting records,
 federation (remote users and KeyPackage claims, groups across hubs), multi-homing (H4,
 [`multihoming.md`](multihoming.md): fan-out to every listed hub, record propagation and

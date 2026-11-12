@@ -91,11 +91,6 @@ pub fn user_hosting_record(user_id: &str) -> String {
     format!("/v2/users/{}/hosting-record", segment(user_id))
 }
 
-/// `GET`/`PUT` (no body) → [`Handle`](super::Handle); `DELETE` → 204.
-pub fn handle(handle: &str) -> String {
-    format!("/v2/handles/{}", segment(handle))
-}
-
 /// `GET ?`[`LinkBundleQuery`](super::LinkBundleQuery) (no token) →
 /// [`LinkBundle`](super::LinkBundle).
 pub fn link_bundle(link_id: &str) -> String {
